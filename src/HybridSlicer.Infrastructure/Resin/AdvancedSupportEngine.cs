@@ -460,8 +460,13 @@ public static class AdvancedSupportEngine
             }
 
             var support = BuildSupport($"sup-{++idCounter}", config.SupportType, preset, center, normal, supportBaseZ);
-            supports.Add(support);
-            placed.Add((center, supportBaseZ));
+
+            // Collision check: verify the shaft doesn't pass through the mesh
+            if (!ShaftCollidesWithMesh(mesh, support))
+            {
+                supports.Add(support);
+                placed.Add((center, supportBaseZ));
+            }
         }
 
         // Tree merging (if tree type)
@@ -732,7 +737,54 @@ public static class AdvancedSupportEngine
         };
     }
 
-    // ── Intermediate surface finder ────────────────────────────────────────
+    // ── Shaft collision check ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Check if a support's vertical shaft passes through the mesh interior.
+    /// Uses ray casting: odd number of intersections above a point = inside mesh.
+    /// </summary>
+    private static bool ShaftCollidesWithMesh(StlMesh mesh, AdvancedSupport support)
+    {
+        float shaftTop = support.ContactZ - 3.0f; // skip pinhead area
+        float shaftBot = support.BaseZ + 1.0f;
+        if (shaftTop <= shaftBot) return false;
+
+        float sx = support.BaseX, sy = support.BaseY;
+        int sampleCount = Math.Min(8, Math.Max(2, (int)((shaftTop - shaftBot) / 15)));
+
+        for (int si = 0; si <= sampleCount; si++)
+        {
+            float sampleZ = shaftTop - (shaftTop - shaftBot) * si / Math.Max(1, sampleCount);
+            int intersections = 0;
+
+            for (int t = 0; t < mesh.TriangleCount; t++)
+            {
+                var v0 = mesh.Vertices[t * 3];
+                var v1 = mesh.Vertices[t * 3 + 1];
+                var v2 = mesh.Vertices[t * 3 + 2];
+
+                float triMinZ = Math.Min(v0.Z, Math.Min(v1.Z, v2.Z));
+                float triMaxZ = Math.Max(v0.Z, Math.Max(v1.Z, v2.Z));
+                if (sampleZ < triMinZ || sampleZ > triMaxZ) continue;
+
+                float denom = (v1.Y - v2.Y) * (v0.X - v2.X) + (v2.X - v1.X) * (v0.Y - v2.Y);
+                if (MathF.Abs(denom) < 1e-8f) continue;
+                float u = ((v1.Y - v2.Y) * (sx - v2.X) + (v2.X - v1.X) * (sy - v2.Y)) / denom;
+                if (u < -0.01f || u > 1.01f) continue;
+                float v = ((v2.Y - v0.Y) * (sx - v2.X) + (v0.X - v2.X) * (sy - v2.Y)) / denom;
+                if (v < -0.01f || u + v > 1.01f) continue;
+
+                float hitZ = v0.Z * u + v1.Z * v + v2.Z * (1 - u - v);
+                if (hitZ > sampleZ) intersections++;
+            }
+
+            if (intersections % 2 == 1) return true; // inside mesh
+        }
+
+        return false;
+    }
+
+    // ── Intermediate surface finder ──────────────────────────────────────────────
 
     /// <summary>
     /// Cast a ray straight down from the overhang point and find the first surface
@@ -1032,5 +1084,219 @@ public static class AdvancedSupportEngine
         }
 
         return braces;
+    }
+
+    // ── Support Validation ──────────────────────────────────────────────────
+
+    public sealed record ValidationIssue
+    {
+        public required string SupportId { get; init; }
+        public required string Category { get; init; } // "tip-detached" | "overhang-unsupported" | "collision"
+        public required string Description { get; init; }
+        public float X { get; init; }
+        public float Y { get; init; }
+        public float Z { get; init; }
+    }
+
+    public sealed record ValidationResult
+    {
+        public int TotalSupports { get; init; }
+        public int TotalOverhangs { get; init; }
+        public int TipsTouchingModel { get; init; }
+        public int TipsDetached { get; init; }
+        public int OverhangsSupported { get; init; }
+        public int OverhangsUnsupported { get; init; }
+        public int CollisionsDetected { get; init; }
+        public List<ValidationIssue> Issues { get; init; } = [];
+        public long ElapsedMs { get; init; }
+    }
+
+    /// <summary>
+    /// Validate generated supports against the mesh:
+    /// 1. Each support tip must touch the model surface (within tolerance)
+    /// 2. All overhang faces must be covered by at least one support
+    /// 3. No support shaft should pass through the mesh interior
+    /// </summary>
+    public static ValidationResult Validate(StlMesh mesh, AdvancedSupportResult result, AdvancedSupportConfig config)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var issues = new List<ValidationIssue>();
+
+        // Center mesh the same way Generate() does
+        float meshW = mesh.Max.X - mesh.Min.X;
+        float meshD = mesh.Max.Y - mesh.Min.Y;
+        float offX = -(mesh.Min.X + meshW / 2);
+        float offY = -(mesh.Min.Y + meshD / 2);
+        float offZ = -mesh.Min.Z;
+        mesh = mesh.Transform(new Vector3(offX, offY, offZ), 1.0f);
+
+        // ── 1. Tip contact validation ────────────────────────────────────────
+        // For each support, check if the contact point is within tolerance of any triangle
+        float tipTolerance = 2.0f; // mm — allow some slack for pinhead geometry
+        int tipsTouching = 0, tipsDetached = 0;
+
+        var nonTrunkSupports = result.Supports
+            .Where(s => s.Type != "tree-trunk" && s.Type != "tree-subtruck").ToList();
+
+        foreach (var sup in nonTrunkSupports)
+        {
+            float minDist = float.MaxValue;
+            for (int t = 0; t < mesh.TriangleCount; t++)
+            {
+                var v0 = mesh.Vertices[t * 3];
+                var v1 = mesh.Vertices[t * 3 + 1];
+                var v2 = mesh.Vertices[t * 3 + 2];
+                var center = (v0 + v1 + v2) / 3f;
+                float dist = Vector3.Distance(new Vector3(sup.ContactX, sup.ContactY, sup.ContactZ), center);
+                if (dist < minDist) minDist = dist;
+                if (dist < tipTolerance) break; // close enough, early exit
+            }
+
+            if (minDist <= tipTolerance)
+                tipsTouching++;
+            else
+            {
+                tipsDetached++;
+                issues.Add(new ValidationIssue
+                {
+                    SupportId = sup.Id, Category = "tip-detached",
+                    Description = $"Tip is {minDist:F1}mm from nearest triangle (tolerance={tipTolerance}mm)",
+                    X = sup.ContactX, Y = sup.ContactY, Z = sup.ContactZ,
+                });
+            }
+        }
+
+        // ── 2. Overhang coverage validation ──────────────────────────────────
+        // Re-detect overhangs and check each is within range of at least one support
+        var overhangCos = MathF.Cos(MathF.PI / 180f * (float)config.OverhangAngleDeg);
+        var gravityDir = new Vector3(0, 0, -1);
+        var overhangFaces = new List<(Vector3 center, float area)>();
+
+        for (int t = 0; t < mesh.TriangleCount; t++)
+        {
+            var v0 = mesh.Vertices[t * 3];
+            var v1 = mesh.Vertices[t * 3 + 1];
+            var v2 = mesh.Vertices[t * 3 + 2];
+            var cross = Vector3.Cross(v1 - v0, v2 - v0);
+            var area = cross.Length() * 0.5f;
+            var normal = Vector3.Normalize(cross);
+            if (float.IsNaN(normal.X) || area < 1e-8f) continue;
+
+            float dot = Vector3.Dot(normal, gravityDir);
+            if (dot > overhangCos)
+            {
+                var center = (v0 + v1 + v2) / 3f;
+                if (center.Z < 0.2f) continue;
+                overhangFaces.Add((center, area));
+            }
+        }
+
+        // Each overhang face should have a support within coverage radius
+        float baseSpacing = (float)(4.0 / (config.DensityFactor + 0.1));
+        float coverageRadius = baseSpacing * 1.5f; // generous coverage check
+        int overhangsSupported = 0, overhangsUnsupported = 0;
+        var unsupportedSamples = new List<(Vector3 center, float area)>();
+
+        foreach (var (center, area) in overhangFaces)
+        {
+            bool covered = nonTrunkSupports.Any(s =>
+                Vector2.Distance(new Vector2(s.ContactX, s.ContactY), new Vector2(center.X, center.Y)) < coverageRadius);
+
+            if (covered)
+                overhangsSupported++;
+            else
+            {
+                overhangsUnsupported++;
+                // Only report a sample of unsupported overhangs (not every tiny face)
+                if (unsupportedSamples.Count < 20 && area > 0.5f)
+                    unsupportedSamples.Add((center, area));
+            }
+        }
+
+        foreach (var (center, area) in unsupportedSamples)
+        {
+            issues.Add(new ValidationIssue
+            {
+                SupportId = "-", Category = "overhang-unsupported",
+                Description = $"Overhang face (area={area:F1}mm²) has no support within {coverageRadius:F1}mm",
+                X = center.X, Y = center.Y, Z = center.Z,
+            });
+        }
+
+        // ── 3. Collision detection ───────────────────────────────────────────
+        // For each support shaft, cast a ray downward and count mesh intersections.
+        // Odd count = inside mesh = collision.
+        int collisions = 0;
+        foreach (var sup in nonTrunkSupports)
+        {
+            // Sample points along the shaft (skip tip area near contact)
+            float shaftTop = sup.ContactZ - 3.0f; // skip the pinhead area
+            float shaftBot = sup.BaseZ + 1.0f;
+            if (shaftTop <= shaftBot) continue;
+
+            // Check a few sample points along the shaft
+            int samples = Math.Min(5, (int)((shaftTop - shaftBot) / 10));
+            bool hasCollision = false;
+
+            for (int si = 0; si <= samples && !hasCollision; si++)
+            {
+                float sampleZ = shaftTop - (shaftTop - shaftBot) * si / Math.Max(1, samples);
+                // Count how many triangles are above this point (ray cast upward)
+                int intersections = 0;
+                float sx = sup.BaseX, sy = sup.BaseY; // shaft XY position
+
+                for (int t = 0; t < mesh.TriangleCount; t++)
+                {
+                    var v0 = mesh.Vertices[t * 3];
+                    var v1 = mesh.Vertices[t * 3 + 1];
+                    var v2 = mesh.Vertices[t * 3 + 2];
+
+                    // Quick Z bounds check
+                    float triMinZ = Math.Min(v0.Z, Math.Min(v1.Z, v2.Z));
+                    float triMaxZ = Math.Max(v0.Z, Math.Max(v1.Z, v2.Z));
+                    if (sampleZ < triMinZ || sampleZ > triMaxZ) continue;
+
+                    // Point-in-triangle test (XY projection at sampleZ)
+                    float denom = (v1.Y - v2.Y) * (v0.X - v2.X) + (v2.X - v1.X) * (v0.Y - v2.Y);
+                    if (MathF.Abs(denom) < 1e-8f) continue;
+                    float u = ((v1.Y - v2.Y) * (sx - v2.X) + (v2.X - v1.X) * (sy - v2.Y)) / denom;
+                    if (u < -0.01f || u > 1.01f) continue;
+                    float v = ((v2.Y - v0.Y) * (sx - v2.X) + (v0.X - v2.X) * (sy - v2.Y)) / denom;
+                    if (v < -0.01f || u + v > 1.01f) continue;
+
+                    float hitZ = v0.Z * u + v1.Z * v + v2.Z * (1 - u - v);
+                    if (hitZ > sampleZ) intersections++;
+                }
+
+                // Odd intersections above = inside mesh
+                if (intersections % 2 == 1)
+                    hasCollision = true;
+            }
+
+            if (hasCollision)
+            {
+                collisions++;
+                issues.Add(new ValidationIssue
+                {
+                    SupportId = sup.Id, Category = "collision",
+                    Description = "Support shaft passes through mesh interior",
+                    X = sup.BaseX, Y = sup.BaseY, Z = (sup.ContactZ + sup.BaseZ) / 2,
+                });
+            }
+        }
+
+        sw.Stop();
+        return new ValidationResult
+        {
+            TotalSupports = nonTrunkSupports.Count,
+            TotalOverhangs = overhangFaces.Count,
+            TipsTouchingModel = tipsTouching,
+            TipsDetached = tipsDetached,
+            OverhangsSupported = overhangsSupported,
+            OverhangsUnsupported = overhangsUnsupported,
+            CollisionsDetected = collisions,
+            Issues = issues,
+            ElapsedMs = sw.ElapsedMilliseconds,
+        };
     }
 }
