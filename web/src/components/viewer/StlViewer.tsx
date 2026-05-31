@@ -921,7 +921,9 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
 
     const pts = supportPoints ?? []
     const regions = paintedRegions ?? []
-    if (pts.length === 0 && regions.length === 0) return
+    const braces = crossBraces ?? []
+    const hasAnything = pts.length > 0 || regions.length > 0 || braces.length > 0 || raftData || skirtData
+    if (!hasAnything) return
 
     const group = new THREE.Group()
     group.name = 'support-visuals'
@@ -930,21 +932,44 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     const tipColors = { light: 0x4ade80, medium: 0xfbbf24, heavy: 0xf87171 }
     const segColors: Record<string, number> = {
       tip: 0xff6b6b, neck: 0xfbbf24, upperTaper: 0x4ade80, shaft: 0x38bdf8,
-      lowerTaper: 0x818cf8, base: 0x6366f1, branch: 0xa78bfa, brace: 0xf97316,
+      shaftInner: 0x1e3a5f, lowerTaper: 0x818cf8, base: 0x6366f1, branch: 0xa78bfa, brace: 0xf97316,
+    }
+    const segOpacity: Record<string, number> = {
+      tip: 0.85, neck: 0.7, upperTaper: 0.65, shaft: 0.6,
+      shaftInner: 0.25, lowerTaper: 0.65, base: 0.7, branch: 0.55, brace: 0.5,
+    }
+    const segDetail: Record<string, number> = {
+      tip: 12, neck: 8, shaft: 8, shaftInner: 6, base: 10, branch: 6,
     }
     pts.forEach(p => {
       const color = tipColors[p.type] ?? 0xfbbf24
 
       if (p.segments && p.segments.length > 0) {
-        // Advanced: render each segment as a tapered cylinder
+        // Compute model scale to ensure supports are visible at any zoom level
+        // Find the Z extent of this support to determine appropriate minimum radius
+        const zMax = Math.max(...p.segments.map(seg => Math.max(seg.z1, seg.z2)))
+        const zMin = Math.min(...p.segments.map(seg => Math.min(seg.z1, seg.z2)))
+        const supportHeight = zMax - zMin
+        // Minimum visible radius: 0.4% of support height, at least 0.15mm
+        const minVisibleR = Math.max(0.15, supportHeight * 0.004)
+
+        // Advanced: render each segment as a tapered cylinder with part-specific styling
         p.segments.forEach(seg => {
           const segColor = segColors[seg.part] ?? color
+          const opacity = segOpacity[seg.part] ?? 0.65
+          const detail = segDetail[seg.part] ?? 8
           const h = Math.sqrt((seg.x2-seg.x1)**2 + (seg.y2-seg.y1)**2 + (seg.z2-seg.z1)**2)
           if (h < 0.01) return
-          const r1 = Math.max(0.02, seg.r1)
-          const r2 = Math.max(0.02, seg.r2)
-          const geo = new THREE.CylinderGeometry(r1, r2, h, 8)
-          const mat = new THREE.MeshPhongMaterial({ color: segColor, transparent: true, opacity: 0.75 })
+          // Scale radii to be visible: use actual radius but ensure minimum visibility
+          const r1 = Math.max(seg.part === 'shaftInner' ? 0.02 : minVisibleR, seg.r1)
+          const r2 = Math.max(seg.part === 'shaftInner' ? 0.02 : minVisibleR, seg.r2)
+
+          const geo = new THREE.CylinderGeometry(r1, r2, h, detail)
+
+          const mat = new THREE.MeshPhongMaterial({
+            color: segColor, transparent: true, opacity,
+            ...(seg.part === 'shaftInner' ? { depthWrite: false } : {}),
+          })
           const mesh = new THREE.Mesh(geo, mat)
           // Position at midpoint, orient along segment direction
           // Print-space → Three.js: x=x, y=z, z=y
@@ -982,7 +1007,6 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     })
 
     // Render cross-braces
-    const braces = crossBraces ?? []
     braces.forEach(b => {
       const h = Math.sqrt((b.x2-b.x1)**2 + (b.y2-b.y1)**2 + (b.z2-b.z1)**2)
       if (h < 0.01) return

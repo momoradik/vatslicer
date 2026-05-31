@@ -1095,7 +1095,9 @@ export default function StlImport() {
                     {selectedPrep.generatedAt && (
                       <div className="mt-2 space-y-1">
                         <div className="flex items-center justify-between text-[10px]">
-                          <span className="text-green-400">{selectedPrep.autoSupports.length} supports</span>
+                          <span className="text-green-400">{selectedPrep.advancedSupports.length > 0
+                            ? selectedPrep.advancedSupports.filter(s => s.type !== 'tree-trunk' && s.type !== 'tree-subtruck').length
+                            : selectedPrep.autoSupports.length} supports</span>
                           {selectedPrep.raft && <span className="text-blue-400">Raft ({selectedPrep.raft.type})</span>}
                           {selectedPrep.skirt && <span className="text-cyan-400">Skirt ({selectedPrep.skirt.layers}L)</span>}
                         </div>

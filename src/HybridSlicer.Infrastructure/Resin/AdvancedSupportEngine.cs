@@ -398,10 +398,10 @@ public static class AdvancedSupportEngine
         float offZ = -mesh.Min.Z;
         mesh = mesh.Transform(new Vector3(offX, offY, offZ), 1.0f);
 
-        // Detect overhangs
+        // Detect overhangs with severity scoring
         var overhangCos = MathF.Cos(MathF.PI / 180f * (float)config.OverhangAngleDeg);
         var gravityDir = new Vector3(0, 0, -1);
-        var overhangPoints = new List<(Vector3 center, Vector3 normal, float area)>();
+        var overhangPoints = new List<(Vector3 center, Vector3 normal, float area, float severity)>();
 
         for (int t = 0; t < mesh.TriangleCount; t++)
         {
@@ -418,32 +418,50 @@ public static class AdvancedSupportEngine
             {
                 var center = (v0 + v1 + v2) / 3f;
                 if (center.Z < 0.2f) continue; // skip faces already on bed
-                overhangPoints.Add((center, normal, area));
+                // Severity: 0 at threshold, 1 at fully downward. Drives adaptive density.
+                float severity = (dot - overhangCos) / (1f - overhangCos);
+                overhangPoints.Add((center, normal, area, severity));
             }
         }
 
-        // Sort by Z (highest first for priority) then by area (largest first)
+        // Sort by severity (worst first), then Z descending, then area descending
         overhangPoints.Sort((a, b) =>
         {
+            int sc = b.severity.CompareTo(a.severity);
+            if (sc != 0) return sc;
             int zc = b.center.Z.CompareTo(a.center.Z);
             return zc != 0 ? zc : b.area.CompareTo(a.area);
         });
 
-        // Place supports with density-based spacing
-        float spacing = (float)(4.0 / (config.DensityFactor + 0.1));
+        // Adaptive density: tighter spacing for severe overhangs, wider for mild
+        float baseSpacing = (float)(4.0 / (config.DensityFactor + 0.1));
         var supports = new List<AdvancedSupport>();
-        var placed = new List<Vector3>();
+        var placed = new List<(Vector3 pos, float baseZ)>();
         int idCounter = 0;
 
-        foreach (var (center, normal, area) in overhangPoints)
+        // Build spatial lookup for "everywhere" placement: find surfaces below overhang points
+        bool placeEverywhere = config.Placement == "everywhere";
+
+        foreach (var (center, normal, area, severity) in overhangPoints)
         {
+            // Adaptive spacing: severe overhangs get 50% tighter spacing
+            float localSpacing = baseSpacing * (1f - severity * 0.5f);
+            localSpacing = Math.Max(localSpacing, 1.0f); // never closer than 1mm
+
             bool tooClose = placed.Any(p => Vector2.Distance(
-                new Vector2(center.X, center.Y), new Vector2(p.X, p.Y)) < spacing);
+                new Vector2(center.X, center.Y), new Vector2(p.pos.X, p.pos.Y)) < localSpacing);
             if (tooClose) continue;
 
-            var support = BuildSupport($"sup-{++idCounter}", config.SupportType, preset, center, normal);
+            // Determine base Z: try to land on intermediate surfaces if "everywhere"
+            float supportBaseZ = 0;
+            if (placeEverywhere)
+            {
+                supportBaseZ = FindIntermediateSurface(mesh, center, center.Z);
+            }
+
+            var support = BuildSupport($"sup-{++idCounter}", config.SupportType, preset, center, normal, supportBaseZ);
             supports.Add(support);
-            placed.Add(center);
+            placed.Add((center, supportBaseZ));
         }
 
         // Tree merging (if tree type)
@@ -466,167 +484,490 @@ public static class AdvancedSupportEngine
     }
 
     // ── Build one support with full anatomy ──────────────────────────────────
+    //
+    // PrusaSlicer-inspired pinhead geometry:
+    //   1. PIN SPHERE — small sphere at model contact, oriented along clamped normal
+    //   2. CONNECTING CONE — tangent cone from pin sphere to back sphere
+    //   3. BACK SPHERE — larger sphere at junction point
+    //   4. PILLAR — vertical shaft from junction down to base
+    //   5. PEDESTAL — truncated cone at build plate
+    //
+    // The head direction = surface normal clamped to max 45° from vertical.
+    // This creates a realistic angled approach that matches production slicers.
 
     private static AdvancedSupport BuildSupport(string id, string type, SupportPreset preset,
-        Vector3 contact, Vector3 normal)
+        Vector3 contact, Vector3 normal, float baseZ = 0)
     {
         var segments = new List<SupportSegment>();
-        float z = contact.Z;
-        float x = contact.X, y = contact.Y;
+        // PrusaSlicer naming: r_pin = small tip sphere, r_back = large junction sphere
+        float rPin = preset.TipDiameterMm / 2;   // small sphere at model contact
+        float rBack = preset.ShaftDiameterMm / 2; // back sphere at junction
+        float tipR = rPin; // alias for shape-specific code
+        float neckR = preset.NeckDiameterMm / 2;
+        float shaftR = preset.ShaftDiameterMm / 2;
+        float baseR = preset.BaseDiameterMm / 2;
 
-        // 1. Tip (sphere/cone at contact)
-        float tipBot = z - preset.TipDiameterMm / 2;
-        segments.Add(new SupportSegment
-        {
-            Part = "tip", X1 = x, Y1 = y, Z1 = z, R1 = 0,
-            X2 = x, Y2 = y, Z2 = tipBot, R2 = preset.TipDiameterMm / 2,
-        });
+        // ── Compute head direction (PrusaSlicer-style) ─────────────────────────
+        // Start from surface normal, clamp polar angle to max bridge_slope (45°) from vertical
+        var headDir = normal;
+        // Overhangs have normals pointing downward; ensure downward component
+        if (headDir.Z > -0.1f) headDir = new Vector3(headDir.X, headDir.Y, -1f);
+        headDir = Vector3.Normalize(headDir);
 
-        // 2. Neck (thin breakpoint)
-        float neckBot = tipBot - preset.NeckLengthMm;
-        segments.Add(new SupportSegment
+        // Clamp to max 45° from vertical (like PrusaSlicer's bridge_slope)
+        float cosMaxAngle = MathF.Cos(MathF.PI / 4f); // 45°
+        if (-headDir.Z < cosMaxAngle)
         {
-            Part = "neck", X1 = x, Y1 = y, Z1 = tipBot, R1 = preset.NeckDiameterMm / 2,
-            X2 = x, Y2 = y, Z2 = neckBot, R2 = preset.NeckDiameterMm / 2,
-        });
-
-        // 3. Upper taper (neck → shaft)
-        float upperBot = neckBot - preset.UpperTaperLengthMm;
-        segments.Add(new SupportSegment
-        {
-            Part = "upperTaper", X1 = x, Y1 = y, Z1 = neckBot, R1 = preset.NeckDiameterMm / 2,
-            X2 = x, Y2 = y, Z2 = upperBot, R2 = preset.ShaftDiameterMm / 2,
-        });
-
-        // 4. Shaft (main body — from upper taper to lower taper zone)
-        float lowerTaperStart = preset.BaseHeightMm + preset.LowerTaperLengthMm;
-        float shaftBot = Math.Max(lowerTaperStart, 0.5f);
-        if (upperBot > shaftBot + 0.1f)
-        {
-            segments.Add(new SupportSegment
+            // Too horizontal — project toward vertical while keeping XY direction
+            float xyMag = MathF.Sqrt(headDir.X * headDir.X + headDir.Y * headDir.Y);
+            float maxXY = MathF.Tan(MathF.PI / 4f); // tan(45°) = 1.0
+            if (xyMag > 0.001f)
             {
-                Part = "shaft", X1 = x, Y1 = y, Z1 = upperBot, R1 = preset.ShaftDiameterMm / 2,
-                X2 = x, Y2 = y, Z2 = shaftBot, R2 = preset.ShaftDiameterMm / 2,
-            });
+                float scale = maxXY / xyMag * (-headDir.Z > 0.001f ? -headDir.Z : 0.5f);
+                headDir = Vector3.Normalize(new Vector3(headDir.X * scale, headDir.Y * scale, -1f));
+            }
+            else headDir = new Vector3(0, 0, -1);
         }
 
-        // 5. Lower taper (shaft → base)
-        float lowerBot = preset.BaseHeightMm;
+        // ── Pinhead geometry (PrusaSlicer: pin sphere + cone + back sphere) ──
+        float penetration = preset.ContactDepthMm; // how deep pin penetrates model
+        // Head width = distance between sphere centers along head direction
+        float headWidth = preset.NeckLengthMm + preset.UpperTaperLengthMm;
+        // Full pinhead length along headDir
+        float pinheadLen = rPin + headWidth + rBack;
+
+        // Positions along the head direction
+        var pinCenter = contact + headDir * (rPin - penetration); // pin sphere center (slightly inside model)
+        var backCenter = contact + headDir * (pinheadLen - rBack - penetration); // back sphere center
+        var junctionPt = contact + headDir * (pinheadLen - penetration); // where pillar starts
+
+        // Ensure junction doesn't go below shaft bottom
+        float lowerTaperStart = baseZ + preset.BaseHeightMm + preset.LowerTaperLengthMm;
+        float shaftBot = Math.Max(lowerTaperStart, baseZ + 0.5f);
+        if (junctionPt.Z < shaftBot + 1.0f)
+        {
+            // Scale down the head to fit
+            float availLen = contact.Z - shaftBot - 1.0f;
+            if (availLen > 1.0f)
+            {
+                float sc = availLen / pinheadLen;
+                pinCenter = contact + headDir * (rPin - penetration) * sc;
+                backCenter = contact + headDir * (pinheadLen - rBack - penetration) * sc;
+                junctionPt = contact + headDir * availLen;
+            }
+            else
+            {
+                // Very short support — just go vertical
+                junctionPt = new Vector3(contact.X, contact.Y, Math.Max(contact.Z - 2.0f, shaftBot + 0.5f));
+                pinCenter = contact + (junctionPt - contact) * 0.2f;
+                backCenter = contact + (junctionPt - contact) * 0.7f;
+            }
+        }
+
+        // Shaft is vertical below the junction point
+        float shaftX = junctionPt.X;
+        float shaftY = junctionPt.Y;
+
+        // ── 1. PIN SPHERE → model contact (tip segment along headDir) ─────────
+        // Approximate the pin sphere as a cone: point at model surface, widens to rPin
+        segments.Add(new SupportSegment { Part = "tip",
+            X1 = contact.X, Y1 = contact.Y, Z1 = contact.Z, R1 = 0,
+            X2 = pinCenter.X, Y2 = pinCenter.Y, Z2 = pinCenter.Z, R2 = rPin });
+
+        // ── 2. CONNECTING CONE (neck) — pin sphere to back sphere along headDir ──
+        // This is the tangent cone that smoothly connects both spheres
+        segments.Add(new SupportSegment { Part = "neck",
+            X1 = pinCenter.X, Y1 = pinCenter.Y, Z1 = pinCenter.Z, R1 = rPin,
+            X2 = backCenter.X, Y2 = backCenter.Y, Z2 = backCenter.Z, R2 = rBack });
+
+        // ── 3. BACK SPHERE → junction (upperTaper: transitions to vertical) ──
+        segments.Add(new SupportSegment { Part = "upperTaper",
+            X1 = backCenter.X, Y1 = backCenter.Y, Z1 = backCenter.Z, R1 = rBack,
+            X2 = junctionPt.X, Y2 = junctionPt.Y, Z2 = junctionPt.Z, R2 = shaftR });
+
+        // ── 4. SHAFT — vertical pillar from junction down to base zone ──────
+        float shaftTop = junctionPt.Z;
+        float shaftLen = shaftTop - shaftBot;
+        if (shaftLen > 0.1f)
+        {
+            switch (preset.ShaftType)
+            {
+                case "cone":
+                    segments.Add(new SupportSegment { Part = "shaft",
+                        X1 = shaftX, Y1 = shaftY, Z1 = shaftTop, R1 = shaftR * 0.7f,
+                        X2 = shaftX, Y2 = shaftY, Z2 = shaftBot, R2 = shaftR * 1.3f });
+                    break;
+                case "hollow":
+                    segments.Add(new SupportSegment { Part = "shaft",
+                        X1 = shaftX, Y1 = shaftY, Z1 = shaftTop, R1 = shaftR,
+                        X2 = shaftX, Y2 = shaftY, Z2 = shaftBot, R2 = shaftR });
+                    segments.Add(new SupportSegment { Part = "shaftInner",
+                        X1 = shaftX, Y1 = shaftY, Z1 = shaftTop, R1 = shaftR * 0.6f,
+                        X2 = shaftX, Y2 = shaftY, Z2 = shaftBot, R2 = shaftR * 0.6f });
+                    break;
+                case "lattice":
+                case "diamond":
+                    float latticeStep = Math.Min(2.0f, shaftLen / 3);
+                    float cz = shaftTop;
+                    bool wide = true;
+                    while (cz > shaftBot + latticeStep * 0.5f)
+                    {
+                        float nz = Math.Max(cz - latticeStep, shaftBot);
+                        float lr1 = wide ? shaftR : shaftR * 0.4f;
+                        float lr2 = wide ? shaftR * 0.4f : shaftR;
+                        segments.Add(new SupportSegment { Part = "shaft",
+                            X1 = shaftX, Y1 = shaftY, Z1 = cz, R1 = lr1,
+                            X2 = shaftX, Y2 = shaftY, Z2 = nz, R2 = lr2 });
+                        cz = nz;
+                        wide = !wide;
+                    }
+                    break;
+                case "spiral":
+                    float spiralOff = shaftR * 0.3f;
+                    int spiralN = Math.Max(2, (int)(shaftLen / 3f));
+                    float sdz = shaftLen / spiralN;
+                    for (int si = 0; si < spiralN; si++)
+                    {
+                        float sz1 = shaftTop - si * sdz;
+                        float sz2 = shaftTop - (si + 1) * sdz;
+                        float a1 = si * MathF.PI * 0.5f;
+                        float a2 = (si + 1) * MathF.PI * 0.5f;
+                        segments.Add(new SupportSegment { Part = "shaft",
+                            X1 = shaftX + MathF.Cos(a1) * spiralOff, Y1 = shaftY + MathF.Sin(a1) * spiralOff, Z1 = sz1, R1 = shaftR * 0.8f,
+                            X2 = shaftX + MathF.Cos(a2) * spiralOff, Y2 = shaftY + MathF.Sin(a2) * spiralOff, Z2 = sz2, R2 = shaftR * 0.8f });
+                    }
+                    break;
+                case "ribbed":
+                    float ribStep = Math.Min(1.5f, shaftLen / 3);
+                    float rz = shaftTop;
+                    bool thick = true;
+                    while (rz > shaftBot + ribStep * 0.5f)
+                    {
+                        float rnz = Math.Max(rz - ribStep, shaftBot);
+                        float rr = thick ? shaftR : shaftR * 0.65f;
+                        segments.Add(new SupportSegment { Part = "shaft",
+                            X1 = shaftX, Y1 = shaftY, Z1 = rz, R1 = rr,
+                            X2 = shaftX, Y2 = shaftY, Z2 = rnz, R2 = rr });
+                        rz = rnz;
+                        thick = !thick;
+                    }
+                    break;
+                default: // "cylinder", "square", "xprofile", "ibeam"
+                    segments.Add(new SupportSegment { Part = "shaft",
+                        X1 = shaftX, Y1 = shaftY, Z1 = shaftTop, R1 = shaftR,
+                        X2 = shaftX, Y2 = shaftY, Z2 = shaftBot, R2 = shaftR });
+                    break;
+            }
+        }
+
+        // ── 5. Lower taper (shaft → base) ────────────────────────────────────
+        float lowerBot = baseZ + preset.BaseHeightMm;
         segments.Add(new SupportSegment
         {
-            Part = "lowerTaper", X1 = x, Y1 = y, Z1 = shaftBot, R1 = preset.ShaftDiameterMm / 2,
-            X2 = x, Y2 = y, Z2 = lowerBot, R2 = preset.BaseDiameterMm / 2,
+            Part = "lowerTaper", X1 = shaftX, Y1 = shaftY, Z1 = shaftBot, R1 = shaftR,
+            X2 = shaftX, Y2 = shaftY, Z2 = lowerBot, R2 = baseR,
         });
 
-        // 6. Base/foot
-        segments.Add(new SupportSegment
+        // ── 6. BASE — type-dependent, always on build plate ──────────────────
+        switch (preset.BaseType)
         {
-            Part = "base", X1 = x, Y1 = y, Z1 = lowerBot, R1 = preset.BaseDiameterMm / 2,
-            X2 = x, Y2 = y, Z2 = 0, R2 = preset.BaseDiameterMm / 2,
-        });
+            case "cone":
+                segments.Add(new SupportSegment { Part = "base", X1 = shaftX, Y1 = shaftY, Z1 = lowerBot, R1 = baseR,
+                    X2 = shaftX, Y2 = shaftY, Z2 = baseZ, R2 = baseR * 0.3f });
+                break;
+            case "pyramid":
+                segments.Add(new SupportSegment { Part = "base", X1 = shaftX, Y1 = shaftY, Z1 = lowerBot, R1 = baseR * 1.1f,
+                    X2 = shaftX, Y2 = shaftY, Z2 = baseZ, R2 = baseR * 0.2f });
+                break;
+            case "raft":
+                segments.Add(new SupportSegment { Part = "base", X1 = shaftX, Y1 = shaftY, Z1 = lowerBot, R1 = baseR * 1.5f,
+                    X2 = shaftX, Y2 = shaftY, Z2 = baseZ, R2 = baseR * 1.5f });
+                break;
+            case "miniraft":
+                segments.Add(new SupportSegment { Part = "base", X1 = shaftX, Y1 = shaftY, Z1 = lowerBot, R1 = baseR * 1.2f,
+                    X2 = shaftX, Y2 = shaftY, Z2 = baseZ, R2 = baseR * 1.2f });
+                break;
+            case "pin":
+                segments.Add(new SupportSegment { Part = "base", X1 = shaftX, Y1 = shaftY, Z1 = lowerBot, R1 = baseR * 0.5f,
+                    X2 = shaftX, Y2 = shaftY, Z2 = baseZ, R2 = baseR * 0.5f });
+                break;
+            case "skirted":
+                float skZ = baseZ + preset.BaseHeightMm * 0.3f;
+                segments.Add(new SupportSegment { Part = "base", X1 = shaftX, Y1 = shaftY, Z1 = lowerBot, R1 = baseR,
+                    X2 = shaftX, Y2 = shaftY, Z2 = skZ, R2 = baseR });
+                segments.Add(new SupportSegment { Part = "base", X1 = shaftX, Y1 = shaftY, Z1 = skZ, R1 = baseR,
+                    X2 = shaftX, Y2 = shaftY, Z2 = baseZ, R2 = baseR * 1.6f });
+                break;
+            case "webbed":
+                segments.Add(new SupportSegment { Part = "base", X1 = shaftX, Y1 = shaftY, Z1 = lowerBot, R1 = baseR,
+                    X2 = shaftX, Y2 = shaftY, Z2 = baseZ, R2 = baseR });
+                float wO = baseR * 1.2f, wR = baseR * 0.2f;
+                float wMidZ = (lowerBot + baseZ) / 2;
+                segments.Add(new SupportSegment { Part = "base", X1 = shaftX, Y1 = shaftY, Z1 = wMidZ, R1 = wR,
+                    X2 = shaftX + wO, Y2 = shaftY, Z2 = baseZ, R2 = wR });
+                segments.Add(new SupportSegment { Part = "base", X1 = shaftX, Y1 = shaftY, Z1 = wMidZ, R1 = wR,
+                    X2 = shaftX - wO, Y2 = shaftY, Z2 = baseZ, R2 = wR });
+                segments.Add(new SupportSegment { Part = "base", X1 = shaftX, Y1 = shaftY, Z1 = wMidZ, R1 = wR,
+                    X2 = shaftX, Y2 = shaftY + wO, Z2 = baseZ, R2 = wR });
+                segments.Add(new SupportSegment { Part = "base", X1 = shaftX, Y1 = shaftY, Z1 = wMidZ, R1 = wR,
+                    X2 = shaftX, Y2 = shaftY - wO, Z2 = baseZ, R2 = wR });
+                break;
+            case "anchor":
+                segments.Add(new SupportSegment { Part = "base", X1 = shaftX, Y1 = shaftY, Z1 = lowerBot, R1 = baseR,
+                    X2 = shaftX, Y2 = shaftY, Z2 = baseZ, R2 = baseR * 1.4f });
+                break;
+            default: // "disc"
+                segments.Add(new SupportSegment { Part = "base", X1 = shaftX, Y1 = shaftY, Z1 = lowerBot, R1 = baseR,
+                    X2 = shaftX, Y2 = shaftY, Z2 = baseZ, R2 = baseR });
+                break;
+        }
 
         return new AdvancedSupport
         {
             Id = id, Type = type, Preset = preset,
-            ContactX = x, ContactY = y, ContactZ = z,
+            ContactX = contact.X, ContactY = contact.Y, ContactZ = contact.Z,
             NormalX = normal.X, NormalY = normal.Y, NormalZ = normal.Z,
-            BaseX = x, BaseY = y, BaseZ = 0,
+            BaseX = shaftX, BaseY = shaftY, BaseZ = baseZ,
             Segments = segments,
         };
+    }
+
+    // ── Intermediate surface finder ────────────────────────────────────────
+
+    /// <summary>
+    /// Cast a ray straight down from the overhang point and find the first surface
+    /// below it (but above the build plate). Returns 0 if no intermediate surface.
+    /// </summary>
+    private static float FindIntermediateSurface(StlMesh mesh, Vector3 point, float startZ)
+    {
+        float bestZ = 0; // default: build plate
+        float minGap = 2.0f; // need at least 2mm clearance for a useful support
+
+        for (int t = 0; t < mesh.TriangleCount; t++)
+        {
+            var v0 = mesh.Vertices[t * 3];
+            var v1 = mesh.Vertices[t * 3 + 1];
+            var v2 = mesh.Vertices[t * 3 + 2];
+
+            // Quick Z bounds check
+            float triMinZ = Math.Min(v0.Z, Math.Min(v1.Z, v2.Z));
+            float triMaxZ = Math.Max(v0.Z, Math.Max(v1.Z, v2.Z));
+            if (triMaxZ >= startZ - minGap || triMinZ < bestZ) continue;
+
+            // Check if ray (point.X, point.Y, going down) intersects this triangle
+            // Using barycentric coordinate test on the XY projection
+            float denom = (v1.Y - v2.Y) * (v0.X - v2.X) + (v2.X - v1.X) * (v0.Y - v2.Y);
+            if (MathF.Abs(denom) < 1e-8f) continue;
+
+            float u = ((v1.Y - v2.Y) * (point.X - v2.X) + (v2.X - v1.X) * (point.Y - v2.Y)) / denom;
+            if (u < 0 || u > 1) continue;
+            float v = ((v2.Y - v0.Y) * (point.X - v2.X) + (v0.X - v2.X) * (point.Y - v2.Y)) / denom;
+            if (v < 0 || u + v > 1) continue;
+
+            float hitZ = v0.Z * u + v1.Z * v + v2.Z * (1 - u - v);
+            if (hitZ > bestZ && hitZ < startZ - minGap)
+            {
+                // Verify the face is upward-facing (can support from the top)
+                var cross = Vector3.Cross(v1 - v0, v2 - v0);
+                var normal = Vector3.Normalize(cross);
+                if (!float.IsNaN(normal.Z) && normal.Z > 0.3f) // face is reasonably upward
+                    bestZ = hitZ;
+            }
+        }
+
+        return bestZ;
     }
 
     // ── Tree merging ────────────────────────────────────────────────────────
 
     private static List<AdvancedSupport> MergeIntoTrees(List<AdvancedSupport> supports, SupportPreset preset)
     {
-        float mergeRadius = 6.0f; // mm — supports within this XY distance can share a trunk
+        // Multi-level tree merging using hierarchical clustering
+        // Level 1: small groups within 5mm → sub-branches merge into branches
+        // Level 2: branches within 10mm → merge into main trunks
+        float level1Radius = 5.0f;
+        float level2Radius = 10.0f;
         var result = new List<AdvancedSupport>();
         var used = new bool[supports.Count];
+        int trunkCounter = 0;
 
-        for (int i = 0; i < supports.Count; i++)
+        // Sort by Z ascending so lower supports are processed first for better trunk placement
+        var sortedIndices = Enumerable.Range(0, supports.Count)
+            .OrderBy(i => supports[i].ContactZ).ToList();
+
+        // Level 1: form small groups (2-4 supports)
+        var level1Groups = new List<List<int>>();
+        foreach (int i in sortedIndices)
         {
             if (used[i]) continue;
-
-            // Find nearby supports that can merge with this one
             var group = new List<int> { i };
-            for (int j = i + 1; j < supports.Count; j++)
+            foreach (int j in sortedIndices)
             {
-                if (used[j]) continue;
+                if (j == i || used[j]) continue;
                 float dist = Vector2.Distance(
                     new Vector2(supports[i].ContactX, supports[i].ContactY),
                     new Vector2(supports[j].ContactX, supports[j].ContactY));
-                if (dist < mergeRadius)
+                if (dist < level1Radius && group.Count < 4)
                     group.Add(j);
             }
+            foreach (int g in group) used[g] = true;
+            level1Groups.Add(group);
+        }
 
-            if (group.Count == 1)
+        // Level 2: merge nearby level-1 groups into larger trees
+        var groupUsed = new bool[level1Groups.Count];
+        var trees = new List<List<List<int>>>(); // tree → list of level1 groups
+
+        for (int gi = 0; gi < level1Groups.Count; gi++)
+        {
+            if (groupUsed[gi]) continue;
+            var tree = new List<List<int>> { level1Groups[gi] };
+            float gcx = level1Groups[gi].Average(i => supports[i].ContactX);
+            float gcy = level1Groups[gi].Average(i => supports[i].ContactY);
+            groupUsed[gi] = true;
+
+            for (int gj = gi + 1; gj < level1Groups.Count; gj++)
             {
-                // No merge partner — keep as standalone
-                result.Add(supports[i]);
-                used[i] = true;
+                if (groupUsed[gj]) continue;
+                float gcx2 = level1Groups[gj].Average(i => supports[i].ContactX);
+                float gcy2 = level1Groups[gj].Average(i => supports[i].ContactY);
+                if (Vector2.Distance(new Vector2(gcx, gcy), new Vector2(gcx2, gcy2)) < level2Radius && tree.Count < 4)
+                {
+                    tree.Add(level1Groups[gj]);
+                    groupUsed[gj] = true;
+                }
+            }
+            trees.Add(tree);
+        }
+
+        // Build geometry for each tree
+        foreach (var tree in trees)
+        {
+            var allIndices = tree.SelectMany(g => g).ToList();
+
+            if (allIndices.Count == 1)
+            {
+                // Standalone — no merge needed
+                result.Add(supports[allIndices[0]]);
                 continue;
             }
 
-            // Merge point: centroid at the lower Z of the group
-            float minZ = group.Min(g => supports[g].ContactZ);
-            float mergeZ = minZ * 0.4f; // merge at 40% of the lowest contact
-            float cx = group.Average(g => supports[g].ContactX);
-            float cy = group.Average(g => supports[g].ContactY);
+            string trunkId = $"trunk-{++trunkCounter}";
+            float trunkCx = allIndices.Average(i => supports[i].ContactX);
+            float trunkCy = allIndices.Average(i => supports[i].ContactY);
+            float minContactZ = allIndices.Min(i => supports[i].ContactZ);
 
-            // Create trunk from merge point to base
-            string trunkId = $"trunk-{i}";
+            // Weighted merge Z: higher for taller supports, minimum 30% of lowest contact
+            float trunkMergeZ = Math.Max(minContactZ * 0.3f, 2.0f);
 
-            foreach (int gi in group)
+            if (tree.Count == 1)
             {
-                used[gi] = true;
-                var s = supports[gi];
-                var segments = new List<SupportSegment>();
+                // Single level-1 group → simple 2-level tree
+                EmitBranches(result, supports, tree[0], preset, trunkId, trunkCx, trunkCy, trunkMergeZ);
+            }
+            else
+            {
+                // Multi-group tree: each group gets a sub-trunk, all sub-trunks merge to main trunk
+                float subTrunkZ = trunkMergeZ + (minContactZ - trunkMergeZ) * 0.4f;
+                int subCounter = 0;
 
-                // Tip + neck at contact point (same as normal)
-                float z = s.ContactZ;
-                segments.Add(new SupportSegment
+                foreach (var group in tree)
                 {
-                    Part = "tip", X1 = s.ContactX, Y1 = s.ContactY, Z1 = z, R1 = 0,
-                    X2 = s.ContactX, Y2 = s.ContactY, Z2 = z - preset.TipDiameterMm / 2, R2 = preset.TipDiameterMm / 2,
-                });
+                    float subCx = group.Average(i => supports[i].ContactX);
+                    float subCy = group.Average(i => supports[i].ContactY);
+                    string subTrunkId = $"{trunkId}-sub-{++subCounter}";
 
-                // Branch from contact point down to merge point
-                segments.Add(new SupportSegment
-                {
-                    Part = "branch",
-                    X1 = s.ContactX, Y1 = s.ContactY, Z1 = z - preset.TipDiameterMm / 2, R1 = preset.NeckDiameterMm / 2,
-                    X2 = cx, Y2 = cy, Z2 = mergeZ, R2 = preset.ShaftDiameterMm / 2,
-                });
+                    if (group.Count == 1)
+                    {
+                        // Single support → branch directly to main trunk
+                        var s = supports[group[0]];
+                        var segs = new List<SupportSegment>();
+                        BuildTipSegments(segs, s, preset);
+                        segs.Add(new SupportSegment { Part = "branch",
+                            X1 = s.ContactX, Y1 = s.ContactY, Z1 = s.ContactZ - preset.ContactDepthMm, R1 = preset.NeckDiameterMm / 2,
+                            X2 = trunkCx, Y2 = trunkCy, Z2 = trunkMergeZ, R2 = preset.ShaftDiameterMm * 0.5f });
+                        result.Add(s with { Type = "tree", Segments = segs,
+                            MergeZ = trunkMergeZ, MergeX = trunkCx, MergeY = trunkCy, ParentTrunkId = trunkId });
+                    }
+                    else
+                    {
+                        // Multiple supports → form sub-branches to sub-trunk, then sub-trunk to main trunk
+                        EmitBranches(result, supports, group, preset, subTrunkId, subCx, subCy, subTrunkZ);
 
-                result.Add(s with
-                {
-                    Type = "tree", Segments = segments,
-                    MergeZ = mergeZ, MergeX = cx, MergeY = cy, ParentTrunkId = trunkId,
-                });
+                        // Sub-trunk connects to main trunk
+                        float subShaftR = preset.ShaftDiameterMm * 0.5f;
+                        var subSegs = new List<SupportSegment>
+                        {
+                            new() { Part = "branch", X1 = subCx, Y1 = subCy, Z1 = subTrunkZ, R1 = subShaftR,
+                                    X2 = trunkCx, Y2 = trunkCy, Z2 = trunkMergeZ, R2 = preset.ShaftDiameterMm * 0.6f },
+                        };
+                        result.Add(new AdvancedSupport {
+                            Id = subTrunkId, Type = "tree-subtruck", Preset = preset,
+                            ContactX = subCx, ContactY = subCy, ContactZ = subTrunkZ,
+                            NormalX = 0, NormalY = 0, NormalZ = -1,
+                            BaseX = trunkCx, BaseY = trunkCy, BaseZ = trunkMergeZ,
+                            MergeZ = trunkMergeZ, MergeX = trunkCx, MergeY = trunkCy, ParentTrunkId = trunkId,
+                            Segments = subSegs,
+                        });
+                    }
+                }
             }
 
-            // Add trunk support (merge point to base)
+            // Main trunk: merge point → base
+            float trunkR = preset.ShaftDiameterMm * 0.7f;
+            // Trunk gets thicker with more branches
+            trunkR *= 1f + allIndices.Count * 0.05f;
+            float trunkLowerStart = preset.BaseHeightMm + preset.LowerTaperLengthMm;
             var trunkSegments = new List<SupportSegment>
             {
-                new() { Part = "shaft", X1 = cx, Y1 = cy, Z1 = mergeZ, R1 = preset.ShaftDiameterMm * 0.7f,
-                         X2 = cx, Y2 = cy, Z2 = preset.BaseHeightMm + preset.LowerTaperLengthMm, R2 = preset.ShaftDiameterMm * 0.7f },
-                new() { Part = "lowerTaper", X1 = cx, Y1 = cy, Z1 = preset.BaseHeightMm + preset.LowerTaperLengthMm, R1 = preset.ShaftDiameterMm * 0.7f,
-                         X2 = cx, Y2 = cy, Z2 = preset.BaseHeightMm, R2 = preset.BaseDiameterMm / 2 },
-                new() { Part = "base", X1 = cx, Y1 = cy, Z1 = preset.BaseHeightMm, R1 = preset.BaseDiameterMm / 2,
-                         X2 = cx, Y2 = cy, Z2 = 0, R2 = preset.BaseDiameterMm / 2 },
+                new() { Part = "shaft", X1 = trunkCx, Y1 = trunkCy, Z1 = trunkMergeZ, R1 = trunkR,
+                         X2 = trunkCx, Y2 = trunkCy, Z2 = trunkLowerStart, R2 = trunkR },
+                new() { Part = "lowerTaper", X1 = trunkCx, Y1 = trunkCy, Z1 = trunkLowerStart, R1 = trunkR,
+                         X2 = trunkCx, Y2 = trunkCy, Z2 = preset.BaseHeightMm, R2 = preset.BaseDiameterMm / 2 },
+                new() { Part = "base", X1 = trunkCx, Y1 = trunkCy, Z1 = preset.BaseHeightMm, R1 = preset.BaseDiameterMm / 2,
+                         X2 = trunkCx, Y2 = trunkCy, Z2 = 0, R2 = preset.BaseDiameterMm / 2 },
             };
 
-            result.Add(new AdvancedSupport
-            {
+            result.Add(new AdvancedSupport {
                 Id = trunkId, Type = "tree-trunk", Preset = preset,
-                ContactX = cx, ContactY = cy, ContactZ = mergeZ,
+                ContactX = trunkCx, ContactY = trunkCy, ContactZ = trunkMergeZ,
                 NormalX = 0, NormalY = 0, NormalZ = -1,
-                BaseX = cx, BaseY = cy, BaseZ = 0,
+                BaseX = trunkCx, BaseY = trunkCy, BaseZ = 0,
                 Segments = trunkSegments,
             });
         }
 
         return result;
+    }
+
+    private static void BuildTipSegments(List<SupportSegment> segs, AdvancedSupport s, SupportPreset preset)
+    {
+        float tipR = preset.TipDiameterMm / 2;
+        segs.Add(new SupportSegment { Part = "tip",
+            X1 = s.ContactX, Y1 = s.ContactY, Z1 = s.ContactZ, R1 = 0,
+            X2 = s.ContactX, Y2 = s.ContactY, Z2 = s.ContactZ - preset.ContactDepthMm, R2 = tipR });
+    }
+
+    private static void EmitBranches(List<AdvancedSupport> result, List<AdvancedSupport> supports,
+        List<int> group, SupportPreset preset, string parentId, float mergeX, float mergeY, float mergeZ)
+    {
+        foreach (int gi in group)
+        {
+            var s = supports[gi];
+            var segments = new List<SupportSegment>();
+            BuildTipSegments(segments, s, preset);
+
+            // Branch angled from contact down to merge point
+            float branchTopZ = s.ContactZ - preset.ContactDepthMm;
+            segments.Add(new SupportSegment { Part = "branch",
+                X1 = s.ContactX, Y1 = s.ContactY, Z1 = branchTopZ, R1 = preset.NeckDiameterMm / 2,
+                X2 = mergeX, Y2 = mergeY, Z2 = mergeZ, R2 = preset.ShaftDiameterMm * 0.45f });
+
+            result.Add(s with {
+                Type = "tree", Segments = segments,
+                MergeZ = mergeZ, MergeX = mergeX, MergeY = mergeY, ParentTrunkId = parentId,
+            });
+        }
     }
 
     // ── Cross-bracing ───────────────────────────────────────────────────────

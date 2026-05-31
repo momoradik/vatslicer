@@ -62,10 +62,12 @@ public sealed class AdvancedSupportController : ControllerBase
             {
                 s.Id, s.Type,
                 contactX = s.ContactX, contactY = s.ContactY, contactZ = s.ContactZ,
+                normalX = s.NormalX, normalY = s.NormalY, normalZ = s.NormalZ,
                 baseX = s.BaseX, baseY = s.BaseY, baseZ = s.BaseZ,
                 mergeX = s.MergeX, mergeY = s.MergeY, mergeZ = s.MergeZ,
                 parentTrunkId = s.ParentTrunkId,
-                preset = new { s.Preset.Name, s.Preset.TipDiameterMm, s.Preset.ShaftDiameterMm, s.Preset.BaseDiameterMm },
+                preset = new { s.Preset.Name, s.Preset.TipDiameterMm, s.Preset.ShaftDiameterMm, s.Preset.BaseDiameterMm,
+                    s.Preset.TipShape, s.Preset.ShaftType, s.Preset.BaseType, s.Preset.NeckType, s.Preset.StructureType },
                 segments = s.Segments.Select(seg => new
                 {
                     seg.Part, seg.X1, seg.Y1, seg.Z1, seg.R1, seg.X2, seg.Y2, seg.Z2, seg.R2,
