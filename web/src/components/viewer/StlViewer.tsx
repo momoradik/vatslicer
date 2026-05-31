@@ -928,103 +928,86 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     const group = new THREE.Group()
     group.name = 'support-visuals'
 
-    // Render support points — advanced segment-based or simple fallback
-    const tipColors = { light: 0x4ade80, medium: 0xfbbf24, heavy: 0xf87171 }
-    const segColors: Record<string, number> = {
-      tip: 0xff6b6b, neck: 0xfbbf24, upperTaper: 0x4ade80, shaft: 0x38bdf8,
-      shaftInner: 0x1e3a5f, lowerTaper: 0x818cf8, base: 0x6366f1, branch: 0xa78bfa, brace: 0xf97316,
+    // ── PrusaSlicer-style support rendering ─────────────────────────────────
+    // Unified teal/green color like Lychee. Sphere joints at connections.
+    // Proper cone bases. Smooth visual transitions.
+    const SUPPORT_COLOR = 0x2dd4bf   // teal-400 — like Lychee/ChiTuBox
+    const BRACE_COLOR   = 0x14b8a6   // teal-500
+    const TIP_COLOR     = 0xfbbf24   // amber — highlight contact points
+    const BASE_COLOR    = 0x6366f1   // indigo — platform on bed
+
+    const supportMat = new THREE.MeshPhongMaterial({ color: SUPPORT_COLOR, transparent: true, opacity: 0.7, shininess: 30 })
+    const tipMat     = new THREE.MeshPhongMaterial({ color: TIP_COLOR, transparent: true, opacity: 0.85, shininess: 40 })
+    const baseMat    = new THREE.MeshPhongMaterial({ color: BASE_COLOR, transparent: true, opacity: 0.75 })
+    const braceMat   = new THREE.MeshPhongMaterial({ color: BRACE_COLOR, transparent: true, opacity: 0.5 })
+
+    // Helper: add a cylinder between two print-space points
+    const addCyl = (x1: number, y1: number, z1: number, r1: number,
+                    x2: number, y2: number, z2: number, r2: number,
+                    mat: THREE.Material, detail: number, pid: string) => {
+      const h = Math.sqrt((x2-x1)**2 + (y2-y1)**2 + (z2-z1)**2)
+      if (h < 0.005) return
+      const geo = new THREE.CylinderGeometry(Math.max(0.02, r1), Math.max(0.02, r2), h, detail)
+      const mesh = new THREE.Mesh(geo, mat)
+      mesh.position.set((x1+x2)/2, (z1+z2)/2, (y1+y2)/2)
+      const dir = new THREE.Vector3(x2-x1, z2-z1, y2-y1).normalize()
+      if (dir.length() > 0.01) mesh.setRotationFromQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), dir))
+      mesh.userData = { supportPointId: pid }
+      group.add(mesh)
     }
-    const segOpacity: Record<string, number> = {
-      tip: 0.85, neck: 0.7, upperTaper: 0.65, shaft: 0.6,
-      shaftInner: 0.25, lowerTaper: 0.65, base: 0.7, branch: 0.55, brace: 0.5,
+
+    // Helper: add a sphere joint at a print-space point
+    const addSphere = (x: number, y: number, z: number, r: number,
+                       mat: THREE.Material, pid: string) => {
+      if (r < 0.01) return
+      const geo = new THREE.SphereGeometry(r, 8, 6)
+      const mesh = new THREE.Mesh(geo, mat)
+      mesh.position.set(x, z, y) // print→three: x=x, y=z, z=y
+      mesh.userData = { supportPointId: pid }
+      group.add(mesh)
     }
-    const segDetail: Record<string, number> = {
-      tip: 12, neck: 8, shaft: 8, shaftInner: 6, base: 10, branch: 6,
-    }
+
     pts.forEach(p => {
-      const color = tipColors[p.type] ?? 0xfbbf24
-
       if (p.segments && p.segments.length > 0) {
-        // Compute model scale to ensure supports are visible at any zoom level
-        // Find the Z extent of this support to determine appropriate minimum radius
-        const zMax = Math.max(...p.segments.map(seg => Math.max(seg.z1, seg.z2)))
-        const zMin = Math.min(...p.segments.map(seg => Math.min(seg.z1, seg.z2)))
-        const supportHeight = zMax - zMin
-        // Minimum visible radius: 0.4% of support height, at least 0.15mm
-        const minVisibleR = Math.max(0.15, supportHeight * 0.004)
+        p.segments.forEach((seg, i) => {
+          const isTip = seg.part === 'tip'
+          const isBase = seg.part === 'base'
+          const mat2 = isTip ? tipMat : isBase ? baseMat : supportMat
+          const detail = isTip ? 10 : isBase ? 10 : 8
 
-        // Advanced: render each segment as a tapered cylinder with part-specific styling
-        p.segments.forEach(seg => {
-          const segColor = segColors[seg.part] ?? color
-          const opacity = segOpacity[seg.part] ?? 0.65
-          const detail = segDetail[seg.part] ?? 8
-          const h = Math.sqrt((seg.x2-seg.x1)**2 + (seg.y2-seg.y1)**2 + (seg.z2-seg.z1)**2)
-          if (h < 0.01) return
-          // Scale radii to be visible: use actual radius but ensure minimum visibility
-          const r1 = Math.max(seg.part === 'shaftInner' ? 0.02 : minVisibleR, seg.r1)
-          const r2 = Math.max(seg.part === 'shaftInner' ? 0.02 : minVisibleR, seg.r2)
+          // Draw the cylinder segment
+          addCyl(seg.x1, seg.y1, seg.z1, seg.r1, seg.x2, seg.y2, seg.z2, seg.r2, mat2, detail, p.id)
 
-          const geo = new THREE.CylinderGeometry(r1, r2, h, detail)
-
-          const mat = new THREE.MeshPhongMaterial({
-            color: segColor, transparent: true, opacity,
-            ...(seg.part === 'shaftInner' ? { depthWrite: false } : {}),
-          })
-          const mesh = new THREE.Mesh(geo, mat)
-          // Position at midpoint, orient along segment direction
-          // Print-space → Three.js: x=x, y=z, z=y
-          const mx = (seg.x1+seg.x2)/2, my = (seg.z1+seg.z2)/2, mz = (seg.y1+seg.y2)/2
-          mesh.position.set(mx, my, mz)
-          // Orient cylinder along the segment direction
-          const dir = new THREE.Vector3(seg.x2-seg.x1, seg.z2-seg.z1, seg.y2-seg.y1).normalize()
-          if (dir.length() > 0.01) {
-            const up = new THREE.Vector3(0, 1, 0)
-            const quat = new THREE.Quaternion().setFromUnitVectors(up, dir)
-            mesh.setRotationFromQuaternion(quat)
+          // Add sphere joint at the START of each segment (smooth connection)
+          const jr = Math.max(seg.r1, seg.r2) * 0.9
+          if (i === 0 && isTip) {
+            // Tip contact point — small amber sphere
+            addSphere(seg.x1, seg.y1, seg.z1, Math.max(seg.r1, 0.1), tipMat, p.id)
+          } else if (seg.part === 'shaft' || seg.part === 'upperTaper') {
+            // Junction sphere where segments connect
+            addSphere(seg.x1, seg.y1, seg.z1, jr, supportMat, p.id)
           }
-          mesh.userData = { supportPointId: p.id }
-          group.add(mesh)
+
+          // Base bottom — flat disc sphere
+          if (isBase && i === p.segments!.length - 1) {
+            addSphere(seg.x2, seg.y2, seg.z2, Math.max(seg.r2, 0.2), baseMat, p.id)
+          }
         })
       } else {
-        // Simple fallback: sphere + column
-        const tipR = p.type === 'light' ? 0.15 : p.type === 'medium' ? 0.25 : 0.4
-        const sphereGeo = new THREE.SphereGeometry(tipR, 8, 8)
-        const sphereMat = new THREE.MeshPhongMaterial({ color, transparent: true, opacity: 0.9 })
-        const sphere = new THREE.Mesh(sphereGeo, sphereMat)
-        sphere.position.set(p.x, p.z, p.y)
-        sphere.userData = { supportPointId: p.id }
-        group.add(sphere)
-        if (p.z > 0.1) {
-          const colH = p.z, colR = tipR * 0.4
-          const colGeo = new THREE.CylinderGeometry(colR, colR, colH, 6)
-          const colMat = new THREE.MeshPhongMaterial({ color, transparent: true, opacity: 0.5 })
-          const col = new THREE.Mesh(colGeo, colMat)
-          col.position.set(p.x, colH / 2, p.y)
-          col.userData = { supportPointId: p.id }
-          group.add(col)
-        }
+        // Simple fallback
+        addSphere(p.x, p.y, p.z, 0.25, tipMat, p.id)
+        if (p.z > 0.1) addCyl(p.x, p.y, p.z, 0.1, p.x, p.y, 0, 0.1, supportMat, 6, p.id)
       }
     })
 
-    // Render cross-braces — horizontal bridges and diagonal struts between supports
+    // Render cross-braces with sphere joints at both ends
     braces.forEach(b => {
       const h = Math.sqrt((b.x2-b.x1)**2 + (b.y2-b.y1)**2 + (b.z2-b.z1)**2)
       if (h < 0.01) return
-      // Ensure braces are visible at model scale (same logic as support min radius)
-      const allZ = pts.flatMap(p => (p.segments || []).flatMap(s => [s.z1, s.z2]))
-      const modelH = allZ.length > 0 ? Math.max(...allZ) - Math.min(...allZ) : 100
-      const minR = Math.max(0.1, modelH * 0.003)
-      const r = Math.max(minR, b.diameter / 2)
-      // Horizontal bridges vs diagonal: different colors
-      const isHorizontal = Math.abs(b.z1 - b.z2) < 0.1
-      const color = isHorizontal ? 0x22d3ee : 0xf97316 // cyan for horizontal, orange for diagonal
-      const geo = new THREE.CylinderGeometry(r, r, h, 6)
-      const mat = new THREE.MeshPhongMaterial({ color, transparent: true, opacity: isHorizontal ? 0.6 : 0.45 })
-      const mesh = new THREE.Mesh(geo, mat)
-      mesh.position.set((b.x1+b.x2)/2, (b.z1+b.z2)/2, (b.y1+b.y2)/2)
-      const dir = new THREE.Vector3(b.x2-b.x1, b.z2-b.z1, b.y2-b.y1).normalize()
-      if (dir.length() > 0.01) mesh.setRotationFromQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), dir))
-      group.add(mesh)
+      const r = Math.max(0.05, b.diameter / 2)
+      addCyl(b.x1, b.y1, b.z1, r, b.x2, b.y2, b.z2, r, braceMat, 5, '')
+      addSphere(b.x1, b.y1, b.z1, r * 1.1, braceMat, '')
+      addSphere(b.x2, b.y2, b.z2, r * 1.1, braceMat, '')
     })
 
     // Render painted regions as transparent spheres
