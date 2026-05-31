@@ -1006,13 +1006,20 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       }
     })
 
-    // Render cross-braces
+    // Render cross-braces — horizontal bridges and diagonal struts between supports
     braces.forEach(b => {
       const h = Math.sqrt((b.x2-b.x1)**2 + (b.y2-b.y1)**2 + (b.z2-b.z1)**2)
       if (h < 0.01) return
-      const r = b.diameter / 2
-      const geo = new THREE.CylinderGeometry(r, r, h, 4)
-      const mat = new THREE.MeshPhongMaterial({ color: 0xf97316, transparent: true, opacity: 0.5 })
+      // Ensure braces are visible at model scale (same logic as support min radius)
+      const allZ = pts.flatMap(p => (p.segments || []).flatMap(s => [s.z1, s.z2]))
+      const modelH = allZ.length > 0 ? Math.max(...allZ) - Math.min(...allZ) : 100
+      const minR = Math.max(0.1, modelH * 0.003)
+      const r = Math.max(minR, b.diameter / 2)
+      // Horizontal bridges vs diagonal: different colors
+      const isHorizontal = Math.abs(b.z1 - b.z2) < 0.1
+      const color = isHorizontal ? 0x22d3ee : 0xf97316 // cyan for horizontal, orange for diagonal
+      const geo = new THREE.CylinderGeometry(r, r, h, 6)
+      const mat = new THREE.MeshPhongMaterial({ color, transparent: true, opacity: isHorizontal ? 0.6 : 0.45 })
       const mesh = new THREE.Mesh(geo, mat)
       mesh.position.set((b.x1+b.x2)/2, (b.z1+b.z2)/2, (b.y1+b.y2)/2)
       const dir = new THREE.Vector3(b.x2-b.x1, b.z2-b.z1, b.y2-b.y1).normalize()

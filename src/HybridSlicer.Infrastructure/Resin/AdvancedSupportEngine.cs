@@ -1029,55 +1029,70 @@ public static class AdvancedSupportEngine
     {
         var braces = new List<CrossBrace>();
         float braceInterval = preset.BraceIntervalMm;
-        const int MAX_BRACES_PER_SUPPORT = 3; // limit to nearest 3 neighbors
 
-        for (int i = 0; i < supports.Count; i++)
+        // Filter to only column supports (not tree branches/trunks)
+        var columns = supports.Where(s =>
+            s.Type != "tree" && s.Type != "tree-trunk" && s.Type != "tree-subtruck").ToList();
+
+        // Use shaft positions (BaseX/Y) not contact positions for proper connection
+        for (int i = 0; i < columns.Count; i++)
         {
-            var si = supports[i];
-            // Find nearest neighbors only
+            var si = columns[i];
+            // Find nearest neighbors by SHAFT position
             var neighbors = new List<(int idx, float dist)>();
-            for (int j = 0; j < supports.Count; j++)
+            for (int j = i + 1; j < columns.Count; j++) // j > i to avoid duplicates
             {
-                if (j == i) continue;
-                var sj = supports[j];
+                var sj = columns[j];
                 float dist = Vector2.Distance(
-                    new Vector2(si.ContactX, si.ContactY),
-                    new Vector2(sj.ContactX, sj.ContactY));
-                if (dist <= maxDist) neighbors.Add((j, dist));
+                    new Vector2(si.BaseX, si.BaseY),
+                    new Vector2(sj.BaseX, sj.BaseY));
+                if (dist > 0.5f && dist <= maxDist) // min 0.5mm apart
+                    neighbors.Add((j, dist));
             }
             neighbors.Sort((a, b) => a.dist.CompareTo(b.dist));
 
-            // Only brace to nearest N neighbors, and only if i < j to avoid duplicates
-            foreach (var (j, dist) in neighbors.Take(MAX_BRACES_PER_SUPPORT))
+            // Connect to nearest 3 neighbors
+            foreach (var (j, xyDist) in neighbors.Take(3))
             {
-                if (j <= i) continue; // avoid duplicate pairs
-                var sj = supports[j];
-                float minZ = Math.Max(si.BaseZ, sj.BaseZ) + 1;
-                float maxZ = Math.Min(si.ContactZ, sj.ContactZ) - 1;
-                if (maxZ <= minZ) continue;
-                bool alternate = false;
+                var sj = columns[j];
+                // Shaft Z range where both supports overlap
+                float shaftTopI = si.ContactZ - 3f; // below pinhead
+                float shaftTopJ = sj.ContactZ - 3f;
+                float minZ = Math.Max(si.BaseZ, sj.BaseZ) + 2;
+                float maxZ = Math.Min(shaftTopI, shaftTopJ) - 1;
+                if (maxZ <= minZ + braceInterval) continue;
 
-                // Limit braces per pair based on height
-                int maxBracesPerPair = Math.Min(5, (int)((maxZ - minZ) / braceInterval));
+                // Generate alternating pattern: horizontal bridge + diagonal cross
+                int maxBracesPerPair = Math.Min(6, (int)((maxZ - minZ) / braceInterval));
                 int braceCount = 0;
+                bool cross = false;
 
                 for (float z = minZ + braceInterval; z < maxZ && braceCount < maxBracesPerPair; z += braceInterval)
                 {
-                    float z2 = z + braceInterval * 0.3f;
-                    if (z2 > maxZ) z2 = maxZ;
-
-                    braces.Add(new CrossBrace
+                    if (cross)
                     {
-                        SupportA = si.Id, SupportB = sj.Id,
-                        X1 = alternate ? si.ContactX : sj.ContactX,
-                        Y1 = alternate ? si.ContactY : sj.ContactY,
-                        Z1 = z,
-                        X2 = alternate ? sj.ContactX : si.ContactX,
-                        Y2 = alternate ? sj.ContactY : si.ContactY,
-                        Z2 = z2,
-                        Diameter = preset.BraceDiameterMm,
-                    });
-                    alternate = !alternate;
+                        // Diagonal cross-brace (zigzag)
+                        float z2 = Math.Min(z + braceInterval * 0.5f, maxZ);
+                        braces.Add(new CrossBrace
+                        {
+                            SupportA = si.Id, SupportB = sj.Id,
+                            X1 = si.BaseX, Y1 = si.BaseY, Z1 = z,
+                            X2 = sj.BaseX, Y2 = sj.BaseY, Z2 = z2,
+                            Diameter = preset.BraceDiameterMm,
+                        });
+                    }
+                    else
+                    {
+                        // Horizontal bridge (same Z on both sides)
+                        braces.Add(new CrossBrace
+                        {
+                            SupportA = si.Id, SupportB = sj.Id,
+                            X1 = si.BaseX, Y1 = si.BaseY, Z1 = z,
+                            X2 = sj.BaseX, Y2 = sj.BaseY, Z2 = z,
+                            Diameter = preset.BraceDiameterMm * 1.2f, // slightly thicker horizontal
+                        });
+                    }
+                    cross = !cross;
                     braceCount++;
                 }
             }
