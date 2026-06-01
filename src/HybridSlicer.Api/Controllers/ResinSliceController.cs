@@ -96,25 +96,51 @@ public sealed class ResinSliceController : ControllerBase
 
         try
         {
-            // Generate auto-supports, raft, skirt
+            // Generate supports: try V2 engine first, fallback to legacy
             AutoSupportEngine.AutoSupportResult? autoResult = null;
+            SupportEngineV2.EngineResult? v2Result = null;
+
             if (supportEnabled || raftEnabled || skirtEnabled)
             {
                 var parsedMesh = StlMesh.FromBinary(stlData);
-                autoResult = AutoSupportEngine.Generate(parsedMesh, new AutoSupportEngine.SupportConfig
+
+                // V2 engine for supports (production-grade)
+                if (supportEnabled)
                 {
-                    Orientation = printer.Orientation,
-                    OverhangAngleDeg = supportEnabled ? autoSupportOverhangAngle : 0, // 0 = no overhangs detected
-                    DensityFactor = supportEnabled ? autoSupportDensity : 0,
-                    SupportType = supportType,
-                    Placement = supportPlacement,
-                    RaftEnabled = raftEnabled,
-                    RaftType = raftType,
-                    SkirtEnabled = skirtEnabled,
-                    SkirtLayers = skirtLayers,
-                });
-                _log.LogInformation("Auto-supports: {Count} supports, {Overhangs} overhangs, {Ms}ms",
-                    autoResult.Supports.Count, autoResult.OverhangFaceCount, autoResult.ElapsedMs);
+                    try
+                    {
+                        var (validatedMesh, _) = MeshValidator.ValidateAndRepair(stlData);
+                        v2Result = SupportEngineV2.Generate(validatedMesh, new SupportEngineV2.EngineConfig
+                        {
+                            Orientation = printer.Orientation,
+                            OverhangAngleDeg = (float)autoSupportOverhangAngle,
+                            DensityFactor = (float)autoSupportDensity,
+                        });
+                        _log.LogInformation("V2 supports: {Count} supports, {Ms}ms, {Faces} mesh faces",
+                            v2Result.ValidSupports, v2Result.TotalElapsedMs, v2Result.SupportMesh.FaceCount);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning(ex, "V2 support engine failed, falling back to legacy");
+                    }
+                }
+
+                // Legacy engine for raft/skirt (and fallback supports if V2 failed)
+                if (raftEnabled || skirtEnabled || (supportEnabled && v2Result == null))
+                {
+                    autoResult = AutoSupportEngine.Generate(parsedMesh, new AutoSupportEngine.SupportConfig
+                    {
+                        Orientation = printer.Orientation,
+                        OverhangAngleDeg = supportEnabled && v2Result == null ? autoSupportOverhangAngle : 0,
+                        DensityFactor = supportEnabled && v2Result == null ? autoSupportDensity : 0,
+                        SupportType = supportType,
+                        Placement = supportPlacement,
+                        RaftEnabled = raftEnabled,
+                        RaftType = raftType,
+                        SkirtEnabled = skirtEnabled,
+                        SkirtLayers = skirtLayers,
+                    });
+                }
             }
 
             var result = _slicer.Slice(new ResinSlicerEngine.SliceRequest
@@ -132,7 +158,10 @@ public sealed class ResinSliceController : ControllerBase
                 SupportPlacement = supportPlacement,
                 HollowEnabled = hollowEnabled,
                 HollowWallThicknessMm = hollowWallThicknessMm,
-                AutoSupports = autoResult?.Supports,
+                // V2 supports (analytical slicing into layer images)
+                V2SupportElements = v2Result?.SliceElements,
+                // Legacy supports/raft/skirt
+                AutoSupports = v2Result == null ? autoResult?.Supports : null,
                 Raft = autoResult?.Raft,
                 Skirt = autoResult?.Skirt,
             });
