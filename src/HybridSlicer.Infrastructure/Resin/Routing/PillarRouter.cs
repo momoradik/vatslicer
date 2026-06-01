@@ -43,7 +43,7 @@ public static class PillarRouter
         public required string Type { get; init; }
     }
 
-    public sealed class RoutingConfig
+    public sealed record RoutingConfig
     {
         public float BaseZ { get; init; } = 0;
         public float PillarRadiusMm { get; init; } = 0.5f;

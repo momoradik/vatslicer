@@ -53,7 +53,11 @@ public static class SupportEngineV2
         public float PillarRadiusMm { get; init; } = 0.5f;
         public float BaseRadiusMm { get; init; } = 2.0f;
         public float BaseHeightMm { get; init; } = 1.0f;
-        public float WideningFactor { get; init; } = 0.01f;
+        /// <summary>
+        /// Radius increase per mm of pillar descent. Higher = thicker base.
+        /// 0.02 = 2% per mm → a 100mm pillar grows by 2mm radius at base.
+        /// </summary>
+        public float WideningFactor { get; init; } = 0.02f;
         public float MaxBridgeLengthMm { get; init; } = 15f;
 
         // Interconnections
@@ -152,7 +156,27 @@ public static class SupportEngineV2
         var pinheads = new List<(string id, PinheadOptimizer.Pinhead pinhead)>();
         foreach (var pt in pointResult.Points)
         {
-            var pinhead = PinheadOptimizer.Optimize(pt.Position, pt.Normal, bvh, pinheadConfig);
+            // Auto-scale pinhead based on structural weight recommendation
+            var phCfg = pinheadConfig;
+            if (pt.RecommendedWeight == ForceEstimator.SupportWeight.Heavy)
+            {
+                phCfg = phCfg with
+                {
+                    PinRadiusMm = Math.Max(phCfg.PinRadiusMm, 0.4f),
+                    BackRadiusMm = Math.Max(phCfg.BackRadiusMm, 0.75f),
+                    WidthMm = Math.Max(phCfg.WidthMm, 1.5f),
+                };
+            }
+            else if (pt.RecommendedWeight == ForceEstimator.SupportWeight.Medium)
+            {
+                phCfg = phCfg with
+                {
+                    PinRadiusMm = Math.Max(phCfg.PinRadiusMm, 0.25f),
+                    BackRadiusMm = Math.Max(phCfg.BackRadiusMm, 0.5f),
+                };
+            }
+
+            var pinhead = PinheadOptimizer.Optimize(pt.Position, pt.Normal, bvh, phCfg);
             pinheads.Add((pt.Id, pinhead));
         }
 
@@ -172,10 +196,25 @@ public static class SupportEngineV2
         };
 
         var routes = new List<(string id, PillarRouter.PillarRoute route)>();
+        // Build lookup for point weight recommendations
+        var pointWeights = pointResult.Points.ToDictionary(p => p.Id, p => p.RecommendedWeight);
+
         foreach (var (id, pinhead) in pinheads)
         {
             if (!pinhead.IsValid) continue;
-            var route = PillarRouter.Route(pinhead.JunctionPoint, pinhead.BackRadius, bvh, routingConfig);
+
+            // Auto-scale pillar radius for heavy supports
+            var rCfg = routingConfig;
+            if (pointWeights.TryGetValue(id, out var weight) && weight == ForceEstimator.SupportWeight.Heavy)
+            {
+                rCfg = rCfg with
+                {
+                    PillarRadiusMm = Math.Max(rCfg.PillarRadiusMm, 0.75f),
+                    BaseRadiusMm = Math.Max(rCfg.BaseRadiusMm, 3.0f),
+                };
+            }
+
+            var route = PillarRouter.Route(pinhead.JunctionPoint, pinhead.BackRadius, bvh, rCfg);
             routes.Add((id, route));
         }
 

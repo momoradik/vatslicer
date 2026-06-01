@@ -115,8 +115,11 @@ public static class ForceEstimator
         minDiameter = Math.Max(minDiameter, 0.3f);
 
         // ── Weight classification ──
+        // Also consider column height — tall supports need heavy regardless of load
         SupportWeight weight;
-        if (minDiameter <= 0.5f && totalAxial < 0.5f)
+        if (supportZ > 50f) // tall support (>50mm) always heavy
+            weight = SupportWeight.Heavy;
+        else if (minDiameter <= 0.5f && totalAxial < 0.5f && supportZ < 20f)
             weight = SupportWeight.Light;
         else if (minDiameter <= 1.0f && totalAxial < 2.0f)
             weight = SupportWeight.Medium;

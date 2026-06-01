@@ -45,7 +45,7 @@ public static class PinheadOptimizer
     /// <summary>
     /// Pinhead configuration.
     /// </summary>
-    public sealed class PinheadConfig
+    public sealed record PinheadConfig
     {
         public float PinRadiusMm { get; init; } = 0.2f;
         public float BackRadiusMm { get; init; } = 0.5f;

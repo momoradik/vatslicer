@@ -75,14 +75,16 @@ public static class StructuralValidator
 
         foreach (var (id, route, contactZ) in supports)
         {
-            // Find the main pillar dimensions
+            // Find the main pillar dimensions — use average radius (not min) because
+            // pillar widening means the base is much thicker than the junction
             float pillarHeight = 0;
-            float minRadius = float.MaxValue;
+            float totalR = 0; int rCount = 0;
             foreach (var wp in route.Path)
             {
-                if (wp.Type == "pillar" || wp.Type == "junction")
-                    minRadius = Math.Min(minRadius, wp.Radius);
+                if (wp.Type == "pillar" || wp.Type == "junction" || wp.Type == "base")
+                { totalR += wp.Radius; rCount++; }
             }
+            float minRadius = rCount > 0 ? totalR / rCount : float.MaxValue; // average radius
             if (route.Path.Count >= 2)
                 pillarHeight = route.Path[0].Position.Z - route.Path[^1].Position.Z;
 
