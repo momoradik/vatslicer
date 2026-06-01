@@ -62,16 +62,40 @@ public sealed class IndexedTriangleSet
         var remap = new int[Vertices.Count];
         var newVerts = new List<Vector3>();
 
+        // Hash grid for O(1) average vertex lookup instead of O(n) brute force
+        float cellSize = epsilon * 10f;
+        float invCell = 1f / cellSize;
+        var grid = new Dictionary<long, List<int>>();
+
+        long HashV(Vector3 v) =>
+            ((long)(int)MathF.Floor(v.X * invCell) * 73856093L) ^
+            ((long)(int)MathF.Floor(v.Y * invCell) * 19349669L) ^
+            ((long)(int)MathF.Floor(v.Z * invCell) * 83492791L);
+
         for (int i = 0; i < Vertices.Count; i++)
         {
+            var v = Vertices[i];
             int merged = -1;
-            // Search recent vertices (typically nearby in the mesh)
-            for (int j = newVerts.Count - 1; j >= Math.Max(0, newVerts.Count - 200); j--)
+            var key = HashV(v);
+
+            // Check this cell and 26 neighbors for matching vertices
+            int cx = (int)MathF.Floor(v.X * invCell);
+            int cy = (int)MathF.Floor(v.Y * invCell);
+            int cz = (int)MathF.Floor(v.Z * invCell);
+
+            for (int dx = -1; dx <= 1 && merged < 0; dx++)
+            for (int dy = -1; dy <= 1 && merged < 0; dy++)
+            for (int dz = -1; dz <= 1 && merged < 0; dz++)
             {
-                if (Vector3.DistanceSquared(Vertices[i], newVerts[j]) < eps2)
+                long nk = ((long)(cx + dx) * 73856093L) ^ ((long)(cy + dy) * 19349669L) ^ ((long)(cz + dz) * 83492791L);
+                if (!grid.TryGetValue(nk, out var bucket)) continue;
+                foreach (int idx in bucket)
                 {
-                    merged = j;
-                    break;
+                    if (Vector3.DistanceSquared(v, newVerts[idx]) < eps2)
+                    {
+                        merged = idx;
+                        break;
+                    }
                 }
             }
 
@@ -82,7 +106,9 @@ public sealed class IndexedTriangleSet
             else
             {
                 remap[i] = newVerts.Count;
-                newVerts.Add(Vertices[i]);
+                if (!grid.TryGetValue(key, out var bucket)) { bucket = new List<int>(); grid[key] = bucket; }
+                bucket.Add(newVerts.Count);
+                newVerts.Add(v);
             }
         }
 
@@ -91,7 +117,7 @@ public sealed class IndexedTriangleSet
         foreach (var (a, b, c) in Faces)
         {
             int na = remap[a], nb = remap[b], nc = remap[c];
-            if (na != nb && nb != nc && na != nc) // skip degenerate
+            if (na != nb && nb != nc && na != nc)
                 newFaces.Add((na, nb, nc));
         }
 

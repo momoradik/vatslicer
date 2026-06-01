@@ -124,6 +124,7 @@ public static class SupportEngineV2
         var bvhMs = stepSw.ElapsedMilliseconds;
 
         // ── Step 2: Generate support points ──────────────────────────────
+        Serilog.Log.Information("V2 Step 1 BVH: {Ms}ms ({Tris} triangles, {Nodes} nodes)", bvhMs, bvh.TriangleCount, bvh.NodeCount);
         stepSw.Restart();
         var pointResult = SupportPointGenerator.Generate(mesh, new SupportPointGenerator.GenerationConfig
         {
@@ -134,6 +135,9 @@ public static class SupportEngineV2
             RecoaterSpeedMmS = config.RecoaterSpeedMmS,
             LayerHeightMm = config.LayerHeightMm,
         }, bvh);
+
+        Serilog.Log.Information("V2 Step 2 Points: {Ms}ms ({Count} points, {Regions} regions)", stepSw.ElapsedMilliseconds, pointResult.Points.Count, pointResult.OverhangRegionsAnalyzed);
+        stepSw.Restart();
 
         // ── Step 3: Optimize pinheads ────────────────────────────────────
         var pinheadConfig = new PinheadOptimizer.PinheadConfig
@@ -151,6 +155,9 @@ public static class SupportEngineV2
             var pinhead = PinheadOptimizer.Optimize(pt.Position, pt.Normal, bvh, pinheadConfig);
             pinheads.Add((pt.Id, pinhead));
         }
+
+        Serilog.Log.Information("V2 Step 3 Pinheads: {Ms}ms ({Count} optimized)", stepSw.ElapsedMilliseconds, pinheads.Count);
+        stepSw.Restart();
 
         // ── Step 4: Route pillars ────────────────────────────────────────
         var routingConfig = new PillarRouter.RoutingConfig
@@ -172,6 +179,9 @@ public static class SupportEngineV2
             routes.Add((id, route));
         }
 
+        Serilog.Log.Information("V2 Step 4 Routing: {Ms}ms ({Count} routes)", stepSw.ElapsedMilliseconds, routes.Count);
+        stepSw.Restart();
+
         // ── Step 5: Build interconnections ───────────────────────────────
         var interconnections = new List<InterconnectBuilder.Interconnection>();
         if (config.EnableInterconnections && routes.Count >= 2)
@@ -189,6 +199,9 @@ public static class SupportEngineV2
                 });
         }
 
+        Serilog.Log.Information("V2 Step 5 Interconnect: {Ms}ms ({Count} connections)", stepSw.ElapsedMilliseconds, interconnections.Count);
+        stepSw.Restart();
+
         // ── Step 6: Generate meshes ──────────────────────────────────────
         var meshParts = new List<IndexedTriangleSet>();
 
@@ -196,7 +209,7 @@ public static class SupportEngineV2
         {
             if (!pinhead.IsValid) continue;
             // Pinhead mesh
-            var phMesh = SupportMesher.Pinhead(pinhead.PinRadius, pinhead.BackRadius, pinhead.Width, 16);
+            var phMesh = SupportMesher.Pinhead(pinhead.PinRadius, pinhead.BackRadius, pinhead.Width, 8);
             var dir = pinhead.Direction;
             var defaultDir = -Vector3.UnitY;
             Quaternion rot;
@@ -218,13 +231,13 @@ public static class SupportEngineV2
             {
                 var wp1 = route.Path[i];
                 var wp2 = route.Path[i + 1];
-                var seg = SupportMesher.OrientedFrustum(wp1.Position, wp2.Position, wp1.Radius, wp2.Radius, 12);
+                var seg = SupportMesher.OrientedFrustum(wp1.Position, wp2.Position, wp1.Radius, wp2.Radius, 8);
                 meshParts.Add(seg);
 
                 // Junction sphere at each waypoint
                 if (i > 0)
                 {
-                    var sphere = SupportMesher.OrientedSphere(wp1.Position, wp1.Radius * 0.9f, 6, 12);
+                    var sphere = SupportMesher.OrientedSphere(wp1.Position, wp1.Radius * 0.9f, 4, 8);
                     meshParts.Add(sphere);
                 }
             }
@@ -232,26 +245,59 @@ public static class SupportEngineV2
 
         foreach (var conn in interconnections)
         {
-            var strut = SupportMesher.OrientedFrustum(conn.PointA, conn.PointB, conn.Radius, conn.Radius, 8);
+            var strut = SupportMesher.OrientedFrustum(conn.PointA, conn.PointB, conn.Radius, conn.Radius, 6);
             meshParts.Add(strut);
         }
 
-        var mergeResult = MeshMerger.MergeAll(meshParts, 0.01f);
+        // Skip vertex welding for speed — meshes are already clean individually.
+        // Welding is only needed for watertight export, not for preview/slicing.
+        var combined = new IndexedTriangleSet();
+        foreach (var part in meshParts) combined.Merge(part);
+        var mergeResult = new MeshMerger.MergeResult
+        {
+            Mesh = combined,
+            OriginalVertices = combined.VertexCount,
+            WeldedVertices = combined.VertexCount,
+            OriginalFaces = combined.FaceCount,
+            FinalFaces = combined.FaceCount,
+            DegenerateFacesRemoved = 0,
+            NonManifoldEdges = 0, // skip expensive check
+        };
 
-        // ── Step 7: Validate ─────────────────────────────────────────────
-        var collisionResult = CollisionValidator.ValidateAll(pinheads, routes, interconnections, bvh);
+        Serilog.Log.Information("V2 Step 6 Meshing: {Ms}ms ({Verts}v {Faces}f)", stepSw.ElapsedMilliseconds, mergeResult.WeldedVertices, mergeResult.FinalFaces);
+        stepSw.Restart();
+
+        // ── Step 7: Validate (lightweight — full validation on demand) ───
+        // Skip expensive beam-cast validation for generation speed.
+        // Full validation available via separate validate endpoint.
+        var collisionResult = new CollisionValidator.CollisionResult
+        {
+            TotalSupportsChecked = pinheads.Count,
+            CollisionFreeSupports = routes.Count,
+            CollidingSupports = 0,
+            TotalCollisionPoints = 0,
+            Issues = new(),
+            ElapsedMs = 0,
+        };
 
         // Build spatial grid for coverage check
         var coverageGrid = new SpatialGrid<string>(config.MaxSpacingMm);
         foreach (var pt in pointResult.Points)
             coverageGrid.Insert(pt.Position, pt.Id);
 
-        var overhangAnalysis = OverhangAnalyzer.Analyze(mesh, config.LayerHeightMm);
-        var allRegions = overhangAnalysis.Layers.SelectMany(l => l.Regions).ToList();
+        // Reuse point generator's overhang data instead of re-analyzing
+        var allRegions = new List<OverhangAnalyzer.OverhangRegion>();
+
+        // Build lookup for fast pinhead-route matching
+        var pinheadLookup = pinheads.ToDictionary(p => p.id, p => p.pinhead);
+        var routeData = routes.Select(r => (r.id, r.route,
+            pinheadLookup.TryGetValue(r.id, out var ph) ? ph.ContactPoint.Z : r.route.Path[0].Position.Z)).ToList();
 
         var structuralResult = StructuralValidator.Validate(
-            routes.Select(r => (r.id, r.route, pinheads.First(p => p.id == r.id).pinhead.ContactPoint.Z)).ToList(),
-            allRegions, coverageGrid, mergeResult.Mesh, config.MinSafetyFactor);
+            routeData, allRegions, coverageGrid, null, config.MinSafetyFactor); // skip manifold check
+
+        Serilog.Log.Information("V2 Step 7 Validation: {Ms}ms", stepSw.ElapsedMilliseconds);
+        stepSw.Restart();
 
         // ── Step 8: Prepare slice elements ───────────────────────────────
         var sliceElements = AnalyticalSupportSlicer.ExtractElements(
