@@ -9,7 +9,7 @@ import StlViewer, {
 } from '../components/viewer/StlViewer'
 import PrintProfilePanel from '../components/PrintProfilePanel'
 import MaterialProfilePanel from '../components/MaterialProfilePanel'
-import { machineProfilesApi, resinPrintProfilesApi, resinSliceApi, meshApi, autoSupportApi, advancedSupportApi, type AdvancedSupportData, type CrossBraceData } from '../api/client'
+import { machineProfilesApi, resinPrintProfilesApi, resinSliceApi, meshApi, autoSupportApi, advancedSupportApi, supportV2Api, type AdvancedSupportData, type CrossBraceData } from '../api/client'
 
 // ── Per-object settings override ──────────────────────────────────────────────
 
@@ -558,16 +558,25 @@ export default function StlImport() {
       fd.append('skirtLayers', String(autoSupportConfig.skirtLayers))
       fd.append('skirtDistanceMm', String(autoSupportConfig.skirtDistance))
 
-      // Use advanced support API for supports + old API for raft/skirt
-      const [advResult, basicResult] = await Promise.all([
-        advancedSupportApi.generate(fd),
-        autoSupportApi.generate(fd),
-      ])
+      // Use V2 engine (production-grade with BVH, collision avoidance, structural validation)
+      // Falls back to legacy engine if V2 fails
+      let advResult: { supports: AdvancedSupportData[]; crossBraces: CrossBraceData[] }
+      try {
+        const v2Result = await supportV2Api.generate(fd)
+        advResult = v2Result
+        console.log(`[V2] ${v2Result.validSupports} supports, SF=${v2Result.validation.structural.minSafetyFactor.toFixed(1)}, collisions=${v2Result.validation.collision.collidingSupports}, ${v2Result.elapsedMs}ms`)
+      } catch {
+        // Fallback to legacy engine
+        advResult = await advancedSupportApi.generate(fd)
+        console.log('[V2] Fallback to legacy engine')
+      }
+
+      const basicResult = await autoSupportApi.generate(fd)
       updateModels(prev => prev.map(m => m.id === selectedId ? {
         ...m, prep: {
           autoSupports: advResult.supports.map(s => ({
             x: s.contactX, y: s.contactY, contactZ: s.contactZ, baseZ: s.baseZ,
-            tipDiameter: s.preset.tipDiameterMm, columnDiameter: s.preset.shaftDiameterMm, baseDiameter: s.preset.baseDiameterMm,
+            tipDiameter: s.preset?.tipDiameterMm ?? 0.4, columnDiameter: s.preset?.shaftDiameterMm ?? 0.8, baseDiameter: s.preset?.baseDiameterMm ?? 2.0,
           })),
           advancedSupports: advResult.supports,
           crossBraces: advResult.crossBraces,

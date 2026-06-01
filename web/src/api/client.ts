@@ -194,6 +194,36 @@ export const advancedSupportApi = {
     }).then(r => r.data),
 }
 
+// ── V2 Support Engine (production-grade) ─────────────────────────────
+export interface V2ValidationData {
+  collision: { collisionFreeSupports: number; collidingSupports: number; totalCollisionPoints: number }
+  structural: {
+    passedBuckling: number; failedBuckling: number
+    passedTensile: number; failedTensile: number
+    overhangRegionsCovered: number; overhangRegionsUncovered: number
+    minSafetyFactor: number; avgSafetyFactor: number; manifoldErrors: number
+  }
+  issues: { supportId: string; element: string; description: string }[]
+}
+export const supportV2Api = {
+  generate: (fd: FormData) =>
+    http.post<{
+      engine: string; totalSupports: number; validSupports: number
+      rejectedCollisions: number; totalVolumeMm3: number; elapsedMs: number
+      validation: V2ValidationData
+      mesh: { vertices: number; faces: number; nonManifoldEdges: number }
+      supportCount: number; braceCount: number
+      supports: AdvancedSupportData[]; crossBraces: CrossBraceData[]
+    }>('/support-v2', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120000,
+    }).then(r => r.data),
+  downloadMesh: (fd: FormData) =>
+    http.post('/support-v2/mesh', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      responseType: 'blob', timeout: 120000,
+    }).then(r => r.data as Blob),
+}
+
 // ── Prep Tools (drain holes, support optimization) ───────────────────
 export const prepToolsApi = {
   suggestDrainHoles: (fd: FormData) =>

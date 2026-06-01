@@ -76,9 +76,9 @@ public static class PinheadOptimizer
         var bestResult = result;
         float bestClearance = result.Clearance;
 
-        // Search grid: 12 azimuth x 4 polar angles = 48 candidates
-        int azimuthSteps = 12;
-        int polarSteps = 4;
+        // Search grid: 8 azimuth x 2 polar angles = 16 candidates (fast)
+        int azimuthSteps = 8;
+        int polarSteps = 2;
         float polarMin = MathF.PI - config.MaxBridgeSlope;
         float polarMax = MathF.PI; // straight down
 

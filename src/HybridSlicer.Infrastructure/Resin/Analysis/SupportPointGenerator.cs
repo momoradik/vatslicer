@@ -44,8 +44,8 @@ public sealed class SupportPointGenerator
         public PrinterOrientation Orientation { get; init; } = PrinterOrientation.BottomUp;
         /// <summary>Recoater speed (mm/s), 0 if no recoater.</summary>
         public float RecoaterSpeedMmS { get; init; } = 0;
-        /// <summary>Layer height for overhang analysis (mm).</summary>
-        public float LayerHeightMm { get; init; } = 0.05f;
+        /// <summary>Layer height for overhang analysis (mm). Coarser = faster.</summary>
+        public float LayerHeightMm { get; init; } = 1.0f;
     }
 
     public sealed class GenerationResult
@@ -60,7 +60,7 @@ public sealed class SupportPointGenerator
     /// <summary>
     /// Generate support points for the given mesh.
     /// </summary>
-    public static GenerationResult Generate(StlMesh mesh, GenerationConfig config)
+    public static GenerationResult Generate(StlMesh mesh, GenerationConfig config, AabbBvh? prebuiltBvh = null)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -73,8 +73,8 @@ public sealed class SupportPointGenerator
         var points = new List<SupportPoint>();
         int idCounter = 0;
 
-        // Step 3: Build BVH for surface normal queries
-        var bvh = AabbBvh.Build(mesh);
+        // Step 3: Use pre-built BVH or build one (skip for very large meshes)
+        AabbBvh? bvh = prebuiltBvh ?? (mesh.TriangleCount <= 50000 ? AabbBvh.Build(mesh) : null);
 
         // Step 4: Process overhang regions in priority order (highest priority first)
         var allRegions = analysis.Layers
@@ -114,13 +114,23 @@ public sealed class SupportPointGenerator
                 if (grid.ExistsInRadius(pos3d, spacing * 0.8f))
                     continue;
 
-                // Find actual surface normal at this point using BVH
-                var closest = bvh.ClosestPoint(pos3d);
-                Vector3 surfaceNormal = closest?.Normal ?? new Vector3(0, 0, -1);
-                Vector3 surfacePoint = closest?.Point ?? pos3d;
+                // Use BVH for precise normal if available, otherwise use overhang face normal
+                Vector3 surfaceNormal;
+                Vector3 surfacePoint;
+                if (bvh != null)
+                {
+                    var closest = bvh.ClosestPoint(pos3d);
+                    surfaceNormal = closest?.Normal ?? new Vector3(0, 0, -1);
+                    surfacePoint = closest?.Point ?? pos3d;
+                }
+                else
+                {
+                    surfaceNormal = new Vector3(0, 0, -1); // overhang faces point down
+                    surfacePoint = pos3d;
+                }
 
                 // Only place if the surface is actually an overhang (normal points downward)
-                if (surfaceNormal.Z > -0.3f) continue; // not a significant overhang
+                if (surfaceNormal.Z > -0.3f && bvh != null) continue; // skip if BVH says not overhang
 
                 // Force estimation
                 int supportsInRegion = Math.Max(1, (int)(region.Area / (spacing * spacing)));
@@ -154,9 +164,14 @@ public sealed class SupportPointGenerator
             if (!grid.ExistsInRadius(regionCenter3d, baseSpacing * 2f))
             {
                 // This region has no nearby support — add one at centroid
-                var closest = bvh.ClosestPoint(regionCenter3d);
-                Vector3 surfacePoint = closest?.Point ?? regionCenter3d;
-                Vector3 surfaceNormal = closest?.Normal ?? new Vector3(0, 0, -1);
+                Vector3 surfacePoint = regionCenter3d;
+                Vector3 surfaceNormal = new Vector3(0, 0, -1);
+                if (bvh != null)
+                {
+                    var closest = bvh.ClosestPoint(regionCenter3d);
+                    surfacePoint = closest?.Point ?? regionCenter3d;
+                    surfaceNormal = closest?.Normal ?? new Vector3(0, 0, -1);
+                }
 
                 var force = ForceEstimator.Estimate(
                     surfacePoint.Z, region.Area, 1,

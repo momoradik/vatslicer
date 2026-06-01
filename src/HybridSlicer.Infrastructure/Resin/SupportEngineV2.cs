@@ -33,7 +33,11 @@ public static class SupportEngineV2
     public sealed class EngineConfig
     {
         public PrinterOrientation Orientation { get; init; } = PrinterOrientation.BottomUp;
-        public float LayerHeightMm { get; init; } = 0.05f;
+        /// <summary>
+        /// Layer height for overhang analysis. Use coarser than print layer height
+        /// for performance. 2-5mm is typical for support point placement.
+        /// </summary>
+        public float LayerHeightMm { get; init; } = 3.0f;
         public float OverhangAngleDeg { get; init; } = 45f;
         public float DensityFactor { get; init; } = 0.5f;
         public float MinSpacingMm { get; init; } = 2.0f;
@@ -115,9 +119,12 @@ public static class SupportEngineV2
         mesh = mesh.Transform(new Vector3(offX, offY, offZ), 1.0f);
 
         // ── Step 1: Build BVH ────────────────────────────────────────────
+        var stepSw = System.Diagnostics.Stopwatch.StartNew();
         var bvh = AabbBvh.Build(mesh);
+        var bvhMs = stepSw.ElapsedMilliseconds;
 
         // ── Step 2: Generate support points ──────────────────────────────
+        stepSw.Restart();
         var pointResult = SupportPointGenerator.Generate(mesh, new SupportPointGenerator.GenerationConfig
         {
             MinSpacingMm = config.MinSpacingMm,
@@ -126,7 +133,7 @@ public static class SupportEngineV2
             Orientation = config.Orientation,
             RecoaterSpeedMmS = config.RecoaterSpeedMmS,
             LayerHeightMm = config.LayerHeightMm,
-        });
+        }, bvh);
 
         // ── Step 3: Optimize pinheads ────────────────────────────────────
         var pinheadConfig = new PinheadOptimizer.PinheadConfig
@@ -135,7 +142,7 @@ public static class SupportEngineV2
             BackRadiusMm = config.BackRadiusMm,
             WidthMm = config.HeadWidthMm,
             PenetrationMm = config.PenetrationMm,
-            CollisionRays = config.CollisionRays,
+            CollisionRays = Math.Min(config.CollisionRays, 4), // limit for performance
         };
 
         var pinheads = new List<(string id, PinheadOptimizer.Pinhead pinhead)>();

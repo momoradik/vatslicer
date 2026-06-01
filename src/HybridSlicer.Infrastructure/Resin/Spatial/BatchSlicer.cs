@@ -280,9 +280,29 @@ public sealed class BatchSlicer
 
     private static List<List<Vector2>> ChainSegments(List<(Vector2 a, Vector2 b)> segments)
     {
+        if (segments.Count == 0) return new List<List<Vector2>>();
+
         var result = new List<List<Vector2>>();
-        var used = new bool[segments.Count];
+
+        // Build hash-based lookup for O(1) endpoint matching instead of O(n²)
         const float EPS = 0.001f;
+        float invEps = 1f / (EPS * 10); // grid cell size = 10x epsilon
+        var endpointMap = new Dictionary<long, List<(int idx, bool isA)>>();
+
+        long HashPt(Vector2 p) => ((long)(int)MathF.Floor(p.X * invEps) * 73856093L) ^
+                                  ((long)(int)MathF.Floor(p.Y * invEps) * 19349669L);
+
+        for (int i = 0; i < segments.Count; i++)
+        {
+            var keyA = HashPt(segments[i].a);
+            var keyB = HashPt(segments[i].b);
+            if (!endpointMap.TryGetValue(keyA, out var listA)) { listA = new(); endpointMap[keyA] = listA; }
+            listA.Add((i, true));
+            if (!endpointMap.TryGetValue(keyB, out var listB)) { listB = new(); endpointMap[keyB] = listB; }
+            listB.Add((i, false));
+        }
+
+        var used = new bool[segments.Count];
 
         for (int start = 0; start < segments.Count; start++)
         {
@@ -291,31 +311,37 @@ public sealed class BatchSlicer
 
             var polygon = new List<Vector2> { segments[start].a, segments[start].b };
             var current = segments[start].b;
-            bool changed = true;
 
-            while (changed)
+            for (int iter = 0; iter < segments.Count; iter++)
             {
-                changed = false;
-                for (int i = 0; i < segments.Count; i++)
+                var key = HashPt(current);
+                bool found = false;
+
+                // Check current cell and neighbors for matching endpoints
+                for (int dx = -1; dx <= 1 && !found; dx++)
+                for (int dy = -1; dy <= 1 && !found; dy++)
                 {
-                    if (used[i]) continue;
-                    if (Vector2.Distance(current, segments[i].a) < EPS)
+                    long neighborKey = ((long)((int)MathF.Floor(current.X * invEps) + dx) * 73856093L) ^
+                                      ((long)((int)MathF.Floor(current.Y * invEps) + dy) * 19349669L);
+                    if (!endpointMap.TryGetValue(neighborKey, out var candidates)) continue;
+
+                    foreach (var (idx, isA) in candidates)
                     {
-                        used[i] = true;
-                        polygon.Add(segments[i].b);
-                        current = segments[i].b;
-                        changed = true;
-                        break;
-                    }
-                    if (Vector2.Distance(current, segments[i].b) < EPS)
-                    {
-                        used[i] = true;
-                        polygon.Add(segments[i].a);
-                        current = segments[i].a;
-                        changed = true;
-                        break;
+                        if (used[idx]) continue;
+                        var pt = isA ? segments[idx].a : segments[idx].b;
+                        if (Vector2.Distance(current, pt) < EPS)
+                        {
+                            used[idx] = true;
+                            var other = isA ? segments[idx].b : segments[idx].a;
+                            polygon.Add(other);
+                            current = other;
+                            found = true;
+                            break;
+                        }
                     }
                 }
+
+                if (!found) break;
             }
 
             if (polygon.Count >= 3) result.Add(polygon);

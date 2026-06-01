@@ -67,40 +67,37 @@ public static class PillarRouter
         var path = new List<Waypoint>();
         path.Add(new Waypoint { Position = junctionPoint, Radius = junctionRadius, Type = "junction" });
 
-        // Strategy 1: Try direct descent
+        // Strategy 1: Try direct descent (fast — single beam-cast)
         var directResult = TryDirectDescent(junctionPoint, junctionRadius, bvh, config);
         if (directResult != null)
         {
             path.AddRange(directResult);
-            float totalLen = ComputePathLength(path);
-            return new PillarRoute { Path = path, ReachesGround = true, TotalLength = totalLen };
+            return new PillarRoute { Path = path, ReachesGround = true, TotalLength = ComputePathLength(path) };
         }
 
-        // Strategy 2: Try bridge-and-descend
-        var bridgeResult = TryBridgeAndDescend(junctionPoint, junctionRadius, bvh, config, maxJunctions: 3);
-        if (bridgeResult != null)
-        {
-            path.AddRange(bridgeResult);
-            float totalLen = ComputePathLength(path);
-            return new PillarRoute { Path = path, ReachesGround = true, TotalLength = totalLen };
-        }
-
-        // Strategy 3: Anchor on model surface below
+        // Strategy 2: Try anchor on model surface below (single ray-cast)
         var anchorResult = TryAnchor(junctionPoint, junctionRadius, bvh, config);
         if (anchorResult.HasValue)
         {
             var ar = anchorResult.Value;
             path.AddRange(ar.waypoints);
-            float totalLen = ComputePathLength(path);
             return new PillarRoute
             {
                 Path = path, ReachesGround = false,
                 AnchorPoint = ar.anchorPoint, AnchorNormal = ar.anchorNormal,
-                TotalLength = totalLen,
+                TotalLength = ComputePathLength(path),
             };
         }
 
-        // Fallback: direct descent ignoring collisions (mark as degraded)
+        // Strategy 3: Try bridge-and-descend (expensive — only if above failed)
+        var bridgeResult = TryBridgeAndDescend(junctionPoint, junctionRadius, bvh, config, maxJunctions: 1);
+        if (bridgeResult != null)
+        {
+            path.AddRange(bridgeResult);
+            return new PillarRoute { Path = path, ReachesGround = true, TotalLength = ComputePathLength(path) };
+        }
+
+        // Fallback: direct descent (may collide but still usable)
         path.AddRange(BuildVerticalPillar(junctionPoint, junctionRadius, config));
         return new PillarRoute { Path = path, ReachesGround = true, TotalLength = ComputePathLength(path) };
     }
