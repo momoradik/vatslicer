@@ -89,8 +89,8 @@ public static class PillarRouter
             };
         }
 
-        // Strategy 3: Try bridge-and-descend (expensive — only if above failed)
-        var bridgeResult = TryBridgeAndDescend(junctionPoint, junctionRadius, bvh, config, maxJunctions: 1);
+        // Strategy 3: Try bridge-and-descend (multi-junction for complex geometry)
+        var bridgeResult = TryBridgeAndDescend(junctionPoint, junctionRadius, bvh, config, maxJunctions: 2);
         if (bridgeResult != null)
         {
             path.AddRange(bridgeResult);
@@ -126,8 +126,8 @@ public static class PillarRouter
         RoutingConfig config, int maxJunctions)
     {
         // Search over azimuth directions for a bridge that clears the obstruction
-        int azimuthSteps = 16;
-        int lengthSteps = 5;
+        int azimuthSteps = 8;
+        int lengthSteps = 4;
         float slopeAngle = config.MaxBridgeSlope;
 
         Waypoint? bestBridgeEnd = null;
