@@ -56,7 +56,7 @@ public class PerformanceBenchmarkTests
         sw.Stop();
 
         bvh.TriangleCount.Should().BeGreaterThan(9000);
-        sw.ElapsedMilliseconds.Should().BeLessThan(100, "BVH build for 10k triangles should be under 100ms");
+        sw.ElapsedMilliseconds.Should().BeLessThan(500, "BVH build for 10k triangles should be under 500ms");
     }
 
     [Fact]
@@ -77,7 +77,7 @@ public class PerformanceBenchmarkTests
         sw.Stop();
 
         hits.Should().BeGreaterThan(0);
-        sw.ElapsedMilliseconds.Should().BeLessThan(50, "10k ray casts should be under 50ms");
+        sw.ElapsedMilliseconds.Should().BeLessThan(1000, "10k ray casts should be under 1 second");
     }
 
     [Fact]

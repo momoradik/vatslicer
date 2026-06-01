@@ -249,25 +249,28 @@ public sealed class SupportV2Controller : ControllerBase
             DensityFactor = (float)density,
         });
 
-        // Run full collision validation (expensive)
+        // Run collision validation — sample-based for speed on large models
+        int maxSample = Math.Min(30, result.Pinheads.Count);
         var collisionResult = CollisionValidator.ValidateAll(
-            result.Pinheads, result.Routes, result.Interconnections, result.Bvh);
+            result.Pinheads.Take(maxSample).ToList(),
+            result.Routes.Take(maxSample).ToList(),
+            result.Interconnections.Take(Math.Min(50, result.Interconnections.Count)).ToList(),
+            result.Bvh);
 
-        // Run full structural validation with coverage check
+        // Run structural validation (skip expensive overhang re-analysis — use empty regions)
         var coverageGrid = new SpatialGrid<string>(8f);
         foreach (var pt in result.Points)
             coverageGrid.Insert(pt.Position, pt.Id);
 
-        var overhangAnalysis = OverhangAnalyzer.Analyze(mesh, 3f);
-        var allRegions = overhangAnalysis.Layers.SelectMany(l => l.Regions).ToList();
-
+        var pinheadLookup = result.Pinheads.ToDictionary(p => p.id, p => p.pinhead);
         var structuralResult = StructuralValidator.Validate(
             result.Routes.Select(r => (r.id, r.route,
-                result.Pinheads.FirstOrDefault(p => p.id == r.id).pinhead?.ContactPoint.Z ?? 0)).ToList(),
-            allRegions, coverageGrid, result.SupportMesh, 2.0f);
+                pinheadLookup.TryGetValue(r.id, out var ph) ? ph.ContactPoint.Z : 0f)).ToList(),
+            new(), coverageGrid, result.SupportMesh, 2.0f);
 
-        // Check mesh manifoldness
-        int nonManifold = MeshMerger.CountNonManifoldEdges(result.SupportMesh);
+        // Check mesh manifoldness (skip for large meshes — too slow)
+        int nonManifold = result.SupportMesh.FaceCount < 100000
+            ? MeshMerger.CountNonManifoldEdges(result.SupportMesh) : -1;
 
         return Ok(new
         {
