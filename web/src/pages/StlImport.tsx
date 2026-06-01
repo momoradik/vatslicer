@@ -1151,8 +1151,9 @@ export default function StlImport() {
                       className={`w-full mt-3 text-xs py-2 rounded-lg font-medium transition ${
                         generating ? 'bg-green-800 text-green-200 animate-pulse' : 'bg-green-600 hover:bg-green-500 text-white'
                       }`}>
-                      {generating ? 'Generating...' : selectedPrep.generatedAt ? 'Regenerate' : 'Generate Supports'}
+                      {generating ? 'Generating (V2 Engine)...' : selectedPrep.generatedAt ? 'Regenerate (V2)' : 'Generate Supports (V2)'}
                     </button>
+                    <p className="text-[8px] text-gray-600 mt-0.5 text-center">BVH-accelerated | Structural validation | Watertight mesh</p>
 
                     {/* Generated status */}
                     {selectedPrep.generatedAt && (
