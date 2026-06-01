@@ -121,6 +121,13 @@ public static class SupportEngineV2
         public required int SupportLayerCount { get; init; }
         public required float TotalSupportCrossSectionArea { get; init; }
 
+        /// <summary>
+        /// Centering offset applied to the mesh before support generation.
+        /// Frontend must apply the same offset to align supports with the model.
+        /// Print-space coordinates: (offX, offY, offZ) where Z = height.
+        /// </summary>
+        public required Vector3 MeshCenteringOffset { get; init; }
+
         // Segment data for backward compatibility with the existing frontend
         public required List<AdvancedSupportEngine.AdvancedSupport> LegacySupports { get; init; }
         public required List<AdvancedSupportEngine.CrossBrace> LegacyCrossBraces { get; init; }
@@ -423,6 +430,7 @@ public static class SupportEngineV2
             TotalElapsedMs = sw.ElapsedMilliseconds,
             SupportLayerCount = supportStats.supportLayers,
             TotalSupportCrossSectionArea = supportStats.totalSupportAreaMm2,
+            MeshCenteringOffset = new Vector3(offX, offY, offZ),
             LegacySupports = legacySupports,
             LegacyCrossBraces = legacyCrossBraces,
         };

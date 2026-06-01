@@ -212,6 +212,7 @@ export const supportV2Api = {
       rejectedCollisions: number; totalVolumeMm3: number
       totalVolumeMl: number; totalWeightG: number; estimatedCostUsd: number
       elapsedMs: number
+      meshOffset: { x: number; y: number; z: number }
       validation: V2ValidationData
       mesh: { vertices: number; faces: number; nonManifoldEdges: number; stlBase64: string | null }
       supportCount: number; braceCount: number
