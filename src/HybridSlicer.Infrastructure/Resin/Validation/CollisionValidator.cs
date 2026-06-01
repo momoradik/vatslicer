@@ -74,25 +74,24 @@ public static class CollisionValidator
                 continue;
             }
 
-            // Beam-cast along the pinhead direction to check the connecting cone volume
+            // Beam-cast along the pinhead direction, starting from the BACK sphere
+            // (skip the pin sphere and connecting cone — those are intentionally near the model surface)
             var dir = Vector3.Normalize(ph.JunctionPoint - ph.ContactPoint);
-            float len = Vector3.Distance(ph.ContactPoint, ph.JunctionPoint);
-            if (len < 0.1f) continue;
+            float checkLen = Vector3.Distance(ph.BackCenter, ph.JunctionPoint);
+            if (checkLen < 0.1f) continue;
 
-            // Start the check from just past the pin sphere (skip the intentional penetration zone)
-            var checkStart = ph.PinCenter;
-            float checkLen = Vector3.Distance(checkStart, ph.JunctionPoint);
-            float clearance = bvh.BeamCast(checkStart, dir, ph.BackRadius, beamRays, checkLen);
+            // Only check the back sphere → junction segment (away from model surface)
+            float clearance = bvh.BeamCast(ph.BackCenter, dir, ph.BackRadius * 0.5f, beamRays / 2, checkLen);
 
-            if (clearance < checkLen * 0.9f)
+            if (clearance < checkLen * 0.8f)
             {
-                var collisionPt = checkStart + dir * clearance;
+                var collisionPt = ph.BackCenter + dir * clearance;
                 issues.Add(new CollisionIssue
                 {
                     SupportId = id, Element = "pinhead",
                     CollisionPoint = collisionPt,
                     PenetrationDepth = checkLen - clearance,
-                    Description = $"Pinhead cone collides at {clearance:F1}mm of {checkLen:F1}mm path",
+                    Description = $"Pinhead back-to-junction collides at {clearance:F1}mm of {checkLen:F1}mm",
                 });
             }
         }
