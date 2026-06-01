@@ -235,15 +235,30 @@ public static class SupportEngineV2
         {
             if (!pinhead.IsValid) continue;
 
-            // Auto-scale pillar radius for heavy supports
+            // Auto-scale pillar radius based on support height and weight class
             var rCfg = routingConfig;
-            if (pointWeights.TryGetValue(id, out var weight) && weight == ForceEstimator.SupportWeight.Heavy)
+            float supportHeight = pinhead.JunctionPoint.Z; // height above base
+            if (pointWeights.TryGetValue(id, out var weight))
             {
-                rCfg = rCfg with
+                if (weight == ForceEstimator.SupportWeight.Heavy || supportHeight > 100f)
                 {
-                    PillarRadiusMm = Math.Max(rCfg.PillarRadiusMm, 0.75f),
-                    BaseRadiusMm = Math.Max(rCfg.BaseRadiusMm, 3.0f),
-                };
+                    // Very tall supports: scale radius with height
+                    // At 100mm: r=0.75, at 200mm: r=1.0, at 300mm: r=1.25
+                    float heightScaledR = 0.5f + supportHeight * 0.0025f;
+                    rCfg = rCfg with
+                    {
+                        PillarRadiusMm = Math.Max(rCfg.PillarRadiusMm, Math.Min(heightScaledR, 2.0f)),
+                        BaseRadiusMm = Math.Max(rCfg.BaseRadiusMm, 3.0f),
+                        WideningFactor = Math.Max(rCfg.WideningFactor, 0.03f), // aggressive widening
+                    };
+                }
+                else if (weight == ForceEstimator.SupportWeight.Medium)
+                {
+                    rCfg = rCfg with
+                    {
+                        PillarRadiusMm = Math.Max(rCfg.PillarRadiusMm, 0.5f),
+                    };
+                }
             }
 
             var route = PillarRouter.Route(pinhead.JunctionPoint, pinhead.BackRadius, bvh, rCfg);
