@@ -224,6 +224,12 @@ export const supportV2Api = {
       headers: { 'Content-Type': 'multipart/form-data' },
       responseType: 'blob', timeout: 120000,
     }).then(r => r.data as Blob),
+  /** Get support mesh as ArrayBuffer for Three.js STLLoader */
+  getMeshBuffer: (fd: FormData) =>
+    http.post('/support-v2/mesh', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      responseType: 'arraybuffer', timeout: 120000,
+    }).then(r => r.data as ArrayBuffer),
 }
 
 // ── Prep Tools (drain holes, support optimization) ───────────────────

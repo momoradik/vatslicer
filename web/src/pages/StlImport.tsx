@@ -133,13 +133,14 @@ interface PrepState {
   stale: boolean
   generatedAt: number | null
   v2Stats: V2Stats | null
+  v2MeshBuffer: ArrayBuffer | null
 }
 
 const EMPTY_PREP: PrepState = {
   autoSupports: [], advancedSupports: [], crossBraces: [],
   raft: null, skirt: null,
   locked: false, stale: false, generatedAt: null,
-  v2Stats: null,
+  v2Stats: null, v2MeshBuffer: null,
 }
 
 interface ModelState extends ModelEntry {
@@ -607,6 +608,17 @@ export default function StlImport() {
         console.log('[V2] Fallback to legacy engine')
       }
 
+      // Fetch mesh buffer for direct Three.js rendering (non-blocking)
+      let meshBuffer: ArrayBuffer | null = null
+      if (v2Stats) {
+        try {
+          const meshFd = new FormData()
+          meshFd.append('stlFile', blob, selected.fileName)
+          meshFd.append('density', String(autoSupportConfig.density))
+          meshBuffer = await supportV2Api.getMeshBuffer(meshFd)
+        } catch { /* mesh download optional */ }
+      }
+
       const basicResult = await autoSupportApi.generate(fd)
       updateModels(prev => prev.map(m => m.id === selectedId ? {
         ...m, prep: {
@@ -622,6 +634,7 @@ export default function StlImport() {
           stale: false,
           generatedAt: Date.now(),
           v2Stats,
+          v2MeshBuffer: meshBuffer,
         }
       } : m))
     } catch (err: any) {
@@ -856,6 +869,7 @@ export default function StlImport() {
                     ),
                   ]}
                   crossBraces={selectedPrep.crossBraces}
+                  supportMeshBuffer={selectedPrep.v2MeshBuffer}
                   paintedRegions={selectedSupportData.paintedRegions}
                   supportTipType={supportTipType}
                   supportBrushSize={supportBrushSize}

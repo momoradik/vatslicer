@@ -84,6 +84,8 @@ interface Props {
   onSupportPointDelete?: (id: string) => void
   onPaintRegionAdd?: (mode: 'enforcer' | 'blocker', cx: number, cy: number, cz: number) => void
   crossBraces?: CrossBraceDisplayData[]
+  // V2 support mesh (binary STL ArrayBuffer) — renders as single mesh instead of individual cylinders
+  supportMeshBuffer?: ArrayBuffer | null
   // Raft/Skirt visualization
   raftData?: { type: string; minX: number; minY: number; maxX: number; maxY: number; thicknessMm: number } | null
   skirtData?: { minX: number; minY: number; maxX: number; maxY: number; layers: number; distanceMm: number; widthMm: number } | null
@@ -174,6 +176,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     onSupportPointDelete,
     onPaintRegionAdd,
     crossBraces,
+    supportMeshBuffer,
     raftData,
     skirtData,
   },
@@ -1074,6 +1077,65 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     scene.add(group)
     supportGroupRef.current = group
   }, [supportPoints, paintedRegions, crossBraces, raftData, skirtData, sceneReady])
+
+  // ── V2 Support mesh rendering (single watertight mesh) ─────────────────
+
+  const v2MeshRef = useRef<THREE.Mesh | null>(null)
+
+  useEffect(() => {
+    if (!sceneReady) return
+    const scene = sceneRef.current!
+
+    // Remove old V2 mesh
+    if (v2MeshRef.current) {
+      scene.remove(v2MeshRef.current)
+      v2MeshRef.current.geometry.dispose()
+      ;(v2MeshRef.current.material as THREE.Material).dispose()
+      v2MeshRef.current = null
+    }
+
+    if (!supportMeshBuffer || supportMeshBuffer.byteLength < 84) return
+
+    // Parse the binary STL buffer directly into Three.js geometry
+    try {
+      const loader = new STLLoader()
+      const geometry = loader.parse(supportMeshBuffer)
+      geometry.computeVertexNormals()
+
+      // The STL is in print-space (X, Y, Z). Three.js uses Y-up.
+      // Transform: swap Y and Z axes
+      const positions = geometry.getAttribute('position')
+      const normals = geometry.getAttribute('normal')
+      for (let i = 0; i < positions.count; i++) {
+        const y = positions.getY(i)
+        const z = positions.getZ(i)
+        positions.setY(i, z) // Three.js Y = print Z (height)
+        positions.setZ(i, y) // Three.js Z = print Y (depth)
+        if (normals) {
+          const ny = normals.getY(i)
+          const nz = normals.getZ(i)
+          normals.setY(i, nz)
+          normals.setZ(i, ny)
+        }
+      }
+      positions.needsUpdate = true
+      if (normals) normals.needsUpdate = true
+
+      const material = new THREE.MeshPhongMaterial({
+        color: 0x2dd4bf, // teal — matches Lychee/ChiTuBox
+        transparent: true,
+        opacity: 0.7,
+        shininess: 30,
+        side: THREE.DoubleSide,
+      })
+
+      const mesh = new THREE.Mesh(geometry, material)
+      scene.add(mesh)
+      v2MeshRef.current = mesh
+    } catch (err) {
+      console.error('Failed to load V2 support mesh:', err)
+    }
+  }, [supportMeshBuffer, sceneReady])
 
   // ── Support callback refs (avoid stale closures) ─────────────────────────
   const onSupportPointAddRef = useRef(onSupportPointAdd)
