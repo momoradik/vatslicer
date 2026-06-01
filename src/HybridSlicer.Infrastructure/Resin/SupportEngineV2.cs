@@ -272,7 +272,24 @@ public static class SupportEngineV2
             routes.Add((id, route));
         }
 
-        Serilog.Log.Information("V2 Step 4 Routing: {Ms}ms ({Count} routes)", stepSw.ElapsedMilliseconds, routes.Count);
+        // Post-routing collision filter: remove routes whose pillar passes through the mesh
+        int removedByCollision = 0;
+        routes = routes.Where(r =>
+        {
+            foreach (var wp in r.route.Path)
+            {
+                if (wp.Type == "base" || wp.Type == "junction") continue;
+                if (bvh.IsInside(wp.Position))
+                {
+                    removedByCollision++;
+                    return false;
+                }
+            }
+            return true;
+        }).ToList();
+
+        Serilog.Log.Information("V2 Step 4 Routing: {Ms}ms ({Count} routes, {Removed} removed by collision)",
+            stepSw.ElapsedMilliseconds, routes.Count, removedByCollision);
         stepSw.Restart();
 
         // ── Step 5: Build interconnections ───────────────────────────────
@@ -393,9 +410,10 @@ public static class SupportEngineV2
         stepSw.Restart();
 
         // ── Step 8: Prepare slice elements ───────────────────────────────
+        var routeLookup = routes.ToDictionary(r => r.id, r => r.route);
         var sliceElements = AnalyticalSupportSlicer.ExtractElements(
-            pinheads.Where(p => p.pinhead.IsValid)
-                    .Select(p => (p.pinhead, routes.First(r => r.id == p.id).route))
+            pinheads.Where(p => p.pinhead.IsValid && routeLookup.ContainsKey(p.id))
+                    .Select(p => (p.pinhead, routeLookup[p.id]))
                     .ToList(),
             interconnections);
 
