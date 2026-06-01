@@ -1238,6 +1238,24 @@ export default function StlImport() {
                             className="flex-1 text-[9px] py-1 rounded bg-teal-900/20 text-teal-400 hover:bg-teal-900/30 transition">
                             Export STL
                           </button>
+                          <button onClick={async () => {
+                            if (!selected) return
+                            try {
+                              const resp = await fetch(selected.url)
+                              const blob = await resp.blob()
+                              const fd = new FormData()
+                              fd.append('stlFile', blob, selected.fileName)
+                              fd.append('density', String(autoSupportConfig.density))
+                              const zipBlob = await supportV2Api.exportCombined(fd)
+                              const url = URL.createObjectURL(zipBlob)
+                              const a = document.createElement('a')
+                              a.href = url; a.download = 'model_with_supports.zip'; a.click()
+                              URL.revokeObjectURL(url)
+                            } catch (err) { console.error('ZIP export failed:', err) }
+                          }}
+                            className="flex-1 text-[9px] py-1 rounded bg-indigo-900/20 text-indigo-400 hover:bg-indigo-900/30 transition">
+                            Export ZIP
+                          </button>
                           <button onClick={clearPrep}
                             className="flex-1 text-[9px] py-1 rounded bg-red-900/20 text-red-400 hover:bg-red-900/30 transition">
                             Clear All

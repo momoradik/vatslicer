@@ -231,6 +231,12 @@ export const supportV2Api = {
       headers: { 'Content-Type': 'multipart/form-data' },
       responseType: 'arraybuffer', timeout: 120000,
     }).then(r => r.data as ArrayBuffer),
+  /** Export model + supports as ZIP (model.stl + supports.stl + metadata) */
+  exportCombined: (fd: FormData) =>
+    http.post('/support-v2/export-combined', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      responseType: 'blob', timeout: 120000,
+    }).then(r => r.data as Blob),
 }
 
 // ── Prep Tools (drain holes, support optimization) ───────────────────
