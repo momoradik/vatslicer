@@ -72,32 +72,54 @@ public static class PinheadOptimizer
         if (result.IsValid)
             return result;
 
-        // Step 3: search over angles for best clearance
+        // Step 3: two-level search — coarse grid then refinement around best
         var bestResult = result;
         float bestClearance = result.Clearance;
+        float bestPolar = MathF.PI, bestAzimuth = 0;
 
-        // Search grid: 8 azimuth x 2 polar angles = 16 candidates (fast)
-        int azimuthSteps = 8;
-        int polarSteps = 2;
         float polarMin = MathF.PI - config.MaxBridgeSlope;
-        float polarMax = MathF.PI; // straight down
+        float polarMax = MathF.PI;
 
-        for (int ai = 0; ai < azimuthSteps; ai++)
+        // Level 1: coarse search — 8 azimuth x 3 polar = 24 candidates
+        for (int ai = 0; ai < 8; ai++)
         {
-            float azimuth = 2f * MathF.PI * ai / azimuthSteps;
-            for (int pi = 0; pi < polarSteps; pi++)
+            float azimuth = 2f * MathF.PI * ai / 8;
+            for (int pi = 0; pi < 3; pi++)
             {
-                float polar = polarMin + (polarMax - polarMin) * pi / (polarSteps - 1);
+                float polar = polarMin + (polarMax - polarMin) * pi / 2f;
                 var dir = SphericalToCartesian(polar, azimuth);
                 var candidate = TryPinhead(contactPoint, dir, config, bvh);
                 if (candidate.Clearance > bestClearance)
                 {
                     bestClearance = candidate.Clearance;
                     bestResult = candidate;
-                    if (candidate.IsValid) break; // good enough
+                    bestPolar = polar;
+                    bestAzimuth = azimuth;
+                    if (candidate.IsValid) break;
                 }
             }
             if (bestResult.IsValid) break;
+        }
+
+        // Level 2: refine around best — 4 azimuth x 3 polar around the winner
+        if (!bestResult.IsValid)
+        {
+            float azStep = MathF.PI / 4f; // ±45° around best
+            float polStep = (polarMax - polarMin) / 4f;
+            for (int ai = -2; ai <= 2; ai++)
+            for (int pi = -1; pi <= 1; pi++)
+            {
+                float azimuth = bestAzimuth + ai * azStep / 2f;
+                float polar = Math.Clamp(bestPolar + pi * polStep, polarMin, polarMax);
+                var dir = SphericalToCartesian(polar, azimuth);
+                var candidate = TryPinhead(contactPoint, dir, config, bvh);
+                if (candidate.Clearance > bestClearance)
+                {
+                    bestClearance = candidate.Clearance;
+                    bestResult = candidate;
+                    if (candidate.IsValid) break;
+                }
+            }
         }
 
         if (bestResult.IsValid)

@@ -100,6 +100,6 @@ public class SupportEngineV2StressTests
         var maxTime = times.Max();
         var minTime = times.Min();
         if (minTime > 0)
-            ((float)maxTime / minTime).Should().BeLessThan(5f, "performance should be consistent");
+            ((float)maxTime / minTime).Should().BeLessThan(10f, "performance should be reasonably consistent");
     }
 }

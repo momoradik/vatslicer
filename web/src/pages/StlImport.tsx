@@ -549,10 +549,12 @@ export default function StlImport() {
 
   const [autoSupportConfig, setAutoSupportConfig] = useState({
     overhangAngle: 45, density: 0.5, tipDiameter: 0.4,
-    supportType: 'medium' as string,  // light | medium | heavy | tree | crossbraced
+    supportType: 'medium' as string,
     crossBracing: true,
     raftEnabled: false, raftType: 'grid' as string,
     skirtEnabled: false, skirtLayers: 3, skirtDistance: 2.0,
+    /** Support exposure % (100=full, 70=easy removal). Used during slicing. */
+    supportExposurePct: 100,
   })
   const [generating, setGenerating] = useState(false)
 
@@ -1098,6 +1100,20 @@ export default function StlImport() {
                         </div>
                       </label>
                     </div>
+
+                    {/* Support Exposure */}
+                    <label className="flex items-center justify-between text-[10px] mt-1">
+                      <span className="text-gray-500">Support Exposure</span>
+                      <div className="flex items-center gap-1">
+                        <input type="range" min={50} max={100} step={5} value={autoSupportConfig.supportExposurePct}
+                          onChange={e => setAutoSupportConfig(p => ({ ...p, supportExposurePct: +e.target.value }))}
+                          className="w-16 h-1 accent-green-500" />
+                        <span className="text-gray-400 w-8 text-right text-[9px]">{autoSupportConfig.supportExposurePct}%</span>
+                      </div>
+                    </label>
+                    {autoSupportConfig.supportExposurePct < 100 && (
+                      <p className="text-[8px] text-amber-500/70 mt-0.5">Reduced exposure makes supports easier to remove</p>
+                    )}
 
                     {/* Raft */}
                     <div className="mt-3 pt-2 border-t border-gray-700/50">

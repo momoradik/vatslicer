@@ -318,4 +318,67 @@ public sealed class SupportV2Controller : ControllerBase
             },
         });
     }
+
+    /// <summary>
+    /// Export both model and support meshes as a combined ZIP containing two STL files.
+    /// Compatible with 3MF-style workflows where model and supports are separate objects.
+    /// </summary>
+    [HttpPost("export-combined")]
+    [RequestSizeLimit(200_000_000)]
+    public async Task<IActionResult> ExportCombined(
+        [FromForm] IFormFile stlFile,
+        [FromForm] string orientation = "BottomUp",
+        [FromForm] double density = 0.5,
+        CancellationToken ct = default)
+    {
+        if (stlFile is null || stlFile.Length == 0) return BadRequest("STL file required.");
+
+        byte[] data;
+        using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
+
+        var orient = PrinterOrientation.BottomUp;
+        if (Enum.TryParse<PrinterOrientation>(orientation, true, out var o)) orient = o;
+
+        var (mesh, _) = MeshValidator.ValidateAndRepair(data);
+        var result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig
+        {
+            Orientation = orient,
+            DensityFactor = (float)density,
+        });
+
+        // Create ZIP with model.stl and supports.stl
+        using var zipStream = new MemoryStream();
+        using (var archive = new System.IO.Compression.ZipArchive(zipStream, System.IO.Compression.ZipArchiveMode.Create, true))
+        {
+            // Model STL (original, re-centered)
+            var modelEntry = archive.CreateEntry("model.stl");
+            using (var entryStream = modelEntry.Open())
+                await entryStream.WriteAsync(data, ct);
+
+            // Support STL (watertight mesh)
+            var supportEntry = archive.CreateEntry("supports.stl");
+            using (var entryStream = supportEntry.Open())
+            {
+                var supportStl = result.SupportMesh.ToStlBinary();
+                await entryStream.WriteAsync(supportStl, ct);
+            }
+
+            // Metadata JSON
+            var metaEntry = archive.CreateEntry("support_info.json");
+            using (var writer = new StreamWriter(metaEntry.Open()))
+            {
+                await writer.WriteAsync(System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    engine = "v2",
+                    supports = result.ValidSupports,
+                    volumeMl = result.TotalSupportVolumeMm3 / 1000f,
+                    meshFaces = result.SupportMesh.FaceCount,
+                    orientation = orient.ToString(),
+                }));
+            }
+        }
+
+        zipStream.Position = 0;
+        return File(zipStream.ToArray(), "application/zip", "model_with_supports.zip");
+    }
 }
