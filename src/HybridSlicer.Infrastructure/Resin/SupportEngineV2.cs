@@ -72,6 +72,12 @@ public static class SupportEngineV2
 
         // Recoater (top-down printers)
         public float RecoaterSpeedMmS { get; init; } = 0;
+
+        // Model transform (from frontend viewport)
+        public float TranslateX { get; init; } = 0;
+        public float TranslateY { get; init; } = 0;
+        public float TranslateZ { get; init; } = 0;
+        public float Scale { get; init; } = 1.0f;
     }
 
     // ── Result ───────────────────────────────────────────────────────────
@@ -102,6 +108,8 @@ public static class SupportEngineV2
         public required int RejectedCollisions { get; init; }
         public required float TotalSupportVolumeMm3 { get; init; }
         public required long TotalElapsedMs { get; init; }
+        public required int SupportLayerCount { get; init; }
+        public required float TotalSupportCrossSectionArea { get; init; }
 
         // Segment data for backward compatibility with the existing frontend
         public required List<AdvancedSupportEngine.AdvancedSupport> LegacySupports { get; init; }
@@ -114,13 +122,25 @@ public static class SupportEngineV2
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        // ── Step 0: Center mesh ──────────────────────────────────────────
+        // ── Step 0: Apply transform and center mesh ────────────────────
+        // Apply user transform first (translation + uniform scale)
+        if (config.Scale != 1.0f || config.TranslateX != 0 || config.TranslateY != 0 || config.TranslateZ != 0)
+        {
+            mesh = mesh.Transform(
+                new Vector3(config.TranslateX, config.TranslateY, config.TranslateZ),
+                config.Scale);
+        }
+        // Center mesh: XY at origin, Z bottom at 0
         float meshW = mesh.Max.X - mesh.Min.X;
         float meshD = mesh.Max.Y - mesh.Min.Y;
         float offX = -(mesh.Min.X + meshW / 2);
         float offY = -(mesh.Min.Y + meshD / 2);
         float offZ = -mesh.Min.Z;
         mesh = mesh.Transform(new Vector3(offX, offY, offZ), 1.0f);
+
+        // Bottom-Up specific: reduce pin radius for better surface quality
+        // (thinner tips leave smaller marks on the visible surface near FEP)
+        float pinRadiusScale = config.Orientation == PrinterOrientation.BottomUp ? 0.8f : 1.0f;
 
         // ── Step 1: Build BVH ────────────────────────────────────────────
         var stepSw = System.Diagnostics.Stopwatch.StartNew();
@@ -146,7 +166,7 @@ public static class SupportEngineV2
         // ── Step 3: Optimize pinheads ────────────────────────────────────
         var pinheadConfig = new PinheadOptimizer.PinheadConfig
         {
-            PinRadiusMm = config.PinRadiusMm,
+            PinRadiusMm = config.PinRadiusMm * pinRadiusScale,
             BackRadiusMm = config.BackRadiusMm,
             WidthMm = config.HeadWidthMm,
             PenetrationMm = config.PenetrationMm,
@@ -352,6 +372,9 @@ public static class SupportEngineV2
         // ── Stats ────────────────────────────────────────────────────────
         int validSupports = pinheads.Count(p => p.pinhead.IsValid);
         float volume = EstimateSupportVolume(routes, interconnections);
+        float meshHeight = mesh.Max.Z - mesh.Min.Z;
+        var supportStats = SupportSliceIntegrator.ComputeSupportStats(
+            sliceElements, config.LayerHeightMm, 0, meshHeight);
 
         sw.Stop();
         return new EngineResult
@@ -371,6 +394,8 @@ public static class SupportEngineV2
             RejectedCollisions = collisionResult.CollidingSupports,
             TotalSupportVolumeMm3 = volume,
             TotalElapsedMs = sw.ElapsedMilliseconds,
+            SupportLayerCount = supportStats.supportLayers,
+            TotalSupportCrossSectionArea = supportStats.totalSupportAreaMm2,
             LegacySupports = legacySupports,
             LegacyCrossBraces = legacyCrossBraces,
         };
