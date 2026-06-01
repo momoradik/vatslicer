@@ -1,6 +1,9 @@
 using HybridSlicer.Application.Interfaces.Repositories;
 using HybridSlicer.Domain.Enums;
 using HybridSlicer.Infrastructure.Resin;
+using HybridSlicer.Infrastructure.Resin.Analysis;
+using HybridSlicer.Infrastructure.Resin.Meshing;
+using HybridSlicer.Infrastructure.Resin.Spatial;
 using HybridSlicer.Infrastructure.Resin.Validation;
 using HybridSlicer.Infrastructure.Resin.Slicing;
 using Microsoft.AspNetCore.Mvc;
@@ -207,5 +210,100 @@ public sealed class SupportV2Controller : ControllerBase
             circles, resX, resY, buildWidthMm, buildDepthMm);
 
         return File(pngBytes, "image/png", $"support_layer_z{z:F2}.png");
+    }
+
+    /// <summary>
+    /// Run full validation with expensive BVH beam-cast collision detection.
+    /// Use this for final verification before printing — slower but thorough.
+    /// </summary>
+    [HttpPost("validate")]
+    [RequestSizeLimit(200_000_000)]
+    public async Task<IActionResult> FullValidation(
+        [FromForm] IFormFile stlFile,
+        [FromForm] string orientation = "BottomUp",
+        [FromForm] double overhangAngleDeg = 45,
+        [FromForm] double density = 0.5,
+        CancellationToken ct = default)
+    {
+        if (stlFile is null || stlFile.Length == 0) return BadRequest("STL file required.");
+
+        byte[] data;
+        using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
+
+        var orient = PrinterOrientation.BottomUp;
+        if (Enum.TryParse<PrinterOrientation>(orientation, true, out var o)) orient = o;
+
+        var (mesh, _) = MeshValidator.ValidateAndRepair(data);
+
+        var result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig
+        {
+            Orientation = orient,
+            OverhangAngleDeg = (float)overhangAngleDeg,
+            DensityFactor = (float)density,
+        });
+
+        // Run full collision validation (expensive)
+        var collisionResult = CollisionValidator.ValidateAll(
+            result.Pinheads, result.Routes, result.Interconnections, result.Bvh);
+
+        // Run full structural validation with coverage check
+        var coverageGrid = new SpatialGrid<string>(8f);
+        foreach (var pt in result.Points)
+            coverageGrid.Insert(pt.Position, pt.Id);
+
+        var overhangAnalysis = OverhangAnalyzer.Analyze(mesh, 3f);
+        var allRegions = overhangAnalysis.Layers.SelectMany(l => l.Regions).ToList();
+
+        var structuralResult = StructuralValidator.Validate(
+            result.Routes.Select(r => (r.id, r.route,
+                result.Pinheads.FirstOrDefault(p => p.id == r.id).pinhead?.ContactPoint.Z ?? 0)).ToList(),
+            allRegions, coverageGrid, result.SupportMesh, 2.0f);
+
+        // Check mesh manifoldness
+        int nonManifold = MeshMerger.CountNonManifoldEdges(result.SupportMesh);
+
+        return Ok(new
+        {
+            engine = "v2-full-validation",
+            elapsedMs = result.TotalElapsedMs,
+            supports = result.ValidSupports,
+
+            collision = new
+            {
+                collisionResult.TotalSupportsChecked,
+                collisionResult.CollisionFreeSupports,
+                collisionResult.CollidingSupports,
+                collisionResult.TotalCollisionPoints,
+                collisionResult.ElapsedMs,
+                issues = collisionResult.Issues.Take(50).Select(i => new
+                {
+                    i.SupportId, i.Element, i.Description,
+                    x = i.CollisionPoint.X, y = i.CollisionPoint.Y, z = i.CollisionPoint.Z,
+                    i.PenetrationDepth,
+                }),
+            },
+
+            structural = new
+            {
+                structuralResult.PassedBuckling, structuralResult.FailedBuckling,
+                structuralResult.PassedTensile, structuralResult.FailedTensile,
+                structuralResult.OverhangRegionsCovered, structuralResult.OverhangRegionsUncovered,
+                structuralResult.MinSafetyFactor, structuralResult.AvgSafetyFactor,
+                structuralResult.ManifoldErrors,
+                structuralResult.ElapsedMs,
+                issues = structuralResult.Issues.Take(50).Select(i => new
+                {
+                    i.SupportId, i.Category, i.Description, i.SafetyFactor,
+                    i.X, i.Y, i.Z,
+                }),
+            },
+
+            mesh = new
+            {
+                vertices = result.SupportMesh.VertexCount,
+                faces = result.SupportMesh.FaceCount,
+                nonManifoldEdges = nonManifold,
+            },
+        });
     }
 }
