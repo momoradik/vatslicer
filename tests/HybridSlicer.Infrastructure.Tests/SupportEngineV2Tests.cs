@@ -180,8 +180,8 @@ public class SupportEngineV2Tests
         hit.Should().NotBeNull();
         hit!.Value.Point.Z.Should().BeApproximately(20f, 0.5f, "should hit top face at Z~20");
 
-        // Point inside the cube should be detected (jittered to avoid edge ambiguity)
-        bvh.IsInside(new Vector3(0.13f, 0.17f, 10.3f)).Should().BeTrue();
+        // Point inside the cube should be detected (jittered rays handle exact positions)
+        bvh.IsInside(new Vector3(0, 0, 10)).Should().BeTrue();
 
         // Point outside should not be detected
         bvh.IsInside(new Vector3(0, 0, 25)).Should().BeFalse();

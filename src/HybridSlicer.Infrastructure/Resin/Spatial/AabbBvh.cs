@@ -386,18 +386,26 @@ public sealed class AabbBvh
     /// </summary>
     public bool IsInside(Vector3 point)
     {
-        // Robust inside/outside test: cast 3 rays in different directions.
+        // Robust inside/outside test: cast 5 rays in different directions.
         // Take majority vote to handle edge cases (ray through edge/vertex).
+        // Jitter rays slightly to avoid exact edge/vertex hits.
         int insideVotes = 0;
-        var directions = new[] { Vector3.UnitX, Vector3.UnitY, Vector3.UnitZ };
+        var directions = new[]
+        {
+            new Vector3(1f, 0.0001f, 0.0002f),   // ~+X with tiny jitter
+            new Vector3(0.0003f, 1f, 0.0001f),   // ~+Y with tiny jitter
+            new Vector3(0.0002f, 0.0003f, 1f),   // ~+Z with tiny jitter
+            new Vector3(-1f, 0.0001f, -0.0002f), // ~-X with tiny jitter
+            new Vector3(0.577f, 0.577f, 0.577f),  // diagonal
+        };
 
         foreach (var dir in directions)
         {
-            int intersections = CountRayIntersections(point, dir);
+            int intersections = CountRayIntersections(point, Vector3.Normalize(dir));
             if ((intersections & 1) == 1) insideVotes++;
         }
 
-        return insideVotes >= 2; // majority says inside
+        return insideVotes >= 3; // majority (3 of 5) says inside
     }
 
     private int CountRayIntersections(Vector3 point, Vector3 dir)

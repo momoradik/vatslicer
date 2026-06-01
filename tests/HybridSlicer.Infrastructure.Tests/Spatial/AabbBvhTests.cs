@@ -183,8 +183,8 @@ public class AabbBvhTests
         var mesh = CreateCube();
         var bvh = AabbBvh.Build(mesh);
 
-        // Use slightly off-center point to avoid edge/vertex ambiguities
-        bvh.IsInside(new Vector3(0.51f, 0.49f, 0.52f)).Should().BeTrue();
+        // Exact center should now work with jittered rays
+        bvh.IsInside(new Vector3(0.5f, 0.5f, 0.5f)).Should().BeTrue();
     }
 
     [Fact]
@@ -211,10 +211,10 @@ public class AabbBvhTests
         var mesh = CreateCube(10f);
         var bvh = AabbBvh.Build(mesh);
 
-        // Points clearly inside (avoid exact edge/vertex positions)
-        bvh.IsInside(new Vector3(5.1f, 4.9f, 5.2f)).Should().BeTrue();
-        bvh.IsInside(new Vector3(1.1f, 1.2f, 1.3f)).Should().BeTrue();
-        bvh.IsInside(new Vector3(8.7f, 8.8f, 8.9f)).Should().BeTrue();
+        // Points clearly inside — including exact positions (jittered rays handle edges)
+        bvh.IsInside(new Vector3(5f, 5f, 5f)).Should().BeTrue();
+        bvh.IsInside(new Vector3(1f, 1f, 1f)).Should().BeTrue();
+        bvh.IsInside(new Vector3(9f, 9f, 9f)).Should().BeTrue();
 
         // Points clearly outside
         bvh.IsInside(new Vector3(-1f, 5f, 5f)).Should().BeFalse();
