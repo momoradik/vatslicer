@@ -43,6 +43,10 @@ public sealed class ResinSlicerEngine
         public List<AutoSupportEngine.GeneratedSupport>? AutoSupports { get; init; }
         public AutoSupportEngine.GeneratedRaft? Raft { get; init; }
         public AutoSupportEngine.GeneratedSkirt? Skirt { get; init; }
+        // V2 support engine: analytical slice elements (preferred over AutoSupports if set)
+        public List<Slicing.AnalyticalSupportSlicer.SupportElement>? V2SupportElements { get; init; }
+        /// <summary>Exposure intensity for support pixels (0-255). 255=full, 178=70% for easy removal.</summary>
+        public byte SupportExposureIntensity { get; init; } = 255;
     }
 
     public record SliceResult
@@ -218,7 +222,21 @@ public sealed class ResinSlicerEngine
                 png = EncodePngFromCtx(ctx);
             }
 
-            // Add support columns, raft, and skirt to the layer image
+            // Add support geometry to the layer image
+            if (req.V2SupportElements is { Count: > 0 })
+            {
+                // V2 analytical slicing — exact circle cross-sections
+                var circles = Slicing.AnalyticalSupportSlicer.SliceAtZ(req.V2SupportElements, z);
+                if (circles.Count > 0)
+                {
+                    Slicing.SupportSliceIntegrator.RenderSupportsOnLayer(
+                        ctx.Canvas, circles, ctx.ScaleX, ctx.ScaleY,
+                        ctx.ResX / 2f, ctx.ResY / 2f, req.SupportExposureIntensity);
+                    png = EncodePngFromCtx(ctx);
+                }
+            }
+
+            // Legacy support columns, raft, and skirt
             bool hasExtraGeom = centeredSupports is { Count: > 0 } || centeredRaft is not null || centeredSkirt is not null;
             if (hasExtraGeom)
             {
