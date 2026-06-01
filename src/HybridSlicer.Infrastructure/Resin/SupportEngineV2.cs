@@ -73,6 +73,16 @@ public static class SupportEngineV2
         // Recoater (top-down printers)
         public float RecoaterSpeedMmS { get; init; } = 0;
 
+        // Drain hole avoidance
+        public List<(System.Numerics.Vector3 position, float radiusMm)>? DrainHoleExclusions { get; init; }
+        public float DrainHoleClearanceMm { get; init; } = 2.0f;
+
+        /// <summary>
+        /// Random seed for deterministic output. Same seed = same supports.
+        /// Use 0 for non-deterministic (time-based seed).
+        /// </summary>
+        public int Seed { get; init; } = 42;
+
         // Model transform (from frontend viewport)
         public float TranslateX { get; init; } = 0;
         public float TranslateY { get; init; } = 0;
@@ -158,6 +168,8 @@ public static class SupportEngineV2
             Orientation = config.Orientation,
             RecoaterSpeedMmS = config.RecoaterSpeedMmS,
             LayerHeightMm = config.LayerHeightMm,
+            DrainHoleExclusions = config.DrainHoleExclusions,
+            DrainHoleClearanceMm = config.DrainHoleClearanceMm,
         }, bvh);
 
         Serilog.Log.Information("V2 Step 2 Points: {Ms}ms ({Count} points, {Regions} regions)", stepSw.ElapsedMilliseconds, pointResult.Points.Count, pointResult.OverhangRegionsAnalyzed);

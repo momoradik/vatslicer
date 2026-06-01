@@ -46,6 +46,10 @@ public sealed class SupportPointGenerator
         public float RecoaterSpeedMmS { get; init; } = 0;
         /// <summary>Layer height for overhang analysis (mm). Coarser = faster.</summary>
         public float LayerHeightMm { get; init; } = 1.0f;
+        /// <summary>Drain hole positions to avoid. Supports won't be placed within clearance of drain holes.</summary>
+        public List<(Vector3 position, float radiusMm)>? DrainHoleExclusions { get; init; }
+        /// <summary>Clearance distance around drain holes (mm).</summary>
+        public float DrainHoleClearanceMm { get; init; } = 2.0f;
     }
 
     public sealed class GenerationResult
@@ -113,6 +117,18 @@ public sealed class SupportPointGenerator
                 // Check spacing against existing points using spatial grid
                 if (grid.ExistsInRadius(pos3d, spacing * 0.8f))
                     continue;
+
+                // Check drain hole exclusion zones
+                if (config.DrainHoleExclusions is { Count: > 0 })
+                {
+                    bool tooCloseToHole = false;
+                    foreach (var (holePos, holeR) in config.DrainHoleExclusions)
+                    {
+                        if (Vector3.Distance(pos3d, holePos) < holeR + config.DrainHoleClearanceMm)
+                        { tooCloseToHole = true; break; }
+                    }
+                    if (tooCloseToHole) continue;
+                }
 
                 // Use BVH for precise normal if available, otherwise use overhang face normal
                 Vector3 surfaceNormal;
