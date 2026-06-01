@@ -118,6 +118,11 @@ public sealed class SupportV2Controller : ControllerBase
                 vertices = result.MergeInfo.WeldedVertices,
                 faces = result.MergeInfo.FinalFaces,
                 nonManifoldEdges = result.MergeInfo.NonManifoldEdges,
+                // Base64-encoded binary STL for direct Three.js rendering
+                // (avoids a second HTTP request for the mesh)
+                stlBase64 = result.SupportMesh.FaceCount > 0
+                    ? Convert.ToBase64String(result.SupportMesh.ToStlBinary())
+                    : null,
             },
 
             // Legacy format for existing frontend rendering

@@ -213,7 +213,7 @@ export const supportV2Api = {
       totalVolumeMl: number; totalWeightG: number; estimatedCostUsd: number
       elapsedMs: number
       validation: V2ValidationData
-      mesh: { vertices: number; faces: number; nonManifoldEdges: number }
+      mesh: { vertices: number; faces: number; nonManifoldEdges: number; stlBase64: string | null }
       supportCount: number; braceCount: number
       supports: AdvancedSupportData[]; crossBraces: CrossBraceData[]
     }>('/support-v2', fd, {

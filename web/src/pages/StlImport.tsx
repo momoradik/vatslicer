@@ -608,15 +608,18 @@ export default function StlImport() {
         console.log('[V2] Fallback to legacy engine')
       }
 
-      // Fetch mesh buffer for direct Three.js rendering (non-blocking)
+      // Decode inline STL mesh from V2 response (no second HTTP request)
       let meshBuffer: ArrayBuffer | null = null
       if (v2Stats) {
         try {
-          const meshFd = new FormData()
-          meshFd.append('stlFile', blob, selected.fileName)
-          meshFd.append('density', String(autoSupportConfig.density))
-          meshBuffer = await supportV2Api.getMeshBuffer(meshFd)
-        } catch { /* mesh download optional */ }
+          const v2Result = advResult as any
+          if (v2Result.mesh?.stlBase64) {
+            const binary = atob(v2Result.mesh.stlBase64)
+            const bytes = new Uint8Array(binary.length)
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+            meshBuffer = bytes.buffer
+          }
+        } catch { /* mesh decode optional */ }
       }
 
       const basicResult = await autoSupportApi.generate(fd)
