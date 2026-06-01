@@ -209,7 +209,9 @@ export const supportV2Api = {
   generate: (fd: FormData) =>
     http.post<{
       engine: string; totalSupports: number; validSupports: number
-      rejectedCollisions: number; totalVolumeMm3: number; elapsedMs: number
+      rejectedCollisions: number; totalVolumeMm3: number
+      totalVolumeMl: number; totalWeightG: number; estimatedCostUsd: number
+      elapsedMs: number
       validation: V2ValidationData
       mesh: { vertices: number; faces: number; nonManifoldEdges: number }
       supportCount: number; braceCount: number

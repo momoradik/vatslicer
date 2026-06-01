@@ -73,6 +73,9 @@ public sealed class SupportV2Controller : ControllerBase
             validSupports = result.ValidSupports,
             rejectedCollisions = result.RejectedCollisions,
             totalVolumeMm3 = result.TotalSupportVolumeMm3,
+            totalVolumeMl = result.TotalSupportVolumeMm3 / 1000f,
+            totalWeightG = result.TotalSupportVolumeMm3 * 1.1e-3f, // ~1.1 g/cm³ resin density
+            estimatedCostUsd = result.TotalSupportVolumeMm3 / 1000f * 0.05f, // ~$0.05/ml typical resin
             elapsedMs = result.TotalElapsedMs,
             orientation = orient.ToString(),
 

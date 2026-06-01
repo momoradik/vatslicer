@@ -106,6 +106,23 @@ interface AutoSupportPoint {
   tipDiameter: number; columnDiameter: number; baseDiameter: number
 }
 
+interface V2Stats {
+  engine: string
+  validSupports: number
+  totalSupports: number
+  volumeMl: number
+  weightG: number
+  costUsd: number
+  elapsedMs: number
+  meshFaces: number
+  safetyFactor: number
+  bucklingPass: number
+  bucklingFail: number
+  coverageOk: number
+  coverageTotal: number
+  collisions: number
+}
+
 interface PrepState {
   autoSupports: AutoSupportPoint[]
   advancedSupports: AdvancedSupportData[]
@@ -115,12 +132,14 @@ interface PrepState {
   locked: boolean
   stale: boolean
   generatedAt: number | null
+  v2Stats: V2Stats | null
 }
 
 const EMPTY_PREP: PrepState = {
   autoSupports: [], advancedSupports: [], crossBraces: [],
   raft: null, skirt: null,
   locked: false, stale: false, generatedAt: null,
+  v2Stats: null,
 }
 
 interface ModelState extends ModelEntry {
@@ -561,10 +580,27 @@ export default function StlImport() {
       // Use V2 engine (production-grade with BVH, collision avoidance, structural validation)
       // Falls back to legacy engine if V2 fails
       let advResult: { supports: AdvancedSupportData[]; crossBraces: CrossBraceData[] }
+      let v2Stats: V2Stats | null = null
       try {
         const v2Result = await supportV2Api.generate(fd)
         advResult = v2Result
-        console.log(`[V2] ${v2Result.validSupports} supports, SF=${v2Result.validation.structural.minSafetyFactor.toFixed(1)}, collisions=${v2Result.validation.collision.collidingSupports}, ${v2Result.elapsedMs}ms`)
+        v2Stats = {
+          engine: v2Result.engine,
+          validSupports: v2Result.validSupports,
+          totalSupports: v2Result.totalSupports,
+          volumeMl: v2Result.totalVolumeMl,
+          weightG: v2Result.totalWeightG,
+          costUsd: v2Result.estimatedCostUsd,
+          elapsedMs: v2Result.elapsedMs,
+          meshFaces: v2Result.mesh.faces,
+          safetyFactor: v2Result.validation.structural.minSafetyFactor,
+          bucklingPass: v2Result.validation.structural.passedBuckling,
+          bucklingFail: v2Result.validation.structural.failedBuckling,
+          coverageOk: v2Result.validation.structural.overhangRegionsCovered,
+          coverageTotal: v2Result.validation.structural.overhangRegionsCovered + v2Result.validation.structural.overhangRegionsUncovered,
+          collisions: v2Result.validation.collision.collidingSupports,
+        }
+        console.log(`[V2] ${v2Result.validSupports} supports, SF=${v2Result.validation.structural.minSafetyFactor.toFixed(1)}, ${v2Result.elapsedMs}ms`)
       } catch {
         // Fallback to legacy engine
         advResult = await advancedSupportApi.generate(fd)
@@ -585,6 +621,7 @@ export default function StlImport() {
           locked: true,
           stale: false,
           generatedAt: Date.now(),
+          v2Stats,
         }
       } : m))
     } catch (err: any) {
@@ -1110,6 +1147,35 @@ export default function StlImport() {
                           {selectedPrep.raft && <span className="text-blue-400">Raft ({selectedPrep.raft.type})</span>}
                           {selectedPrep.skirt && <span className="text-cyan-400">Skirt ({selectedPrep.skirt.layers}L)</span>}
                         </div>
+                        {/* V2 Engine Stats */}
+                        {selectedPrep.v2Stats && (
+                          <div className="mt-1 space-y-0.5 text-[9px]">
+                            <div className="flex justify-between">
+                              <span className="text-gray-500">Volume</span>
+                              <span className="text-gray-300">{selectedPrep.v2Stats.volumeMl.toFixed(2)} ml ({selectedPrep.v2Stats.weightG.toFixed(1)}g, ~${selectedPrep.v2Stats.costUsd.toFixed(2)})</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-gray-500">Mesh</span>
+                              <span className="text-gray-300">{(selectedPrep.v2Stats.meshFaces/1000).toFixed(0)}k faces</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-gray-500">Buckling</span>
+                              <span className={selectedPrep.v2Stats.bucklingFail === 0 ? 'text-green-400' : 'text-amber-400'}>
+                                {selectedPrep.v2Stats.bucklingPass} pass / {selectedPrep.v2Stats.bucklingFail} fail
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-gray-500">Safety Factor</span>
+                              <span className={selectedPrep.v2Stats.safetyFactor >= 2 ? 'text-green-400' : selectedPrep.v2Stats.safetyFactor >= 1 ? 'text-amber-400' : 'text-red-400'}>
+                                {selectedPrep.v2Stats.safetyFactor.toFixed(1)}x min
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-gray-500">Time</span>
+                              <span className="text-gray-400">{selectedPrep.v2Stats.elapsedMs}ms (V2)</span>
+                            </div>
+                          </div>
+                        )}
                         {selectedPrep.stale && (
                           <p className="text-[9px] text-amber-400">Stale — model moved, regenerate needed</p>
                         )}
@@ -1119,6 +1185,24 @@ export default function StlImport() {
                               selectedPrep.locked ? 'bg-amber-900/30 text-amber-400' : 'bg-gray-800 text-gray-400'
                             }`}>
                             {selectedPrep.locked ? 'Unlock Movement' : 'Lock Movement'}
+                          </button>
+                          <button onClick={async () => {
+                            if (!selected) return
+                            try {
+                              const resp = await fetch(selected.url)
+                              const blob = await resp.blob()
+                              const fd = new FormData()
+                              fd.append('stlFile', blob, selected.fileName)
+                              fd.append('density', String(autoSupportConfig.density))
+                              const stlBlob = await supportV2Api.downloadMesh(fd)
+                              const url = URL.createObjectURL(stlBlob)
+                              const a = document.createElement('a')
+                              a.href = url; a.download = 'supports.stl'; a.click()
+                              URL.revokeObjectURL(url)
+                            } catch (err) { console.error('STL export failed:', err) }
+                          }}
+                            className="flex-1 text-[9px] py-1 rounded bg-teal-900/20 text-teal-400 hover:bg-teal-900/30 transition">
+                            Export STL
                           </button>
                           <button onClick={clearPrep}
                             className="flex-1 text-[9px] py-1 rounded bg-red-900/20 text-red-400 hover:bg-red-900/30 transition">
