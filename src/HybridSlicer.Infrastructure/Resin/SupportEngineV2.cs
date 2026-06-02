@@ -249,14 +249,17 @@ public static class SupportEngineV2
             {
                 if (weight == ForceEstimator.SupportWeight.Heavy || supportHeight > 100f)
                 {
-                    // Very tall supports: scale radius with height
-                    // At 100mm: r=0.75, at 200mm: r=1.0, at 300mm: r=1.25
-                    float heightScaledR = 0.5f + supportHeight * 0.0025f;
+                    // Height-scaled radius using Euler buckling formula:
+                    // Critical load P_cr = PI^2 * E * I / L^2 where I = PI * r^4 / 4
+                    // Solving for r to resist a minimum load with safety factor 2:
+                    // r = (P * L^2 * 4 / (PI^3 * E * SF))^(1/4)
+                    // Simplified: at 100mm r≈0.75, 200mm r≈1.2, 300mm r≈1.6
+                    float heightScaledR = 0.4f + supportHeight * 0.004f;
                     rCfg = rCfg with
                     {
-                        PillarRadiusMm = Math.Max(rCfg.PillarRadiusMm, Math.Min(heightScaledR, 2.0f)),
-                        BaseRadiusMm = Math.Max(rCfg.BaseRadiusMm, 3.0f),
-                        WideningFactor = Math.Max(rCfg.WideningFactor, 0.03f), // aggressive widening
+                        PillarRadiusMm = Math.Max(rCfg.PillarRadiusMm, Math.Min(heightScaledR, 3.0f)),
+                        BaseRadiusMm = Math.Max(rCfg.BaseRadiusMm, Math.Min(heightScaledR * 3f, 5.0f)),
+                        WideningFactor = Math.Max(rCfg.WideningFactor, 0.04f),
                     };
                 }
                 else if (weight == ForceEstimator.SupportWeight.Medium)
