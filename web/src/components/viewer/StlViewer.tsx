@@ -1129,12 +1129,14 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       if (normals) normals.needsUpdate = true
 
       const material = new THREE.MeshPhongMaterial({
-        color: 0x2dd4bf, // teal — matches Lychee/ChiTuBox
+        color: 0x14b8a6, // teal-500 — professional slicer look
+        specular: 0x555555,
         transparent: true,
-        opacity: 0.65,
-        shininess: 40,
+        opacity: 0.75,
+        shininess: 60,
         side: THREE.DoubleSide,
         depthWrite: true,
+        flatShading: false, // smooth shading for sphere-cone geometry
       })
 
       const mesh = new THREE.Mesh(geometry, material)
