@@ -1141,9 +1141,12 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
 
       const mesh = new THREE.Mesh(geometry, material)
 
-      // The V2 mesh is already in centered print-space (XY=0 center, Z bottom=0)
-      // which matches the frontend model centering. No additional transform needed
-      // beyond the Y/Z swap already applied above.
+      // V2 mesh is in centered print-space after Y/Z swap — matches model centering.
+      geometry.computeBoundingBox()
+      const bb = geometry.boundingBox!
+      console.log('[V2 Mesh] bounds:', 'X:', bb.min.x.toFixed(1), '-', bb.max.x.toFixed(1),
+        'Y:', bb.min.y.toFixed(1), '-', bb.max.y.toFixed(1),
+        'Z:', bb.min.z.toFixed(1), '-', bb.max.z.toFixed(1))
 
       scene.add(mesh)
       v2MeshRef.current = mesh
