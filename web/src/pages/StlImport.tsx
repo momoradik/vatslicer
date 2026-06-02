@@ -660,6 +660,7 @@ export default function StlImport() {
       } : m))
     } catch (err: any) {
       console.error('Auto-support failed:', err)
+      alert('Support generation failed: ' + (err?.message || 'Unknown error'))
     } finally {
       setGenerating(false)
     }
