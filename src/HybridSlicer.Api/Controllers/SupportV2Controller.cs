@@ -320,6 +320,29 @@ public sealed class SupportV2Controller : ControllerBase
     }
 
     /// <summary>
+    /// Render a top-down support density heatmap.
+    /// Green = well-supported, red dots = uncovered overhangs.
+    /// </summary>
+    [HttpPost("heatmap")]
+    [RequestSizeLimit(200_000_000)]
+    public async Task<IActionResult> SupportHeatmap(
+        [FromForm] IFormFile stlFile,
+        [FromForm] int resX = 800, [FromForm] int resY = 800,
+        [FromForm] float buildWidthMm = 200, [FromForm] float buildDepthMm = 200,
+        [FromForm] double density = 0.5,
+        CancellationToken ct = default)
+    {
+        if (stlFile is null || stlFile.Length == 0) return BadRequest("STL file required.");
+        byte[] data;
+        using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
+        var (mesh, _) = MeshValidator.ValidateAndRepair(data);
+        var result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig { DensityFactor = (float)density });
+        var positions = result.Points.Select(p => new System.Numerics.Vector2(p.Position.X, p.Position.Y)).ToList();
+        var png = SupportHeatmapRenderer.Render(positions, null, resX, resY, buildWidthMm, buildDepthMm);
+        return File(png, "image/png", "support_heatmap.png");
+    }
+
+    /// <summary>
     /// Export both model and support meshes as a combined ZIP containing two STL files.
     /// Compatible with 3MF-style workflows where model and supports are separate objects.
     /// </summary>
