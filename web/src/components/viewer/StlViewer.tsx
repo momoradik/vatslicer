@@ -926,7 +926,13 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     const regions = paintedRegions ?? []
     const braces = crossBraces ?? []
     const hasAnything = pts.length > 0 || regions.length > 0 || braces.length > 0 || raftData || skirtData
-    if (!hasAnything) return
+
+    // If V2 watertight mesh is available, skip legacy segment rendering
+    // (V2 mesh is rendered separately with proper geometry)
+    const hasV2Mesh = supportMeshBuffer && supportMeshBuffer.byteLength > 84
+    if (!hasAnything && !hasV2Mesh) return
+    // When V2 mesh exists, only render raft/skirt from legacy, skip support segments
+    const skipLegacySupports = !!hasV2Mesh
 
     const group = new THREE.Group()
     group.name = 'support-visuals'
@@ -970,7 +976,8 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       group.add(mesh)
     }
 
-    pts.forEach(p => {
+    // Skip legacy cylinder rendering when V2 watertight mesh is available
+    if (!skipLegacySupports) pts.forEach(p => {
       if (p.segments && p.segments.length > 0) {
         p.segments.forEach((seg, i) => {
           const isTip = seg.part === 'tip'
@@ -1003,8 +1010,8 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       }
     })
 
-    // Render cross-braces with sphere joints at both ends
-    braces.forEach(b => {
+    // Render cross-braces (skip when V2 mesh handles everything)
+    if (!skipLegacySupports) braces.forEach(b => {
       const h = Math.sqrt((b.x2-b.x1)**2 + (b.y2-b.y1)**2 + (b.z2-b.z1)**2)
       if (h < 0.01) return
       const r = Math.max(0.05, b.diameter / 2)
@@ -1076,7 +1083,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
 
     scene.add(group)
     supportGroupRef.current = group
-  }, [supportPoints, paintedRegions, crossBraces, raftData, skirtData, sceneReady])
+  }, [supportPoints, paintedRegions, crossBraces, supportMeshBuffer, raftData, skirtData, sceneReady])
 
   // ── V2 Support mesh rendering (single watertight mesh) ─────────────────
 
@@ -1124,12 +1131,18 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       const material = new THREE.MeshPhongMaterial({
         color: 0x2dd4bf, // teal — matches Lychee/ChiTuBox
         transparent: true,
-        opacity: 0.7,
-        shininess: 30,
+        opacity: 0.65,
+        shininess: 40,
         side: THREE.DoubleSide,
+        depthWrite: true,
       })
 
       const mesh = new THREE.Mesh(geometry, material)
+
+      // The V2 mesh is already in centered print-space (XY=0 center, Z bottom=0)
+      // which matches the frontend model centering. No additional transform needed
+      // beyond the Y/Z swap already applied above.
+
       scene.add(mesh)
       v2MeshRef.current = mesh
     } catch (err) {
