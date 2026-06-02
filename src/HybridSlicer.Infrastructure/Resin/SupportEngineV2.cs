@@ -462,11 +462,12 @@ public static class SupportEngineV2
     {
         var legacyPreset = AdvancedSupportEngine.MediumPreset;
         var result = new List<AdvancedSupportEngine.AdvancedSupport>();
+        var routeMap = routes.ToDictionary(r => r.id, r => r.route);
 
         foreach (var (id, pinhead) in pinheads)
         {
             if (!pinhead.IsValid) continue;
-            var route = routes.FirstOrDefault(r => r.id == id);
+            if (!routeMap.TryGetValue(id, out var routePath)) continue; // removed by collision filter
 
             var segments = new List<AdvancedSupportEngine.SupportSegment>();
 
@@ -495,22 +496,19 @@ public static class SupportEngineV2
             });
 
             // Route waypoints
-            if (route.route != null)
+            for (int i = 0; i < routePath.Path.Count - 1; i++)
             {
-                for (int i = 0; i < route.route.Path.Count - 1; i++)
+                var wp1 = routePath.Path[i];
+                var wp2 = routePath.Path[i + 1];
+                string part = wp2.Type == "base" ? "base" :
+                              wp1.Type == "bridge" ? "branch" :
+                              i == routePath.Path.Count - 2 ? "lowerTaper" : "shaft";
+                segments.Add(new AdvancedSupportEngine.SupportSegment
                 {
-                    var wp1 = route.route.Path[i];
-                    var wp2 = route.route.Path[i + 1];
-                    string part = wp2.Type == "base" ? "base" :
-                                  wp1.Type == "bridge" ? "branch" :
-                                  i == route.route.Path.Count - 2 ? "lowerTaper" : "shaft";
-                    segments.Add(new AdvancedSupportEngine.SupportSegment
-                    {
-                        Part = part,
-                        X1 = wp1.Position.X, Y1 = wp1.Position.Y, Z1 = wp1.Position.Z, R1 = wp1.Radius,
-                        X2 = wp2.Position.X, Y2 = wp2.Position.Y, Z2 = wp2.Position.Z, R2 = wp2.Radius,
-                    });
-                }
+                    Part = part,
+                    X1 = wp1.Position.X, Y1 = wp1.Position.Y, Z1 = wp1.Position.Z, R1 = wp1.Radius,
+                    X2 = wp2.Position.X, Y2 = wp2.Position.Y, Z2 = wp2.Position.Z, R2 = wp2.Radius,
+                });
             }
 
             result.Add(new AdvancedSupportEngine.AdvancedSupport
@@ -518,9 +516,9 @@ public static class SupportEngineV2
                 Id = id, Type = "v2", Preset = legacyPreset,
                 ContactX = pinhead.ContactPoint.X, ContactY = pinhead.ContactPoint.Y, ContactZ = pinhead.ContactPoint.Z,
                 NormalX = pinhead.Direction.X, NormalY = pinhead.Direction.Y, NormalZ = pinhead.Direction.Z,
-                BaseX = route.route?.Path.Last().Position.X ?? pinhead.JunctionPoint.X,
-                BaseY = route.route?.Path.Last().Position.Y ?? pinhead.JunctionPoint.Y,
-                BaseZ = route.route?.Path.Last().Position.Z ?? 0,
+                BaseX = routePath.Path.Last().Position.X,
+                BaseY = routePath.Path.Last().Position.Y,
+                BaseZ = routePath.Path.Last().Position.Z,
                 Segments = segments,
             });
         }
