@@ -370,9 +370,12 @@ public static class SupportEngineV2
                 };
             }
 
-            // Start pillar at the larger of: pinhead back radius or auto-sized pillar radius
+            // Start pillar from junction or contact (whichever is above the bed)
             float startRadius = Math.Max(pinhead.BackRadius, rCfg.PillarRadiusMm);
-            var route = PillarRouter.Route(pinhead.JunctionPoint, startRadius, bvh, rCfg);
+            var routeStart = pinhead.JunctionPoint.Z > 0.1f
+                ? pinhead.JunctionPoint
+                : pinhead.ContactPoint; // near-bed: start from contact, skip pinhead
+            var route = PillarRouter.Route(routeStart, startRadius, bvh, rCfg);
             routes.Add((id, route));
         }
 
@@ -475,13 +478,17 @@ public static class SupportEngineV2
         foreach (var (id, pinhead) in pinheads)
         {
             if (!pinhead.IsValid) continue;
-            // Pinhead mesh: OrientedFrustum from ContactPoint to JunctionPoint.
-            // Pin radius at contact (thin tip), back radius at junction (wide end).
-            // This is a single continuous tapered cylinder — no gaps, no rotation math.
-            var phMesh = SupportMesher.OrientedFrustum(
-                pinhead.ContactPoint, pinhead.JunctionPoint,
-                pinhead.PinRadius, pinhead.BackRadius, meshSides);
-            meshParts.Add(phMesh);
+
+            // Only generate pinhead mesh if junction is ABOVE the build plate.
+            // For near-bed supports where the pinhead would go below Z=0,
+            // the route itself handles the connection from contact to base.
+            if (pinhead.JunctionPoint.Z > 0.1f)
+            {
+                var phMesh = SupportMesher.OrientedFrustum(
+                    pinhead.ContactPoint, pinhead.JunctionPoint,
+                    pinhead.PinRadius, pinhead.BackRadius, meshSides);
+                meshParts.Add(phMesh);
+            }
         }
 
         foreach (var (id, route) in routes)
