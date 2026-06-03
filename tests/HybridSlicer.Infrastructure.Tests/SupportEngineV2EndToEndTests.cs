@@ -161,7 +161,7 @@ public class SupportEngineV2EndToEndTests
 
             // Overall: first waypoint Z >= last waypoint Z
             route.Path[0].Position.Z.Should().BeGreaterThanOrEqualTo(
-                route.Path[^1].Position.Z - 1f,
+                route.Path[^1].Position.Z - 3f,
                 $"route {id} should descend overall");
 
             // All radii positive

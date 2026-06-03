@@ -227,6 +227,7 @@ public static class SupportEngineV2
             MinSpacingMm = config.MinSpacingMm,
             MaxSpacingMm = config.MaxSpacingMm,
             DensityFactor = config.DensityFactor,
+            OverhangAngleDeg = config.OverhangAngleDeg,
             Orientation = config.Orientation,
             RecoaterSpeedMmS = config.RecoaterSpeedMmS,
             LayerHeightMm = adaptiveLayerHeight,

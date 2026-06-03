@@ -91,7 +91,7 @@ public class SupportEngineV2FullValidationTests
             if (ph.Width < 0.5f) continue; // skip reduced-size pinheads
             if (result.Bvh.IsInside(ph.JunctionPoint)) insideCount++;
         }
-        insideCount.Should().BeLessThan(result.Pinheads.Count / 10,
+        insideCount.Should().BeLessThan(Math.Max(1, result.Pinheads.Count / 10),
             "fewer than 10% of full-size pinhead junctions should be inside mesh");
     }
 

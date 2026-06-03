@@ -75,7 +75,15 @@ public static class PillarRouter
             return new PillarRoute { Path = path, ReachesGround = true, TotalLength = ComputePathLength(path) };
         }
 
-        // Strategy 2: Try anchor on model surface below (single ray-cast)
+        // Strategy 2: Try bridge-and-descend (multi-junction for complex geometry)
+        var bridgeResult = TryBridgeAndDescend(junctionPoint, junctionRadius, bvh, config, maxJunctions: 2);
+        if (bridgeResult != null)
+        {
+            path.AddRange(bridgeResult);
+            return new PillarRoute { Path = path, ReachesGround = true, TotalLength = ComputePathLength(path) };
+        }
+
+        // Strategy 3: Anchor on model surface (last resort — support doesn't reach bed)
         var anchorResult = TryAnchor(junctionPoint, junctionRadius, bvh, config);
         if (anchorResult.HasValue)
         {
@@ -89,17 +97,8 @@ public static class PillarRouter
             };
         }
 
-        // Strategy 3: Try bridge-and-descend (multi-junction for complex geometry)
-        var bridgeResult = TryBridgeAndDescend(junctionPoint, junctionRadius, bvh, config, maxJunctions: 2);
-        if (bridgeResult != null)
-        {
-            path.AddRange(bridgeResult);
-            return new PillarRoute { Path = path, ReachesGround = true, TotalLength = ComputePathLength(path) };
-        }
-
-        // Fallback: direct descent (may collide but still usable)
-        path.AddRange(BuildVerticalPillar(junctionPoint, junctionRadius, config));
-        return new PillarRoute { Path = path, ReachesGround = true, TotalLength = ComputePathLength(path) };
+        // Fallback: reject — do NOT create a support that will collide
+        return new PillarRoute { Path = path, ReachesGround = false, TotalLength = 0 };
     }
 
     // ── Strategy 1: Direct descent ───────────────────────────────────────
