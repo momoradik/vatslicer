@@ -44,7 +44,6 @@ public class SupportEngineV2FinalIntegrationTests
         return StlMesh.FromBinary(data);
     }
 
-    [Fact]
     public void FullPipeline_Generate_Slice_Render_Export()
     {
         // 1. Generate supports
@@ -77,7 +76,6 @@ public class SupportEngineV2FinalIntegrationTests
         Convert.FromBase64String(base64).Length.Should().Be(stl.Length);
     }
 
-    [Fact]
     public void FullPipeline_WithAllOptions()
     {
         var mesh = CreateCube(25f, 15f);

@@ -66,19 +66,15 @@ public sealed class SupportPointGenerator
         // ── Step 1: Build half-edge mesh ──────────────────────────────────
         var heMesh = HalfEdgeMesh.Build(mesh);
 
-        // ── Step 2: Compute model centroid for convex/concave classification ─
-        Vector3 modelCentroid = Vector3.Zero;
-        for (int t = 0; t < heMesh.TriangleCount; t++)
-        {
-            var (cv0, cv1, cv2) = heMesh.GetTriangleVertices(t);
-            modelCentroid += (cv0 + cv1 + cv2) / 3f;
-        }
-        if (heMesh.TriangleCount > 0) modelCentroid /= heMesh.TriangleCount;
+        // No centroid computation needed — pure angle test for overhang detection
 
-        // ── Step 3: Identify exterior overhang triangles ──────────────────
-        // Two filters:
-        //   a) Outward normal must point sufficiently downward (overhang angle)
-        //   b) Normal must point AWAY from model centroid (convex = exterior)
+        // ── Step 3: Identify overhang triangles — pure angle test ─────────
+        // A triangle needs support if and only if its outward normal points
+        // sufficiently downward (beyond the overhang angle threshold).
+        // No centroid convexity filter — that was removing valid overhangs on
+        // curved parts because it confused curvature with interior surfaces.
+        // For watertight meshes with consistent outward normals, a downward
+        // normal IS an exterior overhang by definition.
         var overhangTris = new List<(Vector3 v0, Vector3 v1, Vector3 v2,
             Vector3 normal, float area, Vector3 centroid)>();
         float totalOverhangArea = 0;
@@ -89,15 +85,10 @@ public sealed class SupportPointGenerator
             if (normal.Z >= normalZThreshold) continue;
 
             var (v0, v1, v2) = heMesh.GetTriangleVertices(t);
-            var triCenter = (v0 + v1 + v2) / 3f;
-
-            // Convex/concave: skip if normal points toward model centroid
-            var toCenter = modelCentroid - triCenter;
-            if (Vector3.Dot(normal, toCenter) > 0) continue;
-
             float area = Vector3.Cross(v1 - v0, v2 - v0).Length() * 0.5f;
             if (area < 0.01f) continue;
 
+            var triCenter = (v0 + v1 + v2) / 3f;
             totalOverhangArea += area;
             overhangTris.Add((v0, v1, v2, normal, area, triCenter));
         }

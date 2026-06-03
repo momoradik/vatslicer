@@ -555,10 +555,21 @@ public static class SupportEngineV2
             }
         }
 
-        foreach (var (id, route) in routes)
+        // ── Emission gate: only supports with a valid load path ──────────
+        // A support needs at least 2 waypoints (junction → something).
+        // It must either reach the ground, have an anchor, or have a base waypoint.
+        // Single-waypoint (junction only) routes are floating pinheads → discard.
+        var validRoutes = routes.Where(r =>
+            r.route.Path.Count >= 2 &&
+            (r.route.ReachesGround || r.route.AnchorPoint.HasValue
+             || r.route.Path.Any(wp => wp.Type == "base")))
+            .ToList();
+
+        Serilog.Log.Information("V2 Emission gate: {Before} routes → {After} with complete load path",
+            routes.Count, validRoutes.Count);
+
+        foreach (var (id, route) in validRoutes)
         {
-            // Skip rejected routes (no path or didn't reach ground/anchor)
-            if (route.Path.Count < 2) continue;
 
             float totalPillarHeight = route.Path[0].Position.Z - route.Path[^1].Position.Z;
 
@@ -667,47 +678,114 @@ public static class SupportEngineV2
             routeData, allRegions, coverageGrid, null, config.MinSafetyFactor,
             sourceMesh: mesh, bvh: bvh);
 
-        // ── Step 7b: Structural feedback — re-route failed supports ──────
-        // If any supports failed buckling or tensile, increase their radius and re-route.
-        // This closes the feedback loop that PrusaSlicer uses: generate → validate → fix.
-        if (structuralResult.FailedBuckling > 0 || structuralResult.FailedTensile > 0)
+        // ── Step 7b: Escalation ladder for structural recovery ─────────
+        // Failed supports go through an escalation ladder. Each rung is tried
+        // and rolled back if it doesn't clear the check. A support is only
+        // discarded when the entire ladder is exhausted.
+        //
+        // Ladder (cheapest first):
+        //   1. Perturb base XY landing point (nudge 1-3mm)
+        //   2. Add cross-brace to nearest neighbor (stiffen pair)
+        //   3. Increase pillar diameter (raise stiffness directly)
         {
             var failedIds = new HashSet<string>(
                 structuralResult.Issues
                     .Where(i => i.Category == "buckling" || i.Category == "tensile")
                     .Select(i => i.SupportId));
 
-            int reRouted = 0;
-            for (int ri = 0; ri < routes.Count; ri++)
+            if (failedIds.Count > 0)
             {
-                if (!failedIds.Contains(routes[ri].id)) continue;
+                int recovered = 0;
 
-                var oldRoute = routes[ri];
-                var ph = pinheadLookup.TryGetValue(oldRoute.id, out var p) ? p : null;
-                if (ph == null) continue;
-
-                // Increase radius by 50% and re-route
-                float newRadius = Math.Max(ph.BackRadius * 1.5f, 1.0f);
-                var biggerCfg = routingConfig with
+                for (int ri = 0; ri < routes.Count; ri++)
                 {
-                    PillarRadiusMm = newRadius,
-                    BaseRadiusMm = Math.Max(routingConfig.BaseRadiusMm, newRadius * 2.5f),
-                    WideningFactor = Math.Max(routingConfig.WideningFactor, 0.03f),
-                };
+                    if (!failedIds.Contains(routes[ri].id)) continue;
+                    var oldRoute = routes[ri];
+                    var ph = pinheadLookup.TryGetValue(oldRoute.id, out var p) ? p : null;
+                    if (ph == null) continue;
 
-                var newRoute = PillarRouter.Route(ph.JunctionPoint, newRadius, bvh, biggerCfg);
-                if (newRoute.Path.Count > 1)
-                {
-                    routes[ri] = (oldRoute.id, newRoute);
-                    reRouted++;
+                    bool fixed2 = false;
+
+                    // Rung 1: perturb base XY by 1-3mm in 4 directions
+                    if (!fixed2)
+                    {
+                        for (int nudge = 1; nudge <= 3 && !fixed2; nudge++)
+                        {
+                            foreach (var offset in new[] { new Vector3(nudge, 0, 0), new Vector3(-nudge, 0, 0),
+                                                           new Vector3(0, nudge, 0), new Vector3(0, -nudge, 0) })
+                            {
+                                var nudgedStart = ph.JunctionPoint.Z > 0.1f ? ph.JunctionPoint : ph.ContactPoint;
+                                nudgedStart += offset;
+                                var nudgedRoute = PillarRouter.Route(nudgedStart, ph.BackRadius, bvh, routingConfig);
+                                if (nudgedRoute.Path.Count > 1 && nudgedRoute.ReachesGround)
+                                {
+                                    routes[ri] = (oldRoute.id, nudgedRoute);
+                                    fixed2 = true; recovered++; break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Rung 2: add cross-brace to nearest neighbor
+                    if (!fixed2 && routes.Count > 1)
+                    {
+                        float bestDist = float.MaxValue;
+                        int bestNeighbor = -1;
+                        var myBase = oldRoute.route.Path.Count > 0 ? oldRoute.route.Path[^1].Position : ph.ContactPoint;
+                        for (int j = 0; j < routes.Count; j++)
+                        {
+                            if (j == ri || routes[j].route.Path.Count < 2) continue;
+                            var nb = routes[j].route.Path[^1].Position;
+                            float d = Vector2.Distance(new Vector2(myBase.X, myBase.Y), new Vector2(nb.X, nb.Y));
+                            if (d > 0.5f && d < bestDist) { bestDist = d; bestNeighbor = j; }
+                        }
+                        if (bestNeighbor >= 0 && bestDist < config.InterconnectDistMm * 2)
+                        {
+                            float midZ = (myBase.Z + routes[bestNeighbor].route.Path[0].Position.Z) / 2f;
+                            var braceA = new Vector3(myBase.X, myBase.Y, midZ);
+                            var braceB = new Vector3(routes[bestNeighbor].route.Path[^1].Position.X,
+                                                      routes[bestNeighbor].route.Path[^1].Position.Y, midZ);
+                            interconnections.Add(new InterconnectBuilder.Interconnection
+                            {
+                                PillarA = ri, PillarB = bestNeighbor,
+                                PointA = braceA, PointB = braceB,
+                                Radius = config.StrutRadiusMm * 1.5f,
+                                Type = "recovery",
+                            });
+                            // Cross-brace doesn't change the route but stiffens it
+                        }
+                    }
+
+                    // Rung 3: increase pillar diameter and re-route
+                    if (!fixed2)
+                    {
+                        for (float scale = 1.5f; scale <= 3.0f && !fixed2; scale += 0.5f)
+                        {
+                            float newRadius = Math.Max(ph.BackRadius * scale, 1.0f);
+                            var biggerCfg = routingConfig with
+                            {
+                                PillarRadiusMm = newRadius,
+                                BaseRadiusMm = Math.Max(routingConfig.BaseRadiusMm, newRadius * 2.5f),
+                                WideningFactor = Math.Max(routingConfig.WideningFactor, 0.04f),
+                            };
+                            var routeStart = ph.JunctionPoint.Z > 0.1f ? ph.JunctionPoint : ph.ContactPoint;
+                            var newRoute = PillarRouter.Route(routeStart, newRadius, bvh, biggerCfg);
+                            if (newRoute.Path.Count > 1)
+                            {
+                                routes[ri] = (oldRoute.id, newRoute);
+                                fixed2 = true; recovered++;
+                            }
+                        }
+                    }
                 }
-            }
 
-            if (reRouted > 0)
-            {
-                Serilog.Log.Information("V2 Step 7b: Re-routed {Count} failed supports with larger radius", reRouted);
+                if (recovered > 0)
+                {
+                    Serilog.Log.Information("V2 Step 7b: Recovered {Count}/{Total} failed supports via escalation ladder",
+                        recovered, failedIds.Count);
+                }
 
-                // Re-validate after re-routing
+                // Re-validate after recovery
                 routeLookup = routes.ToDictionary(r => r.id, r => r.route);
                 routeData = routes.Select(r => (r.id, r.route,
                     pinheadLookup.TryGetValue(r.id, out var ph2) ? ph2.ContactPoint.Z : r.route.Path[0].Position.Z)).ToList();
@@ -727,13 +805,13 @@ public static class SupportEngineV2
                     .ToList(),
             interconnections);
 
-        // ── Step 9: Build legacy format for backward-compatible frontend ─
-        var legacySupports = BuildLegacySupports(pinheads, routes);
-        var legacyCrossBraces = BuildLegacyCrossBraces(interconnections, routes);
+        // ── Step 9: Build legacy format — only supports with complete load path ─
+        var legacySupports = BuildLegacySupports(pinheads, validRoutes);
+        var legacyCrossBraces = BuildLegacyCrossBraces(interconnections, validRoutes);
 
         // ── Stats ────────────────────────────────────────────────────────
-        int validSupports = pinheads.Count(p => p.pinhead.IsValid);
-        float volume = EstimateSupportVolume(routes, interconnections);
+        int validSupports = validRoutes.Count;
+        float volume = EstimateSupportVolume(validRoutes, interconnections);
         var supportStats = SupportSliceIntegrator.ComputeSupportStats(
             sliceElements, config.LayerHeightMm, 0, meshHeight);
 

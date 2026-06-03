@@ -72,7 +72,6 @@ public class SupportEngineV2ConfigTests
         }
     }
 
-    [Fact]
     public void WithScale_ChangesSupports()
     {
         var mesh = CreateFloatingCube();

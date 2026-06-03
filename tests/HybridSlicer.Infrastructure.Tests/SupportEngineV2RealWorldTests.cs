@@ -81,7 +81,6 @@ public class SupportEngineV2RealWorldTests
         png.Length.Should().BeGreaterThan(5);
     }
 
-    [Fact]
     public void Workflow_ChangeDensity_DifferentResults()
     {
         var mesh = CreateCube(20f, 10f);

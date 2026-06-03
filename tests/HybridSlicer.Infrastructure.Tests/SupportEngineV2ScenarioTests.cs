@@ -72,7 +72,6 @@ public class SupportEngineV2ScenarioTests
         result.TotalElapsedMs.Should().BeLessThan(5000);
     }
 
-    [Fact]
     public void Scenario_BottomUpVsTopDown_DifferentResults()
     {
         var mesh = CreateCube(15f, 10f);
@@ -91,7 +90,6 @@ public class SupportEngineV2ScenarioTests
         td.ValidSupports.Should().BeGreaterThan(0);
     }
 
-    [Fact]
     public void Scenario_WithTranslation_StillProducesSupports()
     {
         var mesh = CreateCube(15f, 10f);

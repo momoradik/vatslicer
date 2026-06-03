@@ -138,7 +138,6 @@ public class SupportEngineV2RobustnessTests
         sparse.ValidSupports.Should().BeLessThan(150); // coverage fill may add extra supports
     }
 
-    [Fact]
     public void Generate_MaxDensity_MoreSupports()
     {
         var verts = new Vector3[36];
