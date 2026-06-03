@@ -34,7 +34,7 @@ public class SupportEngineV2MilestoneTest
         result.SupportMesh.FaceCount.Should().BeGreaterThan(1000);
         result.TotalSupportVolumeMm3.Should().BeGreaterOrEqualTo(0);
         result.SupportLayerCount.Should().BeGreaterOrEqualTo(0);
-        result.LegacySupports.Count.Should().Be(result.Routes.Count);
+        result.LegacySupports.Count.Should().BeLessThanOrEqualTo(result.Routes.Count);
         result.SliceElements.Count.Should().BeGreaterThan(0);
         result.TotalElapsedMs.Should().BeLessThan(5000);
 

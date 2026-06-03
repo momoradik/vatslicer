@@ -756,7 +756,82 @@ public static class SupportEngineV2
                         }
                     }
 
-                    // Rung 3: increase pillar diameter and re-route
+                    // Rung 3: Y-junction merge — branch into nearest neighbor
+                    // Halving free length stiffens 8x (stiffness ∝ 1/L³)
+                    if (!fixed2 && routes.Count > 1)
+                    {
+                        float myHeight = oldRoute.route.Path.Count >= 2
+                            ? oldRoute.route.Path[0].Position.Z - oldRoute.route.Path[^1].Position.Z : 0;
+
+                        if (myHeight > 10f) // only for tall pillars
+                        {
+                            // Find nearest neighbor to merge into
+                            var myTop = oldRoute.route.Path[0].Position;
+                            float bestMergeDist = float.MaxValue;
+                            int bestMergeIdx = -1;
+                            for (int j = 0; j < routes.Count; j++)
+                            {
+                                if (j == ri || routes[j].route.Path.Count < 2) continue;
+                                var nTop = routes[j].route.Path[0].Position;
+                                float d = Vector2.Distance(
+                                    new Vector2(myTop.X, myTop.Y),
+                                    new Vector2(nTop.X, nTop.Y));
+                                if (d > 0.5f && d < config.TreeMergeDistMm && d < bestMergeDist)
+                                { bestMergeDist = d; bestMergeIdx = j; }
+                            }
+
+                            if (bestMergeIdx >= 0)
+                            {
+                                // Compute critical free length from structural check
+                                // L_crit = sqrt(π²EI / (F * SF)), I = πr⁴/4
+                                float r = Math.Max(ph.BackRadius, 0.5f);
+                                float I = MathF.PI * MathF.Pow(r, 4) / 4f;
+                                float F_est = 0.5f; // estimated force per support
+                                float L_crit = MathF.Sqrt(MathF.PI * MathF.PI * 2000f * I / (F_est * 2f));
+                                L_crit = Math.Min(L_crit, myHeight * 0.7f);
+
+                                float mergeZ = myTop.Z - L_crit;
+                                var neighbor = routes[bestMergeIdx].route;
+                                mergeZ = Math.Clamp(mergeZ, neighbor.Path[^1].Position.Z + 1f, neighbor.Path[0].Position.Z);
+
+                                // Build Y-junction: keep top segment, branch to neighbor at mergeZ
+                                var newPath = new List<PillarRouter.Waypoint>();
+                                // Copy waypoints above mergeZ
+                                foreach (var wp in oldRoute.route.Path)
+                                {
+                                    if (wp.Position.Z > mergeZ) newPath.Add(wp);
+                                    else break;
+                                }
+                                if (newPath.Count == 0) newPath.Add(oldRoute.route.Path[0]);
+
+                                // Add branch waypoint to neighbor's position at mergeZ
+                                var nPos = neighbor.Path[0].Position;
+                                newPath.Add(new PillarRouter.Waypoint
+                                {
+                                    Position = new Vector3(nPos.X, nPos.Y, mergeZ),
+                                    Radius = r, Type = "bridge"
+                                });
+                                // Add remaining path from neighbor below mergeZ
+                                foreach (var wp in neighbor.Path)
+                                {
+                                    if (wp.Position.Z <= mergeZ) newPath.Add(wp);
+                                }
+
+                                if (newPath.Count >= 2)
+                                {
+                                    routes[ri] = (oldRoute.id, new PillarRouter.PillarRoute
+                                    {
+                                        Path = newPath,
+                                        ReachesGround = neighbor.ReachesGround,
+                                        TotalLength = 0, // recalculated later
+                                    });
+                                    fixed2 = true; recovered++;
+                                }
+                            }
+                        }
+                    }
+
+                    // Rung 4: increase pillar diameter and re-route
                     if (!fixed2)
                     {
                         for (float scale = 1.5f; scale <= 3.0f && !fixed2; scale += 0.5f)

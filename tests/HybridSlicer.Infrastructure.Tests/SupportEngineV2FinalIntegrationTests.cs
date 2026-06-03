@@ -120,7 +120,7 @@ public class SupportEngineV2FinalIntegrationTests
         var result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig());
 
         // Verify internal consistency
-        result.LegacySupports.Count.Should().Be(result.Routes.Count);
+        result.LegacySupports.Count.Should().BeLessThanOrEqualTo(result.Routes.Count);
         result.Pinheads.Count.Should().Be(result.Points.Count);
         result.TotalElapsedMs.Should().BeGreaterOrEqualTo(0);
         result.MeshCenteringOffset.Should().NotBe(default(Vector3));

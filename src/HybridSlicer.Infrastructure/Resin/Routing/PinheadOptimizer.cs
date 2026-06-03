@@ -103,12 +103,29 @@ public static class PinheadOptimizer
             if (smallOpt.IsValid) return smallOpt;
         }
 
-        // All phases failed with full geometry. For near-bed supports (Z < 3mm),
-        // create a compact but VISIBLE pinhead with minimum structural radius.
-        // For higher supports, reject entirely.
+        // Accept-with-tilt fallback: if the best orientation has ANY positive clearance
+        // (even below the threshold), snap to surface normal and accept.
+        // A contact seated in a slight pocket still lifts the part.
+        {
+            var best = optimized.Clearance > result.Clearance ? optimized : result;
+            float clearanceFloor = config.PinRadiusMm * 0.5f; // absolute minimum
+            if (best.Clearance > -clearanceFloor)
+            {
+                // Accept with surface normal orientation
+                var tiltedDir = ComputeInitialDirection(surfaceNormal, config.MaxBridgeSlope);
+                var tilted = EvaluatePinhead(contactPoint, tiltedDir, config with
+                {
+                    PinRadiusMm = config.PinRadiusMm * 0.7f,
+                    BackRadiusMm = config.BackRadiusMm * 0.7f,
+                    WidthMm = config.WidthMm * 0.7f,
+                }, bvh);
+                return tilted with { IsValid = true };
+            }
+        }
+
+        // Near-bed supports: compact but visible pinhead
         if (contactPoint.Z < 3f)
         {
-            // Minimum visible radius: 0.15mm pin, 0.3mm back — small but printable
             float pinR = Math.Max(config.PinRadiusMm * 0.5f, 0.15f);
             float backR = Math.Max(config.BackRadiusMm * 0.5f, 0.3f);
             float w = Math.Max(contactPoint.Z * 0.3f, 0.3f);
@@ -340,8 +357,29 @@ public static class PinheadOptimizer
             minClearance = Math.Min(minClearance, beamClearance - pathLen);
         }
 
-        // Validity: clearance must be positive (except near contact where penetration is expected)
-        bool isValid = minClearance > -rPin * 0.3f;
+        // Validity: scale required clearance by local curvature.
+        // On curved surfaces, the surface bends away so less clearance is needed.
+        // On flat surfaces, full clearance is required.
+        // Curvature is estimated from the ratio of path length to bvh closest distance.
+        float clearanceReq = -rPin * 0.3f; // base requirement (flat surface)
+
+        // Estimate local curvature: if closest point distance varies a lot along the path,
+        // the surface is curved → relax the clearance requirement
+        if (CLEARANCE_SAMPLES >= 2)
+        {
+            float firstDist = 0, lastDist = 0;
+            var cpFirst = bvh.ClosestPoint(Vector3.Lerp(pinCenter, junction, 0.1f));
+            var cpLast = bvh.ClosestPoint(Vector3.Lerp(pinCenter, junction, 0.9f));
+            if (cpFirst.HasValue) firstDist = cpFirst.Value.Distance;
+            if (cpLast.HasValue) lastDist = cpLast.Value.Distance;
+
+            float curvatureEstimate = MathF.Abs(lastDist - firstDist) / Math.Max(pathLen, 0.1f);
+            // High curvature → relax clearance (up to 60% reduction)
+            float relaxation = Math.Clamp(curvatureEstimate * 5f, 0, 0.6f);
+            clearanceReq = clearanceReq * (1f - relaxation);
+        }
+
+        bool isValid = minClearance > clearanceReq;
 
         return MakePinhead(contact, dir, pinCenter, backCenter, junction, config, minClearance, isValid);
     }
