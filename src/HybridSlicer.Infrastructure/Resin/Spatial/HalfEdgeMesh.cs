@@ -36,15 +36,19 @@ public sealed class HalfEdgeMesh
     /// <summary>Per-triangle flag: true if this face was flipped to achieve consistent winding.</summary>
     public bool[] WasFlipped { get; }
 
+    /// <summary>Per-triangle neighbor lists (triangles sharing an edge).</summary>
+    public List<int>[] TriangleNeighbors { get; }
+
     public int VertexCount => Positions.Length;
     public int TriangleCount => Indices.Length / 3;
 
-    private HalfEdgeMesh(Vector3[] positions, int[] indices, Vector3[] normals, bool[] flipped)
+    private HalfEdgeMesh(Vector3[] positions, int[] indices, Vector3[] normals, bool[] flipped, List<int>[] neighbors)
     {
         Positions = positions;
         Indices = indices;
         FaceNormals = normals;
         WasFlipped = flipped;
+        TriangleNeighbors = neighbors;
     }
 
     /// <summary>
@@ -223,18 +227,112 @@ public sealed class HalfEdgeMesh
             }
         }
 
-        return new HalfEdgeMesh(posArray, indices, normals, flipped);
+        // Build plain neighbor lists for curvature analysis
+        var plainNeighbors = new List<int>[triCount];
+        for (int t = 0; t < triCount; t++)
+            plainNeighbors[t] = new List<int>();
+        foreach (var (_, tris) in edgeToTris)
+        {
+            if (tris.Count != 2) continue;
+            plainNeighbors[tris[0].triIndex].Add(tris[1].triIndex);
+            plainNeighbors[tris[1].triIndex].Add(tris[0].triIndex);
+        }
+
+        return new HalfEdgeMesh(posArray, indices, normals, flipped, plainNeighbors);
     }
 
     /// <summary>
     /// Check if a triangle's outward normal indicates it's an exterior overhang.
-    /// After consistent winding, outward normals on exterior surfaces point
-    /// away from the solid. Interior ceiling normals point INTO the solid
-    /// (upward through the shell), so they are NOT overhangs.
     /// </summary>
     public bool IsExteriorOverhang(int triangleIndex, float normalZThreshold)
     {
         return FaceNormals[triangleIndex].Z < normalZThreshold;
+    }
+
+    /// <summary>
+    /// Determine if a triangle is on a CONVEX surface (exterior) or CONCAVE (interior).
+    ///
+    /// For single-wall shells, both sides of the shell have the same winding-based normal.
+    /// To distinguish convex (exterior) from concave (interior), we check the local curvature:
+    ///
+    /// For each neighbor triangle sharing an edge, compute the dihedral angle.
+    /// If the neighbor's centroid is ABOVE the plane defined by this triangle's
+    /// surface → the surface curves UPWARD at this edge → this triangle is on the
+    /// CONCAVE (interior) side.
+    ///
+    /// If most neighbors' centroids are BELOW the plane → the surface curves DOWNWARD
+    /// → this triangle is on the CONVEX (exterior) side.
+    ///
+    /// For overhangs (normal.Z &lt; 0), "above the plane" means the neighbor centroid
+    /// is on the side OPPOSITE to where the support would go. Concave overhangs
+    /// curve toward the model interior and shouldn't get supports.
+    /// </summary>
+    public bool IsConvexSurface(int triangleIndex)
+    {
+        var neighbors = TriangleNeighbors[triangleIndex];
+        if (neighbors.Count == 0) return true;
+
+        var normal = FaceNormals[triangleIndex];
+        var (v0, v1, v2) = GetTriangleVertices(triangleIndex);
+        var centroid = (v0 + v1 + v2) / 3f;
+
+        // Use 2-ring neighborhood for more robust curvature estimation
+        var visited = new HashSet<int> { triangleIndex };
+        var ring1 = new List<int>(neighbors);
+        foreach (int n in neighbors) visited.Add(n);
+
+        // Expand to 2-ring
+        var ring2 = new List<int>();
+        foreach (int n in ring1)
+        {
+            foreach (int nn in TriangleNeighbors[n])
+            {
+                if (visited.Add(nn))
+                    ring2.Add(nn);
+            }
+        }
+
+        float totalDot = 0;
+        int count = 0;
+
+        // Check all neighbors in both rings
+        foreach (int ni in ring1)
+        {
+            var (nv0, nv1, nv2) = GetTriangleVertices(ni);
+            var nc = (nv0 + nv1 + nv2) / 3f;
+            totalDot += Vector3.Dot(nc - centroid, normal);
+            count++;
+        }
+        foreach (int ni in ring2)
+        {
+            var (nv0, nv1, nv2) = GetTriangleVertices(ni);
+            var nc = (nv0 + nv1 + nv2) / 3f;
+            totalDot += Vector3.Dot(nc - centroid, normal);
+            count++;
+        }
+
+        if (count == 0) return true;
+
+        // Method 1: Centroid displacement (existing)
+        float avgDot = totalDot / count;
+
+        // Method 2: Normal divergence — if neighborhood average normal
+        // has HIGHER Z than this triangle, the surface curves upward = concave
+        Vector3 avgNeighborNormal = Vector3.Zero;
+        int nCount = 0;
+        foreach (int ni in ring1) { avgNeighborNormal += FaceNormals[ni]; nCount++; }
+        foreach (int ni in ring2) { avgNeighborNormal += FaceNormals[ni]; nCount++; }
+        if (nCount > 0) avgNeighborNormal /= nCount;
+
+        float normalDivergence = avgNeighborNormal.Z - normal.Z;
+        // If neighbors' average Z is significantly higher than ours → concave
+        // Only filter as concave when BOTH signals agree strongly
+        bool centroidSaysConcave = avgDot > 0.1f;
+        bool normalSaysConcave = normalDivergence > 0.15f;
+
+        // Only reject if BOTH curvature signals say concave
+        if (centroidSaysConcave && normalSaysConcave) return false;
+        return true;
     }
 
     /// <summary>

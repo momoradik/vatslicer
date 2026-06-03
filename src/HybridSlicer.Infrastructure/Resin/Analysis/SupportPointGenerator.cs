@@ -80,6 +80,15 @@ public sealed class SupportPointGenerator
         // overhangs from interior ceilings — even for non-watertight thin shells.
         var heMesh = HalfEdgeMesh.Build(mesh);
 
+        // Compute model centroid for convex/concave classification
+        Vector3 modelCentroid = Vector3.Zero;
+        for (int t = 0; t < heMesh.TriangleCount; t++)
+        {
+            var (cv0, cv1, cv2) = heMesh.GetTriangleVertices(t);
+            modelCentroid += (cv0 + cv1 + cv2) / 3f;
+        }
+        if (heMesh.TriangleCount > 0) modelCentroid /= heMesh.TriangleCount;
+
         var overhangTris = new List<(int triIndex, Vector3 v0, Vector3 v1, Vector3 v2,
             Vector3 normal, float area, Vector3 centroid)>();
 
@@ -87,8 +96,18 @@ public sealed class SupportPointGenerator
         {
             var normal = heMesh.GetOutwardNormal(t);
 
-            // Check overhang: topology-consistent outward normal must point downward
+            // Check overhang: outward normal must point downward
             if (normal.Z >= normalZThreshold) continue;
+
+            // Concavity check: skip overhangs on the concave (interior) side of shells.
+            // The model centroid represents the "inside" of the part. If the triangle's
+            // outward normal points TOWARD the centroid, the surface faces inward (concave).
+            // If it points AWAY, the surface faces outward (convex = exterior).
+            var (tv0, tv1, tv2) = heMesh.GetTriangleVertices(t);
+            var triCenter = (tv0 + tv1 + tv2) / 3f;
+            var toModelCenter = modelCentroid - triCenter;
+            float dotToCenter = Vector3.Dot(normal, toModelCenter);
+            if (dotToCenter > 0) continue; // normal points toward center = concave = skip
 
             var (v0, v1, v2) = heMesh.GetTriangleVertices(t);
             float area = Vector3.Cross(v1 - v0, v2 - v0).Length() * 0.5f;
@@ -100,38 +119,6 @@ public sealed class SupportPointGenerator
 
             overhangTris.Add((t, v0, v1, v2, normal, area, centroid));
         }
-
-        // ── Filter: keep only the LOWEST overhang at each XY position ─────
-        // For single-wall shells, both the exterior bottom and interior ceiling
-        // have downward normals. The exterior is always the LOWER surface.
-        // Group overhang triangles by XY grid cell and keep only the lowest per cell.
-        var xyGrid = new Dictionary<long, float>(); // grid cell → lowest Z
-        float xyCellSize = 1.0f; // 1mm grid for fine XY resolution
-        float xyInv = 1f / xyCellSize;
-
-        // First pass: find lowest Z per XY cell
-        foreach (var tri in overhangTris)
-        {
-            int gx = (int)MathF.Floor(tri.centroid.X * xyInv);
-            int gy = (int)MathF.Floor(tri.centroid.Y * xyInv);
-            long key = ((long)gx << 32) | (uint)gy;
-            if (!xyGrid.TryGetValue(key, out float lowestZ) || tri.centroid.Z < lowestZ)
-                xyGrid[key] = tri.centroid.Z;
-        }
-
-        // Second pass: keep only triangles within 3mm of the lowest Z at their XY
-        int beforeFilter = overhangTris.Count;
-        overhangTris = overhangTris.Where(tri =>
-        {
-            int gx = (int)MathF.Floor(tri.centroid.X * xyInv);
-            int gy = (int)MathF.Floor(tri.centroid.Y * xyInv);
-            long key = ((long)gx << 32) | (uint)gy;
-            float lowestZ = xyGrid[key];
-            return tri.centroid.Z <= lowestZ + 3f; // within 3mm of lowest
-        }).ToList();
-
-        Serilog.Log.Information("Overhang filter: {Before} → {After} (lowest-surface filter)",
-            beforeFilter, overhangTris.Count);
 
         // Sort by Z (lowest = most critical)
         overhangTris.Sort((a, b) => a.centroid.Z.CompareTo(b.centroid.Z));
