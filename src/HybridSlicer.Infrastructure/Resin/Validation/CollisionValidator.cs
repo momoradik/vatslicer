@@ -121,8 +121,9 @@ public static class CollisionValidator
                 string element = wp1.Type == "bridge" || wp2.Type == "bridge" ? "bridge" :
                                  wp2.Type == "base" ? "pedestal" : "pillar";
 
-                // Check if either endpoint is inside the mesh
-                if (bvh.IsInside(wp2.Position))
+                // Check if endpoint is inside the mesh (skip base waypoints — they sit on the build plate,
+                // which can be at Z≈0 right at the model's bottom surface after centering)
+                if (wp2.Type != "base" && bvh.IsInside(wp2.Position))
                 {
                     issues.Add(new CollisionIssue
                     {
@@ -171,7 +172,7 @@ public static class CollisionValidator
     /// Validate interconnections (cross-braces) against the mesh.
     /// </summary>
     public static List<CollisionIssue> ValidateInterconnections(
-        List<InterconnectBuilder.Interconnection> interconnections, AabbBvh bvh, int beamRays = 4)
+        List<InterconnectBuilder.Interconnection> interconnections, AabbBvh bvh, int beamRays = 8)
     {
         var issues = new List<CollisionIssue>();
 

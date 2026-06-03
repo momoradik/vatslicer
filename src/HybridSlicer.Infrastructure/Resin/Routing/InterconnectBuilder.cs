@@ -32,9 +32,9 @@ public static class InterconnectBuilder
         /// <summary>Max XY distance between pillars to consider connecting.</summary>
         public float MaxConnectionDistMm { get; init; } = 10f;
         /// <summary>Pillar height above which at least 1 connection is required.</summary>
-        public float MaxSoloHeightMm { get; init; } = 20f;
+        public float MaxSoloHeightMm { get; init; } = 10f;
         /// <summary>Pillar height above which at least 2 connections are required.</summary>
-        public float MaxDualHeightMm { get; init; } = 40f;
+        public float MaxDualHeightMm { get; init; } = 25f;
         /// <summary>Z interval between cross-connections.</summary>
         public float ConnectionIntervalMm { get; init; } = 5f;
         /// <summary>Radius of cross-connection struts.</summary>
@@ -78,18 +78,27 @@ public static class InterconnectBuilder
         }
         pairs.Sort((a, b) => a.dist.CompareTo(b.dist));
 
+        // Total brace cap: prevent explosion on dense support arrays
+        int maxTotalBraces = Math.Max(n * 3, 50);
+
         // Build connections: nearest pairs first
         foreach (var (a, b, dist) in pairs)
         {
+            if (connections.Count >= maxTotalBraces) break;
+
             // Z range where both pillars overlap
-            float minZ = Math.Max(pillarBases[a].Z, pillarBases[b].Z) + 2f;
-            float maxZ = Math.Min(pillarTops[a], pillarTops[b]) - 1f;
+            float minZ = Math.Max(pillarBases[a].Z, pillarBases[b].Z) + 1f;
+            float maxZ = Math.Min(pillarTops[a], pillarTops[b]) - 0.5f;
             if (maxZ <= minZ + config.ConnectionIntervalMm) continue;
 
+            // Limit per-pair based on overlap height (1 per interval, max 4)
+            float overlap = maxZ - minZ;
+            int pairMax = Math.Min(config.MaxConnectionsPerPair,
+                Math.Max(1, (int)(overlap / config.ConnectionIntervalMm)));
             int pairConnections = 0;
             bool alternate = false;
 
-            for (float z = minZ + config.ConnectionIntervalMm; z < maxZ && pairConnections < config.MaxConnectionsPerPair;
+            for (float z = minZ + config.ConnectionIntervalMm; z < maxZ && pairConnections < pairMax;
                  z += config.ConnectionIntervalMm)
             {
                 var ptA = new Vector3(pillarBases[a].X, pillarBases[a].Y, z);
@@ -113,7 +122,7 @@ public static class InterconnectBuilder
                 {
                     var dir = Vector3.Normalize(ptB - ptA);
                     float len = Vector3.Distance(ptA, ptB);
-                    float clearance = bvh.BeamCast(ptA, dir, config.StrutRadiusMm, 4, len);
+                    float clearance = bvh.BeamCast(ptA, dir, config.StrutRadiusMm, 8, len);
                     clear = clearance >= len - 0.1f;
                 }
 
@@ -164,16 +173,31 @@ public static class InterconnectBuilder
                 {
                     float midZ = (Math.Max(pillarBases[i].Z, pillarBases[bestJ].Z) +
                                   Math.Min(pillarTops[i], pillarTops[bestJ])) / 2f;
-                    connections.Add(new Interconnection
+                    var ptA = new Vector3(pillarBases[i].X, pillarBases[i].Y, midZ);
+                    var ptB = new Vector3(pillarBases[bestJ].X, pillarBases[bestJ].Y, midZ);
+
+                    // Collision check even for forced connections
+                    bool clear = true;
+                    if (bvh != null)
                     {
-                        PillarA = i, PillarB = bestJ,
-                        PointA = new Vector3(pillarBases[i].X, pillarBases[i].Y, midZ),
-                        PointB = new Vector3(pillarBases[bestJ].X, pillarBases[bestJ].Y, midZ),
-                        Radius = config.StrutRadiusMm,
-                        Type = "horizontal",
-                    });
-                    connectionCount[i]++;
-                    connectionCount[bestJ]++;
+                        var dir = Vector3.Normalize(ptB - ptA);
+                        float len = Vector3.Distance(ptA, ptB);
+                        float clearance = bvh.BeamCast(ptA, dir, config.StrutRadiusMm, 8, len);
+                        clear = clearance >= len - 0.1f;
+                    }
+
+                    if (clear)
+                    {
+                        connections.Add(new Interconnection
+                        {
+                            PillarA = i, PillarB = bestJ,
+                            PointA = ptA, PointB = ptB,
+                            Radius = config.StrutRadiusMm,
+                            Type = "horizontal",
+                        });
+                        connectionCount[i]++;
+                        connectionCount[bestJ]++;
+                    }
                 }
             }
         }

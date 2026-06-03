@@ -172,6 +172,33 @@ public sealed class SpatialGrid<T> where T : notnull
         return results;
     }
 
+    // ── CountInRadius ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Count how many points exist within the given radius.
+    /// </summary>
+    public int CountInRadius(Vector3 point, float radius)
+    {
+        int count = 0;
+        float r2 = radius * radius;
+        int cellRadius = (int)MathF.Ceiling(radius * _invCellSize);
+        var (cx, cy, cz) = CellCoords(point);
+
+        for (int dx = -cellRadius; dx <= cellRadius; dx++)
+        for (int dy = -cellRadius; dy <= cellRadius; dy++)
+        for (int dz = -cellRadius; dz <= cellRadius; dz++)
+        {
+            long key = HashCell(cx + dx, cy + dy, cz + dz);
+            if (!_cells.TryGetValue(key, out var list)) continue;
+            foreach (var (pos, _) in list)
+            {
+                if (Vector3.DistanceSquared(point, pos) <= r2)
+                    count++;
+            }
+        }
+        return count;
+    }
+
     // ── Bulk operations ──────────────────────────────────────────────────
 
     /// <summary>

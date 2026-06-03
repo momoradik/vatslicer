@@ -58,12 +58,12 @@ public static class SupportMesher
                 mesh.AddFace(topCenter, topRing[(i + 1) % sides], topRing[i]);
         }
 
-        // Bottom cap
+        // Bottom cap (reversed winding — outward-facing normal points down)
         if (rBottom > 1e-4f)
         {
             int botCenter = mesh.AddVertex(new Vector3(0, 0, 0));
             for (int i = 0; i < sides; i++)
-                mesh.AddFace(botCenter, botRing[i], botRing[(i + 1) % sides]);
+                mesh.AddFace(botCenter, botRing[(i + 1) % sides], botRing[i]);
         }
 
         return mesh;
@@ -255,7 +255,10 @@ public static class SupportMesher
         float height = Vector3.Distance(pointA, pointB);
         if (height < 1e-6f) return new IndexedTriangleSet();
 
-        var mesh = Frustum(radiusA, radiusB, height, sides);
+        // Frustum built along Y: bottom at Y=0 (rBottom), top at Y=height (rTop).
+        // After rotation, bottom maps to pointA, top maps to pointB.
+        // So rBottom=radiusA (at pointA), rTop=radiusB (at pointB).
+        var mesh = Frustum(radiusB, radiusA, height, sides);
 
         // Rotate from default (Y-up) to actual direction
         var dir = Vector3.Normalize(pointB - pointA);
@@ -268,8 +271,8 @@ public static class SupportMesher
         else
             rotation = QuaternionFromTo(defaultDir, dir);
 
-        // Transform: rotate then translate to pointB (bottom of frustum)
-        mesh.Transform(rotation, pointB);
+        // Rotate then translate so bottom is at pointA
+        mesh.Transform(rotation, pointA);
 
         return mesh;
     }

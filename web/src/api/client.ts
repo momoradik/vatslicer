@@ -237,6 +237,28 @@ export const supportV2Api = {
       headers: { 'Content-Type': 'multipart/form-data' },
       responseType: 'blob', timeout: 120000,
     }).then(r => r.data as Blob),
+  /** Auto-orient: find best orientation for minimal supports */
+  autoOrient: (fd: FormData) =>
+    http.post<{
+      orientations: {
+        rotationX: number; rotationY: number; rotationZ: number; rotationW: number
+        overhangAreaMm2: number; supportVolumeMl: number; estimatedSupports: number
+        score: number; description: string
+      }[]
+    }>('/support-v2/auto-orient', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000,
+    }).then(r => r.data),
+  /** Suggest drain hole positions for resin traps */
+  suggestDrainHoles: (fd: FormData) =>
+    http.post<{
+      holes: {
+        x: number; y: number; z: number
+        normalX: number; normalY: number; normalZ: number
+        diameterMm: number; trapVolumeMm3: number; reason: string
+      }[]
+    }>('/support-v2/drain-holes', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000,
+    }).then(r => r.data),
 }
 
 // ── Prep Tools (drain holes, support optimization) ───────────────────

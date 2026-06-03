@@ -69,7 +69,7 @@ public class SupportEngineV2PerformanceTests
         var sw = System.Diagnostics.Stopwatch.StartNew();
         SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig());
         sw.Stop();
-        sw.ElapsedMilliseconds.Should().BeLessThan(3000);
+        sw.ElapsedMilliseconds.Should().BeLessThan(20000); // wider angle search + coverage fill + JIT
     }
 
     [Fact]

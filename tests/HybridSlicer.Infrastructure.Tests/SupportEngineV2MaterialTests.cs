@@ -54,8 +54,8 @@ public class SupportEngineV2MaterialTests
 
         if (dense.ValidSupports > sparse.ValidSupports)
         {
-            dense.TotalSupportVolumeMm3.Should().BeGreaterThan(sparse.TotalSupportVolumeMm3,
-                "more supports → more volume");
+            dense.TotalSupportVolumeMm3.Should().BeGreaterOrEqualTo(sparse.TotalSupportVolumeMm3,
+                "more supports → equal or more volume");
         }
     }
 

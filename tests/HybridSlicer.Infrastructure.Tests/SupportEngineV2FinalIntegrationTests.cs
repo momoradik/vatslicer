@@ -52,9 +52,10 @@ public class SupportEngineV2FinalIntegrationTests
         var result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig());
         result.ValidSupports.Should().BeGreaterThan(0);
 
-        // 2. Analytical slice
+        // 2. Analytical slice — slice at the midpoint of the support Z range
         if (result.SliceElements.Count == 0) return;
-        var circles = AnalyticalSupportSlicer.SliceAtZ(result.SliceElements, 5f);
+        float midZ = result.SliceElements.Average(e => (e.PointA.Z + e.PointB.Z) / 2f);
+        var circles = AnalyticalSupportSlicer.SliceAtZ(result.SliceElements, midZ);
         circles.Should().NotBeEmpty();
 
         // 3. Render to PNG

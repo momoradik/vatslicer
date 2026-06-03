@@ -100,8 +100,10 @@ public sealed class OverhangAnalyzer
                 foreach (var contour in sl.Contours)
                 {
                     if (contour.Count < 3) continue;
-                    float area = Math.Abs(BatchSlicer.PolygonArea(contour));
-                    if (area < 0.1f) continue; // skip tiny fragments
+                    float signedArea = BatchSlicer.PolygonArea(contour);
+                    float area = Math.Abs(signedArea);
+                    if (area < 0.1f) continue;
+                    if (signedArea < 0) continue; // skip inner contours (holes)
                     regions.Add(new OverhangRegion
                     {
                         Contour = contour,
@@ -117,28 +119,67 @@ public sealed class OverhangAnalyzer
             }
             else
             {
-                // Compare with previous layer to find overhang regions
+                // Compare with previous layer to find overhang regions.
+                // Filter out inner contours of hollow parts: if a contour's centroid
+                // is inside ANOTHER contour at this Z and that contour is LARGER,
+                // this contour is an interior surface (hole) — skip it.
                 foreach (var contour in sl.Contours)
                 {
                     if (contour.Count < 3) continue;
                     float area = Math.Abs(BatchSlicer.PolygonArea(contour));
                     if (area < 0.1f) continue;
 
+                    // Check containment: is this contour's centroid inside any larger contour?
+                    var cc = Centroid(contour);
+                    int containmentCount = 0;
+                    foreach (var other in sl.Contours)
+                    {
+                        if (other == contour || other.Count < 3) continue;
+                        if (PointInPolygon(cc, other))
+                            containmentCount++;
+                    }
+                    // Odd containment = inside a parent contour = inner surface → skip
+                    if (containmentCount % 2 == 1) continue;
+
                     var centroid = Centroid(contour);
 
-                    // Check how much of this contour overlaps with the previous layer
-                    int totalPts = contour.Count;
+                    // Check how much of this contour overlaps with the previous layer.
+                    // Sample both boundary vertices AND interior points to catch T-shapes
+                    // where centroid is supported but edges aren't.
+                    int totalPts = 0;
                     int supportedPts = 0;
-                    bool centroidSupported = false;
+                    bool centroidSupported = IsPointInAnyPolygon(centroid, prevContours);
 
+                    // Boundary vertices
                     foreach (var pt in contour)
                     {
+                        totalPts++;
                         if (IsPointInAnyPolygon(pt, prevContours))
                             supportedPts++;
                     }
-                    centroidSupported = IsPointInAnyPolygon(centroid, prevContours);
 
-                    float supportRatio = (float)supportedPts / totalPts;
+                    // Edge midpoints — catches unsupported edges between supported vertices
+                    for (int ei = 0; ei < contour.Count; ei++)
+                    {
+                        var mid = (contour[ei] + contour[(ei + 1) % contour.Count]) * 0.5f;
+                        totalPts++;
+                        if (IsPointInAnyPolygon(mid, prevContours))
+                            supportedPts++;
+                    }
+
+                    // Interior samples (quarter-points from centroid to boundary)
+                    // Catches concave regions where boundary is supported but interior isn't
+                    int interiorSamples = Math.Min(contour.Count, 12);
+                    for (int si = 0; si < interiorSamples; si++)
+                    {
+                        var boundary = contour[si * contour.Count / interiorSamples];
+                        var quarter = Vector2.Lerp(centroid, boundary, 0.5f);
+                        totalPts++;
+                        if (IsPointInAnyPolygon(quarter, prevContours))
+                            supportedPts++;
+                    }
+
+                    float supportRatio = totalPts > 0 ? (float)supportedPts / totalPts : 0;
 
                     if (!centroidSupported && supportRatio < 0.2f)
                     {

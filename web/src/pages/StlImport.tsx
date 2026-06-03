@@ -9,7 +9,7 @@ import StlViewer, {
 } from '../components/viewer/StlViewer'
 import PrintProfilePanel from '../components/PrintProfilePanel'
 import MaterialProfilePanel from '../components/MaterialProfilePanel'
-import { machineProfilesApi, resinPrintProfilesApi, resinSliceApi, meshApi, autoSupportApi, advancedSupportApi, supportV2Api, type AdvancedSupportData, type CrossBraceData } from '../api/client'
+import { machineProfilesApi, resinPrintProfilesApi, resinSliceApi, meshApi, supportV2Api, type AdvancedSupportData, type CrossBraceData } from '../api/client'
 
 // ── Per-object settings override ──────────────────────────────────────────────
 
@@ -553,8 +553,17 @@ export default function StlImport() {
     crossBracing: true,
     raftEnabled: false, raftType: 'grid' as string,
     skirtEnabled: false, skirtLayers: 3, skirtDistance: 2.0,
-    /** Support exposure % (100=full, 70=easy removal). Used during slicing. */
     supportExposurePct: 100,
+    // V2 advanced features
+    treeSupports: true,
+    hollowSupports: true,
+    hollowMinHeight: 20,
+    hollowWallThickness: 0.6,
+    latticePattern: 'grid' as string, // grid | honeycomb | cross | solid
+    miniRafts: true,
+    raftMargin: 1.5,
+    raftThickness: 0.3,
+    materialPreset: 'standard' as string, // standard | tough | flexible | castable | dental
   })
   const [generating, setGenerating] = useState(false)
 
@@ -596,61 +605,62 @@ export default function StlImport() {
       fd.append('pillarRadius', String(preset.pillar))
       fd.append('baseRadius', String(preset.base))
 
-      // Use V2 engine (production-grade with BVH, collision avoidance, structural validation)
-      // Falls back to legacy engine if V2 fails
-      let advResult: { supports: AdvancedSupportData[]; crossBraces: CrossBraceData[] }
-      let v2Stats: V2Stats | null = null
-      try {
-        const v2Result = await supportV2Api.generate(fd)
-        advResult = v2Result
-        v2Stats = {
-          engine: v2Result.engine,
-          validSupports: v2Result.validSupports,
-          totalSupports: v2Result.totalSupports,
-          volumeMl: v2Result.totalVolumeMl,
-          weightG: v2Result.totalWeightG,
-          costUsd: v2Result.estimatedCostUsd,
-          elapsedMs: v2Result.elapsedMs,
-          meshFaces: v2Result.mesh.faces,
-          safetyFactor: v2Result.validation.structural.minSafetyFactor,
-          bucklingPass: v2Result.validation.structural.passedBuckling,
-          bucklingFail: v2Result.validation.structural.failedBuckling,
-          coverageOk: v2Result.validation.structural.overhangRegionsCovered,
-          coverageTotal: v2Result.validation.structural.overhangRegionsCovered + v2Result.validation.structural.overhangRegionsUncovered,
-          collisions: v2Result.validation.collision.collidingSupports,
-        }
-        console.log(`[V2] ${v2Result.validSupports} supports, SF=${v2Result.validation.structural.minSafetyFactor.toFixed(1)}, ${v2Result.elapsedMs}ms`)
-      } catch {
-        // Fallback to legacy engine
-        advResult = await advancedSupportApi.generate(fd)
-        console.log('[V2] Fallback to legacy engine')
+      // V2 advanced features
+      fd.append('enableTreeSupports', String(autoSupportConfig.treeSupports))
+      fd.append('enableHollowSupports', String(autoSupportConfig.hollowSupports))
+      fd.append('hollowMinHeightMm', String(autoSupportConfig.hollowMinHeight))
+      fd.append('hollowWallThicknessMm', String(autoSupportConfig.hollowWallThickness))
+      fd.append('baseLatticePattern', autoSupportConfig.latticePattern)
+      fd.append('enableMiniRafts', String(autoSupportConfig.miniRafts))
+      fd.append('raftMarginMm', String(autoSupportConfig.raftMargin))
+      fd.append('raftThicknessMm', String(autoSupportConfig.raftThickness))
+      fd.append('materialPreset', autoSupportConfig.materialPreset)
+
+      // V2 engine only — no legacy fallback
+      const v2Result = await supportV2Api.generate(fd)
+      const v2Stats: V2Stats = {
+        engine: v2Result.engine,
+        validSupports: v2Result.validSupports,
+        totalSupports: v2Result.totalSupports,
+        volumeMl: v2Result.totalVolumeMl,
+        weightG: v2Result.totalWeightG,
+        costUsd: v2Result.estimatedCostUsd,
+        elapsedMs: v2Result.elapsedMs,
+        meshFaces: v2Result.mesh.faces,
+        safetyFactor: v2Result.validation.structural.minSafetyFactor,
+        bucklingPass: v2Result.validation.structural.passedBuckling,
+        bucklingFail: v2Result.validation.structural.failedBuckling,
+        coverageOk: v2Result.validation.structural.overhangRegionsCovered,
+        coverageTotal: v2Result.validation.structural.overhangRegionsCovered + v2Result.validation.structural.overhangRegionsUncovered,
+        collisions: v2Result.validation.collision.collidingSupports,
       }
+      console.log(`[V2] ${v2Result.validSupports} supports, SF=${v2Result.validation.structural.minSafetyFactor.toFixed(1)}, ${v2Result.elapsedMs}ms`)
 
       // Decode inline STL mesh from V2 response (no second HTTP request)
+      // Get V2 mesh: inline base64 for small meshes, separate fetch for large
       let meshBuffer: ArrayBuffer | null = null
-      if (v2Stats) {
+      if (v2Result.mesh?.stlBase64) {
+        const binary = atob(v2Result.mesh.stlBase64)
+        const bytes = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+        meshBuffer = bytes.buffer
+      } else if (v2Result.mesh?.faces > 0) {
+        // Large mesh — fetch via separate endpoint
         try {
-          const v2Result = advResult as any
-          if (v2Result.mesh?.stlBase64) {
-            const binary = atob(v2Result.mesh.stlBase64)
-            const bytes = new Uint8Array(binary.length)
-            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-            meshBuffer = bytes.buffer
-          }
-        } catch { /* mesh decode optional */ }
+          meshBuffer = await supportV2Api.getMeshBuffer(fd)
+        } catch { /* mesh fetch optional */ }
       }
 
-      const basicResult = await autoSupportApi.generate(fd)
       updateModels(prev => prev.map(m => m.id === selectedId ? {
         ...m, prep: {
-          autoSupports: advResult.supports.map(s => ({
+          autoSupports: v2Result.supports.map((s: any) => ({
             x: s.contactX, y: s.contactY, contactZ: s.contactZ, baseZ: s.baseZ,
             tipDiameter: s.preset?.tipDiameterMm ?? 0.4, columnDiameter: s.preset?.shaftDiameterMm ?? 0.8, baseDiameter: s.preset?.baseDiameterMm ?? 2.0,
           })),
-          advancedSupports: advResult.supports,
-          crossBraces: advResult.crossBraces,
-          raft: basicResult.raft,
-          skirt: basicResult.skirt,
+          advancedSupports: v2Result.supports,
+          crossBraces: v2Result.crossBraces,
+          raft: null,
+          skirt: null,
           locked: true,
           stale: false,
           generatedAt: Date.now(),
@@ -1132,6 +1142,57 @@ export default function StlImport() {
                       <p className="text-[8px] text-amber-500/70 mt-0.5">Reduced exposure makes supports easier to remove</p>
                     )}
 
+                    {/* V2 Advanced Features */}
+                    <div className="mt-3 pt-2 border-t border-gray-700/50">
+                      <h4 className="text-[9px] font-semibold text-teal-400 uppercase tracking-wider mb-1.5">Advanced</h4>
+                      <div className="space-y-1">
+                        <label className="flex items-center gap-2 text-[10px] cursor-pointer">
+                          <input type="checkbox" checked={autoSupportConfig.treeSupports}
+                            onChange={e => setAutoSupportConfig(p => ({ ...p, treeSupports: e.target.checked }))}
+                            className="rounded border-gray-600 bg-gray-800 w-3 h-3 text-teal-500" />
+                          <span className="text-gray-400">Tree Supports</span>
+                          <span className="text-gray-600 text-[8px] ml-auto">merge nearby pillars</span>
+                        </label>
+                        <label className="flex items-center gap-2 text-[10px] cursor-pointer">
+                          <input type="checkbox" checked={autoSupportConfig.hollowSupports}
+                            onChange={e => setAutoSupportConfig(p => ({ ...p, hollowSupports: e.target.checked }))}
+                            className="rounded border-gray-600 bg-gray-800 w-3 h-3 text-teal-500" />
+                          <span className="text-gray-400">Hollow Supports</span>
+                          <span className="text-gray-600 text-[8px] ml-auto">&gt;{autoSupportConfig.hollowMinHeight}mm</span>
+                        </label>
+                        <label className="flex items-center gap-2 text-[10px] cursor-pointer">
+                          <input type="checkbox" checked={autoSupportConfig.miniRafts}
+                            onChange={e => setAutoSupportConfig(p => ({ ...p, miniRafts: e.target.checked }))}
+                            className="rounded border-gray-600 bg-gray-800 w-3 h-3 text-teal-500" />
+                          <span className="text-gray-400">Mini Rafts</span>
+                          <span className="text-gray-600 text-[8px] ml-auto">per-support pads</span>
+                        </label>
+                        <label className="flex items-center justify-between text-[10px]">
+                          <span className="text-gray-500">Base Pattern</span>
+                          <select value={autoSupportConfig.latticePattern}
+                            onChange={e => setAutoSupportConfig(p => ({ ...p, latticePattern: e.target.value }))}
+                            className="bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-[10px] text-gray-200">
+                            <option value="grid">Grid</option>
+                            <option value="honeycomb">Honeycomb</option>
+                            <option value="cross">Cross</option>
+                            <option value="solid">Solid</option>
+                          </select>
+                        </label>
+                        <label className="flex items-center justify-between text-[10px]">
+                          <span className="text-gray-500">Material</span>
+                          <select value={autoSupportConfig.materialPreset}
+                            onChange={e => setAutoSupportConfig(p => ({ ...p, materialPreset: e.target.value }))}
+                            className="bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-[10px] text-gray-200">
+                            <option value="standard">Standard Resin</option>
+                            <option value="tough">Tough Resin</option>
+                            <option value="flexible">Flexible Resin</option>
+                            <option value="castable">Castable Resin</option>
+                            <option value="dental">Dental Model</option>
+                          </select>
+                        </label>
+                      </div>
+                    </div>
+
                     {/* Raft */}
                     <div className="mt-3 pt-2 border-t border-gray-700/50">
                       <label className="flex items-center gap-2 text-[10px] cursor-pointer mb-1">
@@ -1179,14 +1240,53 @@ export default function StlImport() {
                       )}
                     </div>
 
+                    {/* Prep Tools */}
+                    <div className="mt-3 pt-2 border-t border-gray-700/50 flex gap-1">
+                      <button onClick={async () => {
+                        if (!selected) return
+                        try {
+                          const resp = await fetch(selected.url)
+                          const blob = await resp.blob()
+                          const fd = new FormData()
+                          fd.append('stlFile', blob, selected.fileName)
+                          const result = await supportV2Api.autoOrient(fd)
+                          if (result.orientations.length > 0) {
+                            const best = result.orientations[0]
+                            alert(`Best orientation: ${best.description}\nOverhang: ${best.overhangAreaMm2.toFixed(0)}mm²\nEst. supports: ${best.estimatedSupports}`)
+                          }
+                        } catch (err) { console.error('Auto-orient failed:', err) }
+                      }}
+                        className="flex-1 text-[9px] py-1.5 rounded bg-violet-900/30 text-violet-400 hover:bg-violet-900/50 transition">
+                        Auto Orient
+                      </button>
+                      <button onClick={async () => {
+                        if (!selected) return
+                        try {
+                          const resp = await fetch(selected.url)
+                          const blob = await resp.blob()
+                          const fd = new FormData()
+                          fd.append('stlFile', blob, selected.fileName)
+                          const result = await supportV2Api.suggestDrainHoles(fd)
+                          if (result.holes.length > 0) {
+                            alert(`Found ${result.holes.length} resin trap(s):\n${result.holes.map(h => `• ${h.reason} (${h.trapVolumeMm3.toFixed(0)}mm³)`).join('\n')}`)
+                          } else {
+                            alert('No resin traps detected — no drain holes needed')
+                          }
+                        } catch (err) { console.error('Drain hole analysis failed:', err) }
+                      }}
+                        className="flex-1 text-[9px] py-1.5 rounded bg-cyan-900/30 text-cyan-400 hover:bg-cyan-900/50 transition">
+                        Drain Holes
+                      </button>
+                    </div>
+
                     {/* Generate button */}
                     <button onClick={generateAutoSupports} disabled={generating}
-                      className={`w-full mt-3 text-xs py-2 rounded-lg font-medium transition ${
+                      className={`w-full mt-2 text-xs py-2 rounded-lg font-medium transition ${
                         generating ? 'bg-green-800 text-green-200 animate-pulse' : 'bg-green-600 hover:bg-green-500 text-white'
                       }`}>
                       {generating ? 'Generating (V2 Engine)...' : selectedPrep.generatedAt ? 'Regenerate (V2)' : 'Generate Supports (V2)'}
                     </button>
-                    <p className="text-[8px] text-gray-600 mt-0.5 text-center">BVH-accelerated | Structural validation | Watertight mesh</p>
+                    <p className="text-[8px] text-gray-600 mt-0.5 text-center">BVH-accelerated | Tree supports | Structural validation | Watertight mesh</p>
 
                     {/* Generated status */}
                     {selectedPrep.generatedAt && (

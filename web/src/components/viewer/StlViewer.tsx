@@ -121,7 +121,10 @@ function extractTransform(group: THREE.Group, _prev: ModelTransform): ModelTrans
 }
 
 function modelIsOOB(group: THREE.Group, bv: BuildVolume): boolean {
-  const wb = new THREE.Box3().setFromObject(group, true)
+  // Check only the first child mesh (the model), not attached support meshes
+  const modelMesh = group.children[0]
+  if (!modelMesh) return false
+  const wb = new THREE.Box3().setFromObject(modelMesh, true)
   return (
     wb.min.x < -bv.width / 2 || wb.max.x > bv.width / 2 ||
     wb.min.z < -bv.depth / 2 || wb.max.z > bv.depth / 2 ||
@@ -168,14 +171,14 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     onFaceSelected,
     onSizeChange,
     supportEditMode,
-    supportPoints,
+    supportPoints: _supportPoints,
     paintedRegions,
     supportTipType: _supportTipType,
     supportBrushSize: _supportBrushSize,
     onSupportPointAdd,
     onSupportPointDelete,
     onPaintRegionAdd,
-    crossBraces,
+    crossBraces: _crossBraces,
     supportMeshBuffer,
     raftData,
     skirtData,
@@ -805,14 +808,24 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
             const liveModel = modelsRef.current.find(m => m.id === model.id)
             if (!liveModel) { geometry.dispose(); return }
 
+            // Swap Y/Z axes: STL files use Z-up, Three.js uses Y-up.
+            // This must happen BEFORE center() so height is along Y.
+            const pos = geometry.getAttribute('position')
+            for (let i = 0; i < pos.count; i++) {
+              const y = pos.getY(i)
+              const z = pos.getZ(i)
+              pos.setY(i, z)  // Three.js Y = STL Z (height)
+              pos.setZ(i, y)  // Three.js Z = STL Y (depth)
+            }
+            pos.needsUpdate = true
             geometry.computeVertexNormals()
             geometry.center()
             geometry.computeBoundingBox()
             const bb   = geometry.boundingBox!
             const size = new THREE.Vector3()
             bb.getSize(size)
-            geometry.translate(0, size.y / 2, 0) // base at Y=0
-            geometry.computeBoundingBox()         // refresh BB after translate so setFromObject is correct
+            geometry.translate(0, size.y / 2, 0) // base at Y=0 (Y is now height)
+            geometry.computeBoundingBox()
 
             const mesh = new THREE.Mesh(
               geometry,
@@ -841,7 +854,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
               controlsRef.current!.update()
             }
 
-            // Report natural size in print space (x=X, y=depth, z=height)
+            // Report natural size in print space (after Y/Z swap: y=height, z=depth)
             onModelLoadedRef.current?.(model.id, { x: size.x, y: size.z, z: size.y })
             paintMesh(model.id)
             checkAllBounds()
@@ -922,103 +935,14 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       supportGroupRef.current = null
     }
 
-    const pts = supportPoints ?? []
     const regions = paintedRegions ?? []
-    const braces = crossBraces ?? []
-    const hasAnything = pts.length > 0 || regions.length > 0 || braces.length > 0 || raftData || skirtData
-
-    // If V2 watertight mesh is available, skip legacy segment rendering
-    // (V2 mesh is rendered separately with proper geometry)
-    const hasV2Mesh = supportMeshBuffer && supportMeshBuffer.byteLength > 84
-    if (!hasAnything && !hasV2Mesh) return
-    // When V2 mesh exists, only render raft/skirt from legacy, skip support segments
-    const skipLegacySupports = !!hasV2Mesh
+    if (regions.length === 0 && !raftData && !skirtData) return
 
     const group = new THREE.Group()
     group.name = 'support-visuals'
 
-    // ── PrusaSlicer-style support rendering ─────────────────────────────────
-    // Unified teal/green color like Lychee. Sphere joints at connections.
-    // Proper cone bases. Smooth visual transitions.
-    const SUPPORT_COLOR = 0x2dd4bf   // teal-400 — like Lychee/ChiTuBox
-    const BRACE_COLOR   = 0x14b8a6   // teal-500
-    const TIP_COLOR     = 0xfbbf24   // amber — highlight contact points
-    const BASE_COLOR    = 0x6366f1   // indigo — platform on bed
-
-    const supportMat = new THREE.MeshPhongMaterial({ color: SUPPORT_COLOR, transparent: true, opacity: 0.7, shininess: 30 })
-    const tipMat     = new THREE.MeshPhongMaterial({ color: TIP_COLOR, transparent: true, opacity: 0.85, shininess: 40 })
-    const baseMat    = new THREE.MeshPhongMaterial({ color: BASE_COLOR, transparent: true, opacity: 0.75 })
-    const braceMat   = new THREE.MeshPhongMaterial({ color: BRACE_COLOR, transparent: true, opacity: 0.5 })
-
-    // Helper: add a cylinder between two print-space points
-    const addCyl = (x1: number, y1: number, z1: number, r1: number,
-                    x2: number, y2: number, z2: number, r2: number,
-                    mat: THREE.Material, detail: number, pid: string) => {
-      const h = Math.sqrt((x2-x1)**2 + (y2-y1)**2 + (z2-z1)**2)
-      if (h < 0.005) return
-      const geo = new THREE.CylinderGeometry(Math.max(0.02, r1), Math.max(0.02, r2), h, detail)
-      const mesh = new THREE.Mesh(geo, mat)
-      mesh.position.set((x1+x2)/2, (z1+z2)/2, (y1+y2)/2)
-      const dir = new THREE.Vector3(x2-x1, z2-z1, y2-y1).normalize()
-      if (dir.length() > 0.01) mesh.setRotationFromQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), dir))
-      mesh.userData = { supportPointId: pid }
-      group.add(mesh)
-    }
-
-    // Helper: add a sphere joint at a print-space point
-    const addSphere = (x: number, y: number, z: number, r: number,
-                       mat: THREE.Material, pid: string) => {
-      if (r < 0.01) return
-      const geo = new THREE.SphereGeometry(r, 8, 6)
-      const mesh = new THREE.Mesh(geo, mat)
-      mesh.position.set(x, z, y) // print→three: x=x, y=z, z=y
-      mesh.userData = { supportPointId: pid }
-      group.add(mesh)
-    }
-
-    // Skip legacy cylinder rendering when V2 watertight mesh is available
-    if (!skipLegacySupports) pts.forEach(p => {
-      if (p.segments && p.segments.length > 0) {
-        p.segments.forEach((seg, i) => {
-          const isTip = seg.part === 'tip'
-          const isBase = seg.part === 'base'
-          const mat2 = isTip ? tipMat : isBase ? baseMat : supportMat
-          const detail = isTip ? 10 : isBase ? 10 : 8
-
-          // Draw the cylinder segment
-          addCyl(seg.x1, seg.y1, seg.z1, seg.r1, seg.x2, seg.y2, seg.z2, seg.r2, mat2, detail, p.id)
-
-          // Add sphere joint at the START of each segment (smooth connection)
-          const jr = Math.max(seg.r1, seg.r2) * 0.9
-          if (i === 0 && isTip) {
-            // Tip contact point — small amber sphere
-            addSphere(seg.x1, seg.y1, seg.z1, Math.max(seg.r1, 0.1), tipMat, p.id)
-          } else if (seg.part === 'shaft' || seg.part === 'upperTaper') {
-            // Junction sphere where segments connect
-            addSphere(seg.x1, seg.y1, seg.z1, jr, supportMat, p.id)
-          }
-
-          // Base bottom — flat disc sphere
-          if (isBase && i === p.segments!.length - 1) {
-            addSphere(seg.x2, seg.y2, seg.z2, Math.max(seg.r2, 0.2), baseMat, p.id)
-          }
-        })
-      } else {
-        // Simple fallback
-        addSphere(p.x, p.y, p.z, 0.25, tipMat, p.id)
-        if (p.z > 0.1) addCyl(p.x, p.y, p.z, 0.1, p.x, p.y, 0, 0.1, supportMat, 6, p.id)
-      }
-    })
-
-    // Render cross-braces (skip when V2 mesh handles everything)
-    if (!skipLegacySupports) braces.forEach(b => {
-      const h = Math.sqrt((b.x2-b.x1)**2 + (b.y2-b.y1)**2 + (b.z2-b.z1)**2)
-      if (h < 0.01) return
-      const r = Math.max(0.05, b.diameter / 2)
-      addCyl(b.x1, b.y1, b.z1, r, b.x2, b.y2, b.z2, r, braceMat, 5, '')
-      addSphere(b.x1, b.y1, b.z1, r * 1.1, braceMat, '')
-      addSphere(b.x2, b.y2, b.z2, r * 1.1, braceMat, '')
-    })
+    // V2 watertight mesh handles all support rendering.
+    // This group only renders: painted regions (enforcer/blocker) + raft + skirt.
 
     // Render painted regions as transparent spheres
     regions.forEach(r => {
@@ -1083,7 +1007,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
 
     scene.add(group)
     supportGroupRef.current = group
-  }, [supportPoints, paintedRegions, crossBraces, supportMeshBuffer, raftData, skirtData, sceneReady])
+  }, [paintedRegions, raftData, skirtData, sceneReady])
 
   // ── V2 Support mesh rendering (single watertight mesh) ─────────────────
 
@@ -1091,11 +1015,10 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
 
   useEffect(() => {
     if (!sceneReady) return
-    const scene = sceneRef.current!
 
-    // Remove old V2 mesh
+    // Remove old V2 mesh from wherever it was attached
     if (v2MeshRef.current) {
-      scene.remove(v2MeshRef.current)
+      v2MeshRef.current.parent?.remove(v2MeshRef.current)
       v2MeshRef.current.geometry.dispose()
       ;(v2MeshRef.current.material as THREE.Material).dispose()
       v2MeshRef.current = null
@@ -1103,57 +1026,52 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
 
     if (!supportMeshBuffer || supportMeshBuffer.byteLength < 84) return
 
-    // Parse the binary STL buffer directly into Three.js geometry
+    // Find the selected model's group and naturalSize for coordinate alignment
+    const selId = selectedIdRef.current
+    const modelData = selId ? meshMapRef.current.get(selId) : null
+    if (!modelData) return // no model to attach supports to
+
     try {
       const loader = new STLLoader()
       const geometry = loader.parse(supportMeshBuffer)
-      geometry.computeVertexNormals()
 
-      // The STL is in print-space (X, Y, Z). Three.js uses Y-up.
-      // Transform: swap Y and Z axes
+      // V2 mesh is in backend Z-up space. Swap Y/Z to match frontend Y-up
+      // (same swap applied to model geometry during loading).
       const positions = geometry.getAttribute('position')
-      const normals = geometry.getAttribute('normal')
       for (let i = 0; i < positions.count; i++) {
         const y = positions.getY(i)
         const z = positions.getZ(i)
-        positions.setY(i, z) // Three.js Y = print Z (height)
-        positions.setZ(i, y) // Three.js Z = print Y (depth)
-        if (normals) {
-          const ny = normals.getY(i)
-          const nz = normals.getZ(i)
-          normals.setY(i, nz)
-          normals.setZ(i, ny)
-        }
+        positions.setY(i, z) // Three.js Y = backend Z (height)
+        positions.setZ(i, y) // Three.js Z = backend Y (depth)
       }
       positions.needsUpdate = true
-      if (normals) normals.needsUpdate = true
+      geometry.computeVertexNormals()
 
+      // After Y/Z swap, both model and V2 mesh use the same coordinate convention:
+      // Backend: X centered, Y(=STL Y) centered, Z(=STL Z) bottom at 0
+      // After swap: X centered, Y(=height) bottom at 0, Z(=depth) centered
+      // Model after center+translate: X centered, Y=[0,H], Z centered
+      // → They match. No position offset needed.
       const material = new THREE.MeshPhongMaterial({
-        color: 0x14b8a6, // teal-500 — professional slicer look
-        specular: 0x555555,
+        color: 0x14b8a6,
+        specular: 0x444444,
         transparent: true,
-        opacity: 0.75,
-        shininess: 60,
+        opacity: 0.7,
+        shininess: 50,
         side: THREE.DoubleSide,
-        depthWrite: true,
-        flatShading: false, // smooth shading for sphere-cone geometry
+        depthWrite: false,
       })
 
       const mesh = new THREE.Mesh(geometry, material)
+      mesh.renderOrder = 1 // render after model so transparency works correctly
 
-      // V2 mesh is in centered print-space after Y/Z swap — matches model centering.
-      geometry.computeBoundingBox()
-      const bb = geometry.boundingBox!
-      console.log('[V2 Mesh] bounds:', 'X:', bb.min.x.toFixed(1), '-', bb.max.x.toFixed(1),
-        'Y:', bb.min.y.toFixed(1), '-', bb.max.y.toFixed(1),
-        'Z:', bb.min.z.toFixed(1), '-', bb.max.z.toFixed(1))
-
-      scene.add(mesh)
+      // Add to model's group so supports follow model transforms
+      modelData.group.add(mesh)
       v2MeshRef.current = mesh
     } catch (err) {
       console.error('Failed to load V2 support mesh:', err)
     }
-  }, [supportMeshBuffer, sceneReady])
+  }, [supportMeshBuffer, sceneReady, selectedId])
 
   // ── Support callback refs (avoid stale closures) ─────────────────────────
   const onSupportPointAddRef = useRef(onSupportPointAdd)

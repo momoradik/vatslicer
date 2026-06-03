@@ -38,6 +38,16 @@ public sealed class SupportV2Controller : ControllerBase
         [FromForm] float baseRadius = 2.0f,
         [FromForm] float wideningFactor = 0.01f,
         [FromForm] bool enableInterconnections = true,
+        // V2 advanced features
+        [FromForm] bool enableTreeSupports = true,
+        [FromForm] bool enableHollowSupports = true,
+        [FromForm] float hollowMinHeightMm = 20f,
+        [FromForm] float hollowWallThicknessMm = 0.6f,
+        [FromForm] string baseLatticePattern = "Grid",
+        [FromForm] bool enableMiniRafts = true,
+        [FromForm] float raftMarginMm = 1.5f,
+        [FromForm] float raftThicknessMm = 0.3f,
+        [FromForm] string materialPreset = "standard",
         CancellationToken ct = default)
     {
         if (stlFile is null || stlFile.Length == 0) return BadRequest("STL file required.");
@@ -53,6 +63,11 @@ public sealed class SupportV2Controller : ControllerBase
         }
         else if (Enum.TryParse<PrinterOrientation>(orientation, true, out var o)) orient = o;
 
+        // Parse lattice pattern
+        var lattice = LatticeBase.LatticePattern.Grid;
+        if (Enum.TryParse<LatticeBase.LatticePattern>(baseLatticePattern, true, out var lp))
+            lattice = lp;
+
         var (mesh, _) = MeshValidator.ValidateAndRepair(data);
 
         var result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig
@@ -66,6 +81,14 @@ public sealed class SupportV2Controller : ControllerBase
             BaseRadiusMm = baseRadius,
             WideningFactor = wideningFactor,
             EnableInterconnections = enableInterconnections,
+            EnableTreeSupports = enableTreeSupports,
+            EnableHollowSupports = enableHollowSupports,
+            HollowMinHeightMm = hollowMinHeightMm,
+            HollowWallThicknessMm = hollowWallThicknessMm,
+            BaseLatticePattern = lattice,
+            EnableMiniRafts = enableMiniRafts,
+            RaftMarginMm = raftMarginMm,
+            RaftThicknessMm = raftThicknessMm,
         });
 
         return Ok(new
@@ -120,9 +143,9 @@ public sealed class SupportV2Controller : ControllerBase
                 vertices = result.MergeInfo.WeldedVertices,
                 faces = result.MergeInfo.FinalFaces,
                 nonManifoldEdges = result.MergeInfo.NonManifoldEdges,
-                // Base64-encoded binary STL for direct Three.js rendering
-                // (avoids a second HTTP request for the mesh)
-                stlBase64 = result.SupportMesh.FaceCount > 0
+                // Base64-encoded STL for direct rendering (only for meshes <100k faces,
+                // larger meshes must be fetched via /mesh endpoint to avoid JSON size limits)
+                stlBase64 = result.SupportMesh.FaceCount > 0 && result.SupportMesh.FaceCount < 100000
                     ? Convert.ToBase64String(result.SupportMesh.ToStlBinary())
                     : null,
             },
@@ -340,6 +363,88 @@ public sealed class SupportV2Controller : ControllerBase
         var positions = result.Points.Select(p => new System.Numerics.Vector2(p.Position.X, p.Position.Y)).ToList();
         var png = SupportHeatmapRenderer.Render(positions, null, resX, resY, buildWidthMm, buildDepthMm);
         return File(png, "image/png", "support_heatmap.png");
+    }
+
+    /// <summary>
+    /// Evaluate multiple orientations and return the top 5 sorted by overhang score.
+    /// Lower score = fewer supports needed = better orientation for printing.
+    /// </summary>
+    [HttpPost("auto-orient")]
+    [RequestSizeLimit(200_000_000)]
+    public async Task<IActionResult> AutoOrient(
+        [FromForm] IFormFile stlFile,
+        [FromForm] int candidateCount = 36,
+        [FromForm] int topN = 5,
+        CancellationToken ct = default)
+    {
+        if (stlFile is null || stlFile.Length == 0) return BadRequest("STL file required.");
+
+        byte[] data;
+        using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
+
+        var (mesh, _) = MeshValidator.ValidateAndRepair(data);
+
+        var results = AutoOrientOptimizer.Evaluate(mesh, new AutoOrientOptimizer.OrientConfig
+        {
+            CandidateCount = candidateCount,
+        }, topN);
+
+        return Ok(new
+        {
+            engine = "v2-auto-orient",
+            candidatesEvaluated = candidateCount,
+            orientations = results.Select(r => new
+            {
+                rotation = new { r.Rotation.X, r.Rotation.Y, r.Rotation.Z, r.Rotation.W },
+                overhangAreaMm2 = r.OverhangAreaMm2,
+                supportVolumeMl = r.SupportVolumeMl,
+                estimatedSupports = r.EstimatedSupports,
+                score = r.Score,
+                description = r.Description,
+            }),
+        });
+    }
+
+    /// <summary>
+    /// Analyze mesh for resin traps (concave pockets that trap uncured resin)
+    /// and suggest drain hole positions.
+    /// </summary>
+    [HttpPost("drain-holes")]
+    [RequestSizeLimit(200_000_000)]
+    public async Task<IActionResult> SuggestDrainHoles(
+        [FromForm] IFormFile stlFile,
+        [FromForm] float holeDiameterMm = 2.5f,
+        [FromForm] float minTrapVolumeMm3 = 50f,
+        [FromForm] float layerHeightMm = 1.0f,
+        CancellationToken ct = default)
+    {
+        if (stlFile is null || stlFile.Length == 0) return BadRequest("STL file required.");
+
+        byte[] data;
+        using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
+
+        var (mesh, _) = MeshValidator.ValidateAndRepair(data);
+
+        var holes = DrainHolePlacer.Suggest(mesh, new DrainHolePlacer.DrainConfig
+        {
+            HoleDiameterMm = holeDiameterMm,
+            MinTrapVolumeMm3 = minTrapVolumeMm3,
+            LayerHeightMm = layerHeightMm,
+        });
+
+        return Ok(new
+        {
+            engine = "v2-drain-holes",
+            totalTrapsFound = holes.Count,
+            drainHoles = holes.Select(h => new
+            {
+                position = new { x = h.Position.X, y = h.Position.Y, z = h.Position.Z },
+                normal = new { x = h.Normal.X, y = h.Normal.Y, z = h.Normal.Z },
+                diameterMm = h.DiameterMm,
+                trapVolumeMm3 = h.TrapVolumeMm3,
+                reason = h.Reason,
+            }),
+        });
     }
 
     /// <summary>

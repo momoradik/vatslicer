@@ -34,10 +34,12 @@ public class SupportEngineV2EndToEndTests
         result.Pinheads.Count.Should().Be(result.Points.Count,
             "every support point should get a pinhead (valid or not)");
 
-        // Valid pinheads → Routes: every valid pinhead should have a route
+        // Valid pinheads → Routes: routes ≤ valid pinheads (some removed by collision filter)
         int validPinheads = result.Pinheads.Count(p => p.pinhead.IsValid);
-        result.Routes.Count.Should().Be(validPinheads,
-            "every valid pinhead should get a route");
+        result.Routes.Count.Should().BeLessOrEqualTo(validPinheads,
+            "routes should not exceed valid pinheads");
+        result.Routes.Count.Should().BeGreaterThan((int)(validPinheads * 0.8),
+            "collision filter should not remove more than 20% of routes");
 
         // Routes → Legacy supports: same count
         result.LegacySupports.Count.Should().Be(result.Routes.Count,

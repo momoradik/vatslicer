@@ -47,7 +47,7 @@ public static class SupportEngineV2
         public float PinRadiusMm { get; init; } = 0.2f;
         public float BackRadiusMm { get; init; } = 0.5f;
         public float HeadWidthMm { get; init; } = 1.0f;
-        public float PenetrationMm { get; init; } = 0.2f;
+        public float PenetrationMm { get; init; } = 0.05f;
 
         // Pillar
         public float PillarRadiusMm { get; init; } = 0.5f;
@@ -62,9 +62,43 @@ public static class SupportEngineV2
 
         // Interconnections
         public bool EnableInterconnections { get; init; } = true;
-        public float InterconnectDistMm { get; init; } = 10f;
+        public float InterconnectDistMm { get; init; } = 20f;
         public float InterconnectIntervalMm { get; init; } = 5f;
         public float StrutRadiusMm { get; init; } = 0.3f;
+
+        // Tree supports
+        /// <summary>Enable tree support merging (nearby pillars share trunks).</summary>
+        public bool EnableTreeSupports { get; init; } = true;
+        /// <summary>Max XY distance between pillar bases to merge into a tree (mm).</summary>
+        public float TreeMergeDistMm { get; init; } = 15f;
+        /// <summary>Merge point height ratio (0-1). Lower = longer shared trunks.</summary>
+        public float TreeMergeHeightRatio { get; init; } = 0.3f;
+        /// <summary>Max branch angle from vertical for tree merging (degrees).</summary>
+        public float TreeBranchAngleDeg { get; init; } = 35f;
+
+        // Hollow supports
+        /// <summary>Enable hollow shell geometry for tall pillars.</summary>
+        public bool EnableHollowSupports { get; init; } = true;
+        /// <summary>Minimum pillar height to apply hollowing (mm).</summary>
+        public float HollowMinHeightMm { get; init; } = 20f;
+        /// <summary>Wall thickness for hollow supports (mm).</summary>
+        public float HollowWallThicknessMm { get; init; } = 0.6f;
+
+        // Lattice bases
+        /// <summary>Lattice pattern for support bases. Solid = traditional cone.</summary>
+        public LatticeBase.LatticePattern BaseLatticePattern { get; init; } = LatticeBase.LatticePattern.Grid;
+        /// <summary>Strut diameter for lattice bases (mm).</summary>
+        public float LatticeStrutDiameterMm { get; init; } = 0.4f;
+        /// <summary>Spacing between lattice struts (mm).</summary>
+        public float LatticeSpacingMm { get; init; } = 1.0f;
+
+        // Mini rafts
+        /// <summary>Enable individual mini-raft pads under each support base.</summary>
+        public bool EnableMiniRafts { get; init; } = true;
+        /// <summary>Extra margin beyond the support base for mini rafts (mm).</summary>
+        public float RaftMarginMm { get; init; } = 1.5f;
+        /// <summary>Thickness of mini-raft pads (mm).</summary>
+        public float RaftThicknessMm { get; init; } = 0.3f;
 
         // Validation
         public float MinSafetyFactor { get; init; } = 2.0f;
@@ -88,6 +122,20 @@ public static class SupportEngineV2
         public float TranslateY { get; init; } = 0;
         public float TranslateZ { get; init; } = 0;
         public float Scale { get; init; } = 1.0f;
+
+        // Auto-orientation
+        /// <summary>Enable auto-orientation before support generation.</summary>
+        public bool EnableAutoOrient { get; init; } = false;
+        /// <summary>Number of candidate orientations to evaluate.</summary>
+        public int AutoOrientCandidates { get; init; } = 36;
+
+        // Drain hole analysis
+        /// <summary>Enable automatic drain hole suggestion for resin traps.</summary>
+        public bool EnableDrainHoleAnalysis { get; init; } = false;
+        /// <summary>Drain hole diameter for resin trap analysis (mm).</summary>
+        public float DrainHoleDiameterMm { get; init; } = 2.5f;
+        /// <summary>Minimum trapped volume to warrant a drain hole (mm^3).</summary>
+        public float DrainHoleMinTrapVolumeMm3 { get; init; } = 50f;
     }
 
     // ── Result ───────────────────────────────────────────────────────────
@@ -167,6 +215,13 @@ public static class SupportEngineV2
         // ── Step 2: Generate support points ──────────────────────────────
         Serilog.Log.Information("V2 Step 1 BVH: {Ms}ms ({Tris} triangles, {Nodes} nodes)", bvhMs, bvh.TriangleCount, bvh.NodeCount);
         stepSw.Restart();
+
+        // Adaptive layer height for large models — coarser analysis = faster
+        float meshHeight = mesh.Max.Z - mesh.Min.Z;
+        float adaptiveLayerHeight = config.LayerHeightMm;
+        if (meshHeight > 100f) adaptiveLayerHeight = Math.Max(adaptiveLayerHeight, 3f);
+        else if (meshHeight > 50f) adaptiveLayerHeight = Math.Max(adaptiveLayerHeight, 2f);
+
         var pointResult = SupportPointGenerator.Generate(mesh, new SupportPointGenerator.GenerationConfig
         {
             MinSpacingMm = config.MinSpacingMm,
@@ -174,22 +229,42 @@ public static class SupportEngineV2
             DensityFactor = config.DensityFactor,
             Orientation = config.Orientation,
             RecoaterSpeedMmS = config.RecoaterSpeedMmS,
-            LayerHeightMm = config.LayerHeightMm,
+            LayerHeightMm = adaptiveLayerHeight,
             DrainHoleExclusions = config.DrainHoleExclusions,
             DrainHoleClearanceMm = config.DrainHoleClearanceMm,
         }, bvh);
+
+        // Cap support count for large models to prevent timeout
+        int maxSupports = 500;
+        if (pointResult.Points.Count > maxSupports)
+        {
+            Serilog.Log.Warning("V2 Step 2: Capping {Count} points to {Max}", pointResult.Points.Count, maxSupports);
+            var sorted = pointResult.Points.OrderByDescending(p => p.Priority).ThenByDescending(p => p.OverhangArea).ToList();
+            pointResult = new SupportPointGenerator.GenerationResult
+            {
+                Points = sorted.Take(maxSupports).ToList(),
+                OverhangRegions = pointResult.OverhangRegions,
+                OverhangRegionsAnalyzed = pointResult.OverhangRegionsAnalyzed,
+                IslandsDetected = pointResult.IslandsDetected,
+                TotalOverhangArea = pointResult.TotalOverhangArea,
+                ElapsedMs = pointResult.ElapsedMs,
+            };
+        }
 
         Serilog.Log.Information("V2 Step 2 Points: {Ms}ms ({Count} points, {Regions} regions)", stepSw.ElapsedMilliseconds, pointResult.Points.Count, pointResult.OverhangRegionsAnalyzed);
         stepSw.Restart();
 
         // ── Step 3: Optimize pinheads ────────────────────────────────────
+        // Adaptive collision rays: fewer for large meshes
+        int adaptiveRays = mesh.TriangleCount > 3000 ? 4 : Math.Min(config.CollisionRays, 8);
+
         var pinheadConfig = new PinheadOptimizer.PinheadConfig
         {
             PinRadiusMm = config.PinRadiusMm * pinRadiusScale,
             BackRadiusMm = config.BackRadiusMm,
             WidthMm = config.HeadWidthMm,
             PenetrationMm = config.PenetrationMm,
-            CollisionRays = Math.Min(config.CollisionRays, 4), // limit for performance
+            CollisionRays = adaptiveRays,
         };
 
         var pinheads = new List<(string id, PinheadOptimizer.Pinhead pinhead)>();
@@ -242,50 +317,99 @@ public static class SupportEngineV2
         {
             if (!pinhead.IsValid) continue;
 
-            // Auto-scale pillar radius based on support height and weight class
+            // Auto-scale pillar radius based on support height — ALL supports, not just heavy
             var rCfg = routingConfig;
             float supportHeight = pinhead.JunctionPoint.Z; // height above base
-            if (pointWeights.TryGetValue(id, out var weight))
+            var weight = pointWeights.TryGetValue(id, out var w) ? w : ForceEstimator.SupportWeight.Light;
+
+            // Height-based auto-sizing: compute minimum radius from Euler buckling
+            // P_cr = π²EI/L², I = πr⁴/4, solve for r: r = (4PL²/(π³E))^(1/4)
+            // With SF=2.5 and estimated load from overhang area
+            if (supportHeight > 1f)
             {
-                if (weight == ForceEstimator.SupportWeight.Heavy || supportHeight > 100f)
+                // Estimate load from overhang area — use total nearby overhang area divided by
+                // estimated number of supports in region for more realistic per-support load
+                float overhangArea = 50f; // conservative default
+                var pt = pointResult.Points.FirstOrDefault(p => p.Id == id);
+                if (pt != null)
                 {
-                    // Height-scaled radius using Euler buckling formula:
-                    // Critical load P_cr = PI^2 * E * I / L^2 where I = PI * r^4 / 4
-                    // Solving for r to resist a minimum load with safety factor 2:
-                    // r = (P * L^2 * 4 / (PI^3 * E * SF))^(1/4)
-                    // Simplified: at 100mm r≈0.75, 200mm r≈1.2, 300mm r≈1.6
-                    float heightScaledR = 0.4f + supportHeight * 0.004f;
-                    rCfg = rCfg with
-                    {
-                        PillarRadiusMm = Math.Max(rCfg.PillarRadiusMm, Math.Min(heightScaledR, 3.0f)),
-                        BaseRadiusMm = Math.Max(rCfg.BaseRadiusMm, Math.Min(heightScaledR * 3f, 5.0f)),
-                        WideningFactor = Math.Max(rCfg.WideningFactor, 0.04f),
-                    };
+                    // Use the point's overhang area but assume it shares with nearby supports
+                    float pointArea = Math.Max(pt.OverhangArea, 20f);
+                    // Approximate region coverage: each support covers spacing² area
+                    float spacing = config.MinSpacingMm + (config.MaxSpacingMm - config.MinSpacingMm) * (1f - config.DensityFactor);
+                    float coverageArea = spacing * spacing;
+                    overhangArea = Math.Max(pointArea, coverageArea);
                 }
+
+                // Conservative load: gravity (full column) + peel force (proportional to area)
+                float estLoad = overhangArea * supportHeight * 0.3f * 1.1e-6f * 9810f
+                              + overhangArea * 0.02f; // higher peel coefficient for safety
+
+                // Euler buckling minimum radius with SF=3.0 (margin for load uncertainty)
+                float bucklingR = MathF.Pow(
+                    4f * estLoad * 3.0f * supportHeight * supportHeight /
+                    (MathF.PI * MathF.PI * MathF.PI * 2000f),
+                    0.25f);
+
+                // Minimum floor: ensures all supports handle peel + bending forces
+                float linearR = 0.7f + supportHeight * 0.015f;
+                float heightScaledR = Math.Max(bucklingR, linearR);
+
+                // Weight class scaling
+                if (weight == ForceEstimator.SupportWeight.Heavy)
+                    heightScaledR *= 1.3f;
                 else if (weight == ForceEstimator.SupportWeight.Medium)
+                    heightScaledR *= 1.1f;
+
+                rCfg = rCfg with
                 {
-                    rCfg = rCfg with
-                    {
-                        PillarRadiusMm = Math.Max(rCfg.PillarRadiusMm, 0.5f),
-                    };
-                }
+                    PillarRadiusMm = Math.Max(rCfg.PillarRadiusMm, Math.Min(heightScaledR, 3.0f)),
+                    BaseRadiusMm = Math.Max(rCfg.BaseRadiusMm, Math.Min(heightScaledR * 2.5f, 6.0f)),
+                    WideningFactor = Math.Max(rCfg.WideningFactor, supportHeight > 30f ? 0.04f : 0.02f),
+                };
             }
 
-            var route = PillarRouter.Route(pinhead.JunctionPoint, pinhead.BackRadius, bvh, rCfg);
+            // Start pillar at the larger of: pinhead back radius or auto-sized pillar radius
+            float startRadius = Math.Max(pinhead.BackRadius, rCfg.PillarRadiusMm);
+            var route = PillarRouter.Route(pinhead.JunctionPoint, startRadius, bvh, rCfg);
             routes.Add((id, route));
         }
 
         // Post-routing collision filter: remove routes whose pillar passes through the mesh
+        // Uses both waypoint checks and segment beam-casts
         int removedByCollision = 0;
         routes = routes.Where(r =>
         {
-            foreach (var wp in r.route.Path)
+            var path = r.route.Path;
+            for (int wi = 0; wi < path.Count; wi++)
             {
-                if (wp.Type == "base" || wp.Type == "junction") continue;
+                var wp = path[wi];
+                if (wp.Type == "base") continue;
+
+                // Check if waypoint is inside mesh (check ALL types except base)
                 if (bvh.IsInside(wp.Position))
                 {
                     removedByCollision++;
                     return false;
+                }
+
+                // Beam-cast along each segment to check for clipping
+                if (wi < path.Count - 1)
+                {
+                    var wp2 = path[wi + 1];
+                    if (wp2.Type == "base") continue;
+                    float segLen = Vector3.Distance(wp.Position, wp2.Position);
+                    if (segLen > 0.1f)
+                    {
+                        var dir = Vector3.Normalize(wp2.Position - wp.Position);
+                        float radius = Math.Max(wp.Radius, wp2.Radius);
+                        float clearance = bvh.BeamCast(wp.Position, dir, radius, 8, segLen);
+                        if (clearance < segLen * 0.95f)
+                        {
+                            removedByCollision++;
+                            return false;
+                        }
+                    }
                 }
             }
             return true;
@@ -293,6 +417,26 @@ public static class SupportEngineV2
 
         Serilog.Log.Information("V2 Step 4 Routing: {Ms}ms ({Count} routes, {Removed} removed by collision)",
             stepSw.ElapsedMilliseconds, routes.Count, removedByCollision);
+        stepSw.Restart();
+
+        // ── Step 4b: Tree support merging ────────────────────────────────
+        // Merge nearby pillars into shared trunks for material savings and rigidity
+        int treeMergeCount = 0;
+        if (config.EnableTreeSupports && routes.Count >= 2)
+        {
+            int routesBefore = routes.Count;
+            routes = TreeSupportBuilder.MergeIntoTrees(routes, new TreeSupportBuilder.TreeConfig
+            {
+                MaxMergeDistMm = config.TreeMergeDistMm,
+                MinMergeHeightRatio = config.TreeMergeHeightRatio,
+                TrunkRadiusScale = 1.5f,
+                BranchAngleMaxDeg = config.TreeBranchAngleDeg,
+            });
+            treeMergeCount = routesBefore - routes.Count(r => r.route.Path.All(wp => wp.Type != "bridge" || wp.Position.Z > 1f));
+        }
+
+        Serilog.Log.Information("V2 Step 4b TreeMerge: {Ms}ms ({Trees} trees formed)",
+            stepSw.ElapsedMilliseconds, treeMergeCount);
         stepSw.Restart();
 
         // ── Step 5: Build interconnections ───────────────────────────────
@@ -316,13 +460,22 @@ public static class SupportEngineV2
         stepSw.Restart();
 
         // ── Step 6: Generate meshes ──────────────────────────────────────
+        // Adaptive tessellation: fewer sides when many supports to keep mesh size manageable
+        int totalRoutes = routes.Count;
+        int meshSides = totalRoutes > 200 ? 4 : totalRoutes > 50 ? 6 : 8;
+        int braceSides = Math.Max(3, meshSides - 2);
+        // Disable heavy features for large support sets to prevent mesh explosion
+        bool useLattice = config.BaseLatticePattern != LatticeBase.LatticePattern.Solid && totalRoutes < 100;
+        bool useHollow = config.EnableHollowSupports && totalRoutes < 150;
+        bool useMiniRaft = config.EnableMiniRafts && totalRoutes < 200;
+
         var meshParts = new List<IndexedTriangleSet>();
 
         foreach (var (id, pinhead) in pinheads)
         {
             if (!pinhead.IsValid) continue;
             // Pinhead mesh
-            var phMesh = SupportMesher.Pinhead(pinhead.PinRadius, pinhead.BackRadius, pinhead.Width, 8);
+            var phMesh = SupportMesher.Pinhead(pinhead.PinRadius, pinhead.BackRadius, pinhead.Width, meshSides);
             var dir = pinhead.Direction;
             var defaultDir = -Vector3.UnitY;
             Quaternion rot;
@@ -340,12 +493,45 @@ public static class SupportEngineV2
 
         foreach (var (id, route) in routes)
         {
+            float totalPillarHeight = route.Path.Count >= 2
+                ? route.Path[0].Position.Z - route.Path[^1].Position.Z
+                : 0;
+
             for (int i = 0; i < route.Path.Count - 1; i++)
             {
                 var wp1 = route.Path[i];
                 var wp2 = route.Path[i + 1];
-                var seg = SupportMesher.OrientedFrustum(wp1.Position, wp2.Position, wp1.Radius, wp2.Radius, 8);
-                meshParts.Add(seg);
+                float segHeight = Vector3.Distance(wp1.Position, wp2.Position);
+
+                // Use lattice base instead of solid pedestal for base segments
+                if (wp2.Type == "base" && useLattice)
+                {
+                    var lattice = LatticeBase.Generate(
+                        wp2.Position, wp1.Radius, wp2.Radius,
+                        segHeight,
+                        config.BaseLatticePattern,
+                        config.LatticeStrutDiameterMm,
+                        config.LatticeSpacingMm, 8);
+                    meshParts.Add(lattice);
+                }
+                // Use hollow frustum for pillar segments when total pillar is tall enough
+                else if (useHollow && totalPillarHeight > config.HollowMinHeightMm
+                    && (wp1.Type == "pillar" || wp1.Type == "junction")
+                    && (wp2.Type == "pillar" || wp2.Type == "junction")
+                    && segHeight > 2f)
+                {
+                    var hollow = HollowedSupport.OrientedHollowFrustum(
+                        wp1.Position, wp2.Position,
+                        wp1.Radius, wp2.Radius,
+                        config.HollowWallThicknessMm, 8);
+                    meshParts.Add(hollow);
+                }
+                else
+                {
+                    // Standard solid frustum
+                    var seg = SupportMesher.OrientedFrustum(wp1.Position, wp2.Position, wp1.Radius, wp2.Radius, meshSides);
+                    meshParts.Add(seg);
+                }
 
                 // Junction sphere at each waypoint
                 if (i > 0)
@@ -354,11 +540,24 @@ public static class SupportEngineV2
                     meshParts.Add(sphere);
                 }
             }
+
+            // Mini raft under each support base
+            if (useMiniRaft && route.ReachesGround && route.Path.Count > 0)
+            {
+                var baseWp = route.Path[^1];
+                if (baseWp.Type == "base")
+                {
+                    var raft = MiniRaft.Generate(
+                        baseWp.Position, baseWp.Radius,
+                        config.RaftMarginMm, config.RaftThicknessMm, 12);
+                    meshParts.Add(raft);
+                }
+            }
         }
 
         foreach (var conn in interconnections)
         {
-            var strut = SupportMesher.OrientedFrustum(conn.PointA, conn.PointB, conn.Radius, conn.Radius, 6);
+            var strut = SupportMesher.OrientedFrustum(conn.PointA, conn.PointB, conn.Radius, conn.Radius, braceSides);
             meshParts.Add(strut);
         }
 
@@ -380,40 +579,33 @@ public static class SupportEngineV2
         Serilog.Log.Information("V2 Step 6 Meshing: {Ms}ms ({Verts}v {Faces}f)", stepSw.ElapsedMilliseconds, mergeResult.WeldedVertices, mergeResult.FinalFaces);
         stepSw.Restart();
 
-        // ── Step 7: Validate (lightweight — full validation on demand) ───
-        // Skip expensive beam-cast validation for generation speed.
-        // Full validation available via separate validate endpoint.
-        var collisionResult = new CollisionValidator.CollisionResult
-        {
-            TotalSupportsChecked = pinheads.Count,
-            CollisionFreeSupports = routes.Count,
-            CollidingSupports = 0,
-            TotalCollisionPoints = 0,
-            Issues = new(),
-            ElapsedMs = 0,
-        };
+        // ── Step 7: Validate (collision + structural) ──────────────────
+        var routeLookup = routes.ToDictionary(r => r.id, r => r.route);
+
+        var collisionResult = CollisionValidator.ValidateAll(
+            pinheads.Where(p => p.pinhead.IsValid && routeLookup.ContainsKey(p.id)).ToList(),
+            routes, interconnections, bvh);
 
         // Build spatial grid for coverage check
         var coverageGrid = new SpatialGrid<string>(config.MaxSpacingMm);
         foreach (var pt in pointResult.Points)
             coverageGrid.Insert(pt.Position, pt.Id);
 
-        // Reuse point generator's overhang data instead of re-analyzing
-        var allRegions = new List<OverhangAnalyzer.OverhangRegion>();
+        // Use overhang regions from point generator for coverage + load estimation
+        var allRegions = pointResult.OverhangRegions;
 
-        // Build lookup for fast pinhead-route matching
         var pinheadLookup = pinheads.ToDictionary(p => p.id, p => p.pinhead);
         var routeData = routes.Select(r => (r.id, r.route,
             pinheadLookup.TryGetValue(r.id, out var ph) ? ph.ContactPoint.Z : r.route.Path[0].Position.Z)).ToList();
 
         var structuralResult = StructuralValidator.Validate(
-            routeData, allRegions, coverageGrid, null, config.MinSafetyFactor); // skip manifold check
+            routeData, allRegions, coverageGrid, null, config.MinSafetyFactor,
+            sourceMesh: mesh, bvh: bvh);
 
-        Serilog.Log.Information("V2 Step 7 Validation: {Ms}ms", stepSw.ElapsedMilliseconds);
+        Serilog.Log.Information("V2 Step 7 Validation: {Ms}ms (collisions: {Coll})", stepSw.ElapsedMilliseconds, collisionResult.CollidingSupports);
         stepSw.Restart();
 
         // ── Step 8: Prepare slice elements ───────────────────────────────
-        var routeLookup = routes.ToDictionary(r => r.id, r => r.route);
         var sliceElements = AnalyticalSupportSlicer.ExtractElements(
             pinheads.Where(p => p.pinhead.IsValid && routeLookup.ContainsKey(p.id))
                     .Select(p => (p.pinhead, routeLookup[p.id]))
@@ -427,7 +619,6 @@ public static class SupportEngineV2
         // ── Stats ────────────────────────────────────────────────────────
         int validSupports = pinheads.Count(p => p.pinhead.IsValid);
         float volume = EstimateSupportVolume(routes, interconnections);
-        float meshHeight = mesh.Max.Z - mesh.Min.Z;
         var supportStats = SupportSliceIntegrator.ComputeSupportStats(
             sliceElements, config.LayerHeightMm, 0, meshHeight);
 

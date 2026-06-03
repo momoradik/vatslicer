@@ -85,4 +85,35 @@ public sealed class StlMesh
 
         return new StlMesh(newVerts, min, max);
     }
+
+    /// <summary>
+    /// Find triangle indices that are overhang candidates at a given Z height.
+    /// Returns indices of triangles that span Z and have downward-facing normals.
+    /// </summary>
+    public HashSet<int> FindOverhangTrianglesAtZ(float z, float zTolerance = 1.0f, float maxNormalZ = -0.1f)
+    {
+        var result = new HashSet<int>();
+        for (int t = 0; t < TriangleCount; t++)
+        {
+            var v0 = Vertices[t * 3];
+            var v1 = Vertices[t * 3 + 1];
+            var v2 = Vertices[t * 3 + 2];
+
+            float minZ = Math.Min(v0.Z, Math.Min(v1.Z, v2.Z));
+            float maxZ2 = Math.Max(v0.Z, Math.Max(v1.Z, v2.Z));
+
+            // Triangle must span the Z height (within tolerance)
+            if (minZ > z + zTolerance || maxZ2 < z - zTolerance) continue;
+
+            // Normal must point downward
+            var normal = Vector3.Cross(v1 - v0, v2 - v0);
+            float len = normal.Length();
+            if (len < 1e-8f) continue;
+            normal /= len;
+
+            if (normal.Z < maxNormalZ)
+                result.Add(t);
+        }
+        return result;
+    }
 }

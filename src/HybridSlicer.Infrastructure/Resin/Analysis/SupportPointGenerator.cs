@@ -55,6 +55,7 @@ public sealed class SupportPointGenerator
     public sealed class GenerationResult
     {
         public required List<SupportPoint> Points { get; init; }
+        public required List<OverhangAnalyzer.OverhangRegion> OverhangRegions { get; init; }
         public required int OverhangRegionsAnalyzed { get; init; }
         public required int IslandsDetected { get; init; }
         public required float TotalOverhangArea { get; init; }
@@ -80,6 +81,19 @@ public sealed class SupportPointGenerator
         // Step 3: Use pre-built BVH or build one (skip for very large meshes)
         AabbBvh? bvh = prebuiltBvh ?? (mesh.TriangleCount <= 50000 ? AabbBvh.Build(mesh) : null);
 
+        // Pre-compute overhang triangle sets per Z layer (cached for reuse across regions at same Z)
+        var overhangTriCache = new Dictionary<int, HashSet<int>>();
+        HashSet<int>? GetOverhangTris(float z)
+        {
+            int zKey = (int)(z * 10); // 0.1mm precision cache key
+            if (!overhangTriCache.TryGetValue(zKey, out var tris))
+            {
+                tris = mesh.FindOverhangTrianglesAtZ(z);
+                overhangTriCache[zKey] = tris;
+            }
+            return tris.Count > 0 ? tris : null;
+        }
+
         // Step 4: Process overhang regions in priority order (highest priority first)
         var allRegions = analysis.Layers
             .SelectMany(l => l.Regions)
@@ -89,33 +103,57 @@ public sealed class SupportPointGenerator
 
         foreach (var region in allRegions)
         {
-            // Determine spacing for this region based on type and priority
+            // ── Variable density zoning ──────────────────────────────────
+            // Spacing is determined by overhang type and structural context:
+            //   Islands:            minSpacing (densest — critical unsupported regions)
+            //   Bridge endpoints:   minSpacing * 1.2 (high stress at connection points)
+            //   Peninsula edges:    minSpacing * 1.5 (moderate — partially supported)
+            //   Bulk overhangs:     maxSpacing (sparsest — mostly supported)
+            //   Large flat (>100mm²): dense boundary + sparse interior
+            //   Near model edges:   30% density increase
             float spacing = baseSpacing;
             switch (region.Type)
             {
                 case OverhangAnalyzer.OverhangType.NewIsland:
-                    spacing = config.MinSpacingMm; // dense for islands
+                    spacing = config.MinSpacingMm; // densest for islands
                     break;
                 case OverhangAnalyzer.OverhangType.Bridge:
-                    spacing = config.MinSpacingMm * 1.5f;
+                    spacing = config.MinSpacingMm * 1.2f; // bridge endpoints need dense support
                     break;
                 case OverhangAnalyzer.OverhangType.Peninsula:
-                    spacing = baseSpacing * 0.8f;
+                    spacing = config.MinSpacingMm * 1.5f; // peninsula edges
                     break;
                 case OverhangAnalyzer.OverhangType.BulkOverhang:
-                    spacing = baseSpacing;
+                    spacing = config.MaxSpacingMm; // sparsest for bulk overhangs
                     break;
             }
 
+            // Near-edge density boost: regions with high priority (structural importance)
+            // get 30% denser spacing — these tend to be at model boundaries
+            if (region.Priority > 0.7f && region.Type != OverhangAnalyzer.OverhangType.NewIsland)
+            {
+                spacing *= 0.7f; // 30% increase in density
+            }
+
             // Generate candidate points within the overhang region
-            var candidates = GenerateCandidates(region, spacing);
+            // For large flat overhangs (>100mm²), use dual-zone strategy:
+            // dense boundary sampling + sparse interior grid
+            List<(Vector2 pos, string type)> candidates;
+            if (region.Type == OverhangAnalyzer.OverhangType.BulkOverhang && region.Area > 100f)
+            {
+                candidates = GenerateDualZoneCandidates(region, spacing, config.MinSpacingMm);
+            }
+            else
+            {
+                candidates = GenerateCandidates(region, spacing);
+            }
 
             foreach (var (pos2d, candidateType) in candidates)
             {
                 var pos3d = new Vector3(pos2d.X, pos2d.Y, region.Z);
 
                 // Check spacing against existing points using spatial grid
-                if (grid.ExistsInRadius(pos3d, spacing * 0.8f))
+                if (grid.ExistsInRadius(pos3d, spacing))
                     continue;
 
                 // Check drain hole exclusion zones
@@ -130,23 +168,39 @@ public sealed class SupportPointGenerator
                     if (tooCloseToHole) continue;
                 }
 
-                // Use BVH for precise normal if available, otherwise use overhang face normal
-                Vector3 surfaceNormal;
-                Vector3 surfacePoint;
+                // Use filtered BVH ClosestPoint — only search overhang triangles at this Z.
+                // This prevents the BVH from redirecting to a nearby wall face.
+                Vector3 surfaceNormal = new Vector3(0, 0, -1);
+                Vector3 surfacePoint = pos3d;
+
                 if (bvh != null)
                 {
-                    var closest = bvh.ClosestPoint(pos3d);
-                    surfaceNormal = closest?.Normal ?? new Vector3(0, 0, -1);
-                    surfacePoint = closest?.Point ?? pos3d;
-                }
-                else
-                {
-                    surfaceNormal = new Vector3(0, 0, -1); // overhang faces point down
-                    surfacePoint = pos3d;
-                }
+                    // Get the overhang triangles for this layer
+                    var overhangTris = GetOverhangTris(region.Z);
 
-                // Only place if the surface is actually an overhang (normal points downward)
-                if (surfaceNormal.Z > -0.3f && bvh != null) continue; // skip if BVH says not overhang
+                    // First try: filtered search (only overhang triangles)
+                    var closest = overhangTris != null
+                        ? bvh.ClosestPoint(pos3d, overhangTris)
+                        : bvh.ClosestPoint(pos3d);
+
+                    if (closest.HasValue)
+                    {
+                        surfacePoint = closest.Value.Point;
+                        surfaceNormal = closest.Value.Normal;
+                    }
+
+                    // For BulkOverhang: verify the found surface is actually an overhang
+                    if (region.Type == OverhangAnalyzer.OverhangType.BulkOverhang
+                        && surfaceNormal.Z > -0.1f)
+                        continue;
+
+                    // Reject candidates inside the mesh
+                    if (bvh.IsInside(pos3d))
+                        continue;
+
+                    // Interior surfaces are already filtered at the OverhangAnalyzer level
+                    // by checking contour winding direction (CCW = outer, CW = inner/hole).
+                }
 
                 // Force estimation
                 int supportsInRegion = Math.Max(1, (int)(region.Area / (spacing * spacing)));
@@ -171,26 +225,85 @@ public sealed class SupportPointGenerator
             }
         }
 
-        // Step 5: Coverage verification — ensure no large overhang region is left uncovered
+        // Step 5: Coverage verification — fill uncovered overhang regions
+        // For large regions, add multiple supports in a grid pattern, not just one at centroid
         foreach (var region in allRegions)
         {
-            if (region.Area < 1.0f) continue; // skip tiny overhangs
+            if (region.Area < 1.0f) continue;
 
             var regionCenter3d = new Vector3(region.Centroid.X, region.Centroid.Y, region.Z);
-            if (!grid.ExistsInRadius(regionCenter3d, baseSpacing * 2f))
+            // Use a tighter radius than the validator to ensure fill is always
+            // sufficient. Validator uses min(8, sqrt(effectiveArea/π)*2) where
+            // effectiveArea can be smaller than region.Area after intersection.
+            // Use 80% of the naive coverage radius to guarantee overlap.
+            float regionRadius = MathF.Sqrt(region.Area / MathF.PI);
+            float fillCoverageRadius = Math.Min(8f, regionRadius * 2f) * 0.8f;
+            if (grid.ExistsInRadius(regionCenter3d, fillCoverageRadius))
+                continue;
+
+            // Generate fill points for uncovered region
+            var fillCandidates = new List<Vector3> { regionCenter3d };
+
+            // For large regions, add grid fill points
+            if (region.Area > baseSpacing * baseSpacing && region.Contour.Count >= 3)
             {
-                // This region has no nearby support — add one at centroid
-                Vector3 surfacePoint = regionCenter3d;
+                float minX = region.Contour.Min(p => p.X), maxX = region.Contour.Max(p => p.X);
+                float minY = region.Contour.Min(p => p.Y), maxY = region.Contour.Max(p => p.Y);
+                for (float x = minX + baseSpacing * 0.5f; x <= maxX; x += baseSpacing)
+                for (float y = minY + baseSpacing * 0.5f; y <= maxY; y += baseSpacing)
+                {
+                    var pt2d = new Vector2(x, y);
+                    if (PointInPolygon(pt2d, region.Contour))
+                        fillCandidates.Add(new Vector3(x, y, region.Z));
+                }
+            }
+
+            foreach (var candidate in fillCandidates)
+            {
+                if (grid.ExistsInRadius(candidate, baseSpacing * 0.8f))
+                    continue;
+
+                // Respect drain hole exclusion zones in coverage fill too
+                if (config.DrainHoleExclusions is { Count: > 0 })
+                {
+                    bool tooClose = false;
+                    foreach (var (holePos, holeR) in config.DrainHoleExclusions)
+                    {
+                        if (Vector3.Distance(candidate, holePos) < holeR + config.DrainHoleClearanceMm)
+                        { tooClose = true; break; }
+                    }
+                    if (tooClose) continue;
+                }
+
+                Vector3 surfacePoint = candidate;
                 Vector3 surfaceNormal = new Vector3(0, 0, -1);
                 if (bvh != null)
                 {
-                    var closest = bvh.ClosestPoint(regionCenter3d);
-                    surfacePoint = closest?.Point ?? regionCenter3d;
-                    surfaceNormal = closest?.Normal ?? new Vector3(0, 0, -1);
+                    // Use filtered ClosestPoint to find overhang surface, not walls
+                    var overhangTris = GetOverhangTris(region.Z);
+                    var closest = overhangTris != null
+                        ? bvh.ClosestPoint(candidate, overhangTris)
+                        : null;
+
+                    if (closest.HasValue)
+                    {
+                        surfacePoint = closest.Value.Point;
+                        surfaceNormal = closest.Value.Normal;
+                    }
+                    // else: no overhang triangle found — use candidate position directly
+
+                    // Reject supports trapped inside hollow geometry
+                    if (surfacePoint.Z > 2f)
+                    {
+                        var downHit = bvh.RayCast(surfacePoint - new Vector3(0, 0, 0.5f), -Vector3.UnitZ);
+                        if (downHit.HasValue && downHit.Value.Distance < surfacePoint.Z - 1f)
+                            continue;
+                    }
                 }
 
+                int supportsInRegion = Math.Max(1, (int)(region.Area / (baseSpacing * baseSpacing)));
                 var force = ForceEstimator.Estimate(
-                    surfacePoint.Z, region.Area, 1,
+                    surfacePoint.Z, region.Area, supportsInRegion,
                     region.Area, baseSpacing,
                     config.Orientation, config.RecoaterSpeedMmS);
 
@@ -214,6 +327,7 @@ public sealed class SupportPointGenerator
         return new GenerationResult
         {
             Points = points,
+            OverhangRegions = allRegions,
             OverhangRegionsAnalyzed = allRegions.Count,
             IslandsDetected = analysis.TotalIslands,
             TotalOverhangArea = analysis.TotalOverhangArea,
@@ -300,6 +414,32 @@ public sealed class SupportPointGenerator
                 candidates.Add((Vector2.Lerp(a, b, t), type));
             }
         }
+    }
+
+    /// <summary>
+    /// Generate candidates for large flat overhangs (>100mm²) using a dual-zone strategy:
+    /// dense boundary samples along the contour edges + sparse interior grid.
+    /// This ensures adequate edge support while minimizing interior material usage.
+    /// </summary>
+    private static List<(Vector2 pos, string type)> GenerateDualZoneCandidates(
+        OverhangAnalyzer.OverhangRegion region, float interiorSpacing, float boundarySpacing)
+    {
+        var candidates = new List<(Vector2, string)>();
+        var contour = region.Contour;
+        if (contour.Count < 3) return candidates;
+
+        // Boundary zone: dense edge samples along the contour perimeter
+        EdgeSample(candidates, contour, boundarySpacing, "edge");
+
+        // Interior zone: sparse grid sampling inside the polygon
+        float minX = contour.Min(p => p.X), maxX = contour.Max(p => p.X);
+        float minY = contour.Min(p => p.Y), maxY = contour.Max(p => p.Y);
+        GridSample(candidates, contour, minX, minY, maxX, maxY, interiorSpacing, "grid");
+
+        // Centroid for structural center
+        candidates.Add((region.Centroid, "centroid"));
+
+        return candidates;
     }
 
     private static bool PointInPolygon(Vector2 point, List<Vector2> polygon)

@@ -465,7 +465,14 @@ public sealed class AabbBvh
     /// Find the closest point on the mesh surface to the given query point.
     /// Returns null if mesh is empty.
     /// </summary>
-    public ClosestPointResult? ClosestPoint(Vector3 point)
+    public ClosestPointResult? ClosestPoint(Vector3 point) => ClosestPoint(point, null);
+
+    /// <summary>
+    /// Find the closest point on the mesh surface, optionally restricted to allowed triangles.
+    /// When allowedTriangles is non-null, only triangles whose original index is in the set
+    /// are considered — this prevents wall triangles from stealing overhang queries.
+    /// </summary>
+    public ClosestPointResult? ClosestPoint(Vector3 point, HashSet<int>? allowedTriangles)
     {
         if (_totalTriangles == 0) return null;
 
@@ -490,6 +497,10 @@ public sealed class AabbBvh
             {
                 for (int i = _triStart[node]; i < _triStart[node] + _triCount[node]; i++)
                 {
+                    // Skip triangles not in the allowed set
+                    if (allowedTriangles != null && !allowedTriangles.Contains(_triIndices[i]))
+                        continue;
+
                     var cp = ClosestPointOnTriangle(point, _v0[i], _v1[i], _v2[i]);
                     float d2 = Vector3.DistanceSquared(point, cp);
                     if (d2 < bestDistSq)
@@ -510,7 +521,7 @@ public sealed class AabbBvh
                 float dR = DistSqToAABB(point, _right[node]);
                 if (dL < dR)
                 {
-                    stack[sp++] = _right[node]; // push far first (popped last)
+                    stack[sp++] = _right[node];
                     stack[sp++] = _left[node];
                 }
                 else

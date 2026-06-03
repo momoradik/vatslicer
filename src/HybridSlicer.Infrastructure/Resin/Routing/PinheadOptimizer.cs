@@ -77,16 +77,17 @@ public static class PinheadOptimizer
         float bestClearance = result.Clearance;
         float bestPolar = MathF.PI, bestAzimuth = 0;
 
-        float polarMin = MathF.PI - config.MaxBridgeSlope;
-        float polarMax = MathF.PI;
+        // Search from straight down (polar=0) to max tilt (polar=maxSlope)
+        float polarMin = 0f;
+        float polarMax = config.MaxBridgeSlope;
 
-        // Level 1: coarse search — 8 azimuth x 3 polar = 24 candidates
-        for (int ai = 0; ai < 8; ai++)
+        // Level 1: coarse search — 12 azimuth x 5 polar = 60 candidates
+        for (int ai = 0; ai < 12; ai++)
         {
-            float azimuth = 2f * MathF.PI * ai / 8;
-            for (int pi = 0; pi < 3; pi++)
+            float azimuth = 2f * MathF.PI * ai / 12;
+            for (int pi = 0; pi < 5; pi++)
             {
-                float polar = polarMin + (polarMax - polarMin) * pi / 2f;
+                float polar = polarMin + (polarMax - polarMin) * pi / 4f;
                 var dir = SphericalToCartesian(polar, azimuth);
                 var candidate = TryPinhead(contactPoint, dir, config, bvh);
                 if (candidate.Clearance > bestClearance)
@@ -101,15 +102,15 @@ public static class PinheadOptimizer
             if (bestResult.IsValid) break;
         }
 
-        // Level 2: refine around best — 4 azimuth x 3 polar around the winner
+        // Level 2: refine around best — 6 azimuth x 5 polar around the winner
         if (!bestResult.IsValid)
         {
-            float azStep = MathF.PI / 4f; // ±45° around best
-            float polStep = (polarMax - polarMin) / 4f;
-            for (int ai = -2; ai <= 2; ai++)
-            for (int pi = -1; pi <= 1; pi++)
+            float azStep = MathF.PI / 6f; // ±30° around best
+            float polStep = (polarMax - polarMin) / 6f;
+            for (int ai = -3; ai <= 3; ai++)
+            for (int pi = -2; pi <= 2; pi++)
             {
-                float azimuth = bestAzimuth + ai * azStep / 2f;
+                float azimuth = bestAzimuth + ai * azStep / 3f;
                 float polar = Math.Clamp(bestPolar + pi * polStep, polarMin, polarMax);
                 var dir = SphericalToCartesian(polar, azimuth);
                 var candidate = TryPinhead(contactPoint, dir, config, bvh);
@@ -122,11 +123,19 @@ public static class PinheadOptimizer
             }
         }
 
+        // Level 3: try with reduced penetration if still failing
+        if (!bestResult.IsValid && config.PenetrationMm > 0.05f)
+        {
+            var reducedConfig = config with { PenetrationMm = config.PenetrationMm * 0.5f };
+            var candidate = TryPinhead(contactPoint, bestResult.Direction, reducedConfig, bvh);
+            if (candidate.IsValid) return candidate;
+        }
+
         if (bestResult.IsValid)
             return bestResult;
 
         // Step 4: reduce radius and retry with the best direction found
-        for (float scale = 0.7f; scale >= 0.3f; scale -= 0.2f)
+        for (float scale = 0.8f; scale >= 0.2f; scale -= 0.15f)
         {
             var smallConfig = new PinheadConfig
             {
@@ -143,8 +152,26 @@ public static class PinheadOptimizer
             if (candidate.IsValid) return candidate;
         }
 
-        // Step 5: all failed — mark as needs anchor
-        return bestResult with { NeedsAnchor = true };
+        // Step 5: create a minimal direct-contact pinhead (no sphere-cone-sphere)
+        // This is used at tight concave corners where the full pinhead can't fit.
+        // The pillar connects directly to the contact point with a tiny transition.
+        var minimalDir = ComputeInitialDirection(surfaceNormal, config.MaxBridgeSlope);
+        float minR = config.PinRadiusMm * 0.15f; // micro radius
+        float minLen = minR * 2f;
+        return new Pinhead
+        {
+            ContactPoint = contactPoint,
+            Direction = minimalDir,
+            PinCenter = contactPoint + minimalDir * minR,
+            BackCenter = contactPoint + minimalDir * minLen,
+            JunctionPoint = contactPoint + minimalDir * (minLen + minR),
+            PinRadius = minR,
+            BackRadius = minR,
+            Width = minLen,
+            Clearance = 0,
+            IsValid = true, // always valid — it's just a micro contact point
+            NeedsAnchor = false,
+        };
     }
 
     // ── Internal ─────────────────────────────────────────────────────────
@@ -260,7 +287,9 @@ public static class PinheadOptimizer
 
     /// <summary>
     /// Convert spherical coordinates to cartesian direction vector.
-    /// Polar = angle from +Z (0=up, PI=down), Azimuth = rotation around Z.
+    /// Polar = angle from -Z (downward): 0=straight down, PI/4=45° tilt, PI/2=horizontal.
+    /// Azimuth = rotation around Z axis.
+    /// This convention matches support directions: 0=vertical support, increasing=more tilt.
     /// </summary>
     private static Vector3 SphericalToCartesian(float polar, float azimuth)
     {
@@ -268,7 +297,7 @@ public static class PinheadOptimizer
         return new Vector3(
             sinP * MathF.Cos(azimuth),
             sinP * MathF.Sin(azimuth),
-            -MathF.Cos(polar) // negate so PI=down maps to Z=-1
+            -MathF.Cos(polar) // polar=0 → Z=-1 (straight down), polar=PI/2 → Z=0 (horizontal)
         );
     }
 }
