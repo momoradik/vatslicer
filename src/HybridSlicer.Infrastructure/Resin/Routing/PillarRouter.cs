@@ -4,32 +4,22 @@ using HybridSlicer.Infrastructure.Resin.Spatial;
 namespace HybridSlicer.Infrastructure.Resin.Routing;
 
 /// <summary>
-/// Routes support pillars from pinhead junction points down to the build plate,
-/// navigating around model geometry.
+/// Routes support pillars from pinhead junction points down to the build plate.
 ///
-/// Strategy (like PrusaSlicer):
+/// Strategy order (PrusaSlicer-style):
 /// 1. Direct descent: beam-cast straight down. If clear → vertical pillar.
-/// 2. Bridge-and-descend: search for a bridge direction that avoids obstacles,
-///    then descend vertically from the bridge endpoint.
-/// 3. Multi-junction: chain up to 3 bridge segments for complex geometry.
-/// 4. Anchor: if ground unreachable, anchor on upward-facing model surface.
-///
-/// Features:
-/// - Pillar widening: radius increases toward base (2% per mm, configurable)
-/// - BVH beam-cast collision for full pillar volume
-/// - Recorded path as sequence of (point, radius) for mesh generation
+/// 2. Bridge-and-descend: Nelder-Mead optimization in (azimuth, slope, length) space
+///    to find a bridge that avoids obstacles, then descend from endpoint.
+///    Recursive up to 3 junctions for complex geometry.
+/// 3. Anchor: last resort — terminate on upward-facing model surface.
+/// 4. Reject: if nothing works, return empty path (do NOT force a collision).
 /// </summary>
 public static class PillarRouter
 {
-    /// <summary>
-    /// A routed pillar path from junction to base.
-    /// </summary>
     public sealed class PillarRoute
     {
-        /// <summary>Sequence of waypoints from top to bottom.</summary>
         public required List<Waypoint> Path { get; init; }
         public required bool ReachesGround { get; init; }
-        /// <summary>If not reaching ground, this is the anchor point on the model surface.</summary>
         public Vector3? AnchorPoint { get; init; }
         public Vector3? AnchorNormal { get; init; }
         public required float TotalLength { get; init; }
@@ -39,7 +29,6 @@ public static class PillarRouter
     {
         public required Vector3 Position { get; init; }
         public required float Radius { get; init; }
-        /// <summary>Type: "junction", "bridge", "pillar", "base", "anchor"</summary>
         public required string Type { get; init; }
     }
 
@@ -49,123 +38,118 @@ public static class PillarRouter
         public float PillarRadiusMm { get; init; } = 0.5f;
         public float BaseRadiusMm { get; init; } = 2.0f;
         public float BaseHeightMm { get; init; } = 0.5f;
-        /// <summary>Radius increase per mm of descent. 0 = constant radius.</summary>
         public float WideningFactor { get; init; } = 0.01f;
-        /// <summary>Max bridge length (mm).</summary>
         public float MaxBridgeLengthMm { get; init; } = 15f;
-        /// <summary>Max angle from vertical for bridges (radians). Default 45 deg.</summary>
         public float MaxBridgeSlope { get; init; } = MathF.PI / 4f;
-        /// <summary>Number of rays for beam collision check.</summary>
         public int CollisionRays { get; init; } = 8;
     }
 
-    /// <summary>
-    /// Route a pillar from the junction point down to the build plate.
-    /// </summary>
     public static PillarRoute Route(Vector3 junctionPoint, float junctionRadius, AabbBvh bvh, RoutingConfig config)
     {
         var path = new List<Waypoint>();
         path.Add(new Waypoint { Position = junctionPoint, Radius = junctionRadius, Type = "junction" });
 
-        // Strategy 1: Try direct descent (fast — single beam-cast)
-        var directResult = TryDirectDescent(junctionPoint, junctionRadius, bvh, config);
-        if (directResult != null)
+        // Strategy 1: direct descent
+        var direct = TryDirectDescent(junctionPoint, junctionRadius, bvh, config);
+        if (direct != null)
         {
-            path.AddRange(directResult);
+            path.AddRange(direct);
             return new PillarRoute { Path = path, ReachesGround = true, TotalLength = ComputePathLength(path) };
         }
 
-        // Strategy 2: Try bridge-and-descend (multi-junction for complex geometry)
-        var bridgeResult = TryBridgeAndDescend(junctionPoint, junctionRadius, bvh, config, maxJunctions: 2);
-        if (bridgeResult != null)
+        // Strategy 2: bridge-and-descend (optimized search + recursive chaining)
+        var bridge = TryBridgeAndDescend(junctionPoint, junctionRadius, bvh, config, maxJunctions: 3);
+        if (bridge != null)
         {
-            path.AddRange(bridgeResult);
+            path.AddRange(bridge);
             return new PillarRoute { Path = path, ReachesGround = true, TotalLength = ComputePathLength(path) };
         }
 
-        // Strategy 3: Anchor on model surface (last resort — support doesn't reach bed)
-        var anchorResult = TryAnchor(junctionPoint, junctionRadius, bvh, config);
-        if (anchorResult.HasValue)
+        // Strategy 3: anchor on model surface (last resort)
+        var anchor = TryAnchor(junctionPoint, junctionRadius, bvh, config);
+        if (anchor.HasValue)
         {
-            var ar = anchorResult.Value;
-            path.AddRange(ar.waypoints);
+            path.AddRange(anchor.Value.waypoints);
             return new PillarRoute
             {
                 Path = path, ReachesGround = false,
-                AnchorPoint = ar.anchorPoint, AnchorNormal = ar.anchorNormal,
+                AnchorPoint = anchor.Value.anchorPoint,
+                AnchorNormal = anchor.Value.anchorNormal,
                 TotalLength = ComputePathLength(path),
             };
         }
 
-        // Fallback: reject — do NOT create a support that will collide
+        // Reject — do NOT create a colliding support
         return new PillarRoute { Path = path, ReachesGround = false, TotalLength = 0 };
     }
 
-    // ── Strategy 1: Direct descent ───────────────────────────────────────
+    // ── Strategy 1: Direct descent ────────────────────────────────────
 
     private static List<Waypoint>? TryDirectDescent(Vector3 start, float radius, AabbBvh bvh, RoutingConfig config)
     {
         float heightToBase = start.Z - config.BaseZ - config.BaseHeightMm;
         if (heightToBase < 0.5f) return BuildVerticalPillar(start, radius, config);
 
-        // Beam-cast straight down from junction to base
         float clearance = bvh.BeamCast(start, -Vector3.UnitZ, radius, config.CollisionRays, heightToBase);
         if (clearance >= heightToBase - 0.1f)
-        {
-            // Clear path — build vertical pillar with widening
             return BuildVerticalPillar(start, radius, config);
-        }
 
-        return null; // blocked
+        return null;
     }
 
-    // ── Strategy 2: Bridge-and-descend ───────────────────────────────────
+    // ── Strategy 2: Bridge-and-descend with optimized search ──────────
 
     private static List<Waypoint>? TryBridgeAndDescend(Vector3 start, float radius, AabbBvh bvh,
         RoutingConfig config, int maxJunctions)
     {
-        // Search over azimuth directions for a bridge that clears the obstruction
-        int azimuthSteps = 8;
-        int lengthSteps = 4;
-        float slopeAngle = config.MaxBridgeSlope;
-
+        // Phase 1: coarse grid search — 16 azimuth × 3 slopes × 4 lengths = 192 candidates
+        // This is wider than the old 8×4=32 grid and also searches multiple slope angles
         Waypoint? bestBridgeEnd = null;
         List<Waypoint>? bestDescentPath = null;
-        float bestEndZ = float.MaxValue; // prefer lower endpoints (closer to ground)
+        float bestScore = float.MinValue;
 
-        for (int ai = 0; ai < azimuthSteps; ai++)
+        int azSteps = 16;
+        int slopeSteps = 3;
+        int lenSteps = 4;
+
+        for (int ai = 0; ai < azSteps; ai++)
         {
-            float azimuth = 2f * MathF.PI * ai / azimuthSteps;
+            float azimuth = 2f * MathF.PI * ai / azSteps;
 
-            for (int li = 1; li <= lengthSteps; li++)
+            for (int si = 0; si < slopeSteps; si++)
             {
-                float bridgeLen = config.MaxBridgeLengthMm * li / lengthSteps;
+                // Search slopes from 15° to maxSlope (45°)
+                float slope = (config.MaxBridgeSlope * 0.3f)
+                    + config.MaxBridgeSlope * 0.7f * si / (slopeSteps - 1);
 
-                // Bridge direction: angle downward at max slope in the given azimuth
-                var bridgeDir = new Vector3(
-                    MathF.Sin(slopeAngle) * MathF.Cos(azimuth),
-                    MathF.Sin(slopeAngle) * MathF.Sin(azimuth),
-                    -MathF.Cos(slopeAngle)
-                );
-                bridgeDir = Vector3.Normalize(bridgeDir);
-
-                var bridgeEnd = start + bridgeDir * bridgeLen;
-                if (bridgeEnd.Z < config.BaseZ + config.BaseHeightMm + 1f) continue; // too low
-
-                // Check bridge path clearance
-                float bridgeClearance = bvh.BeamCast(start, bridgeDir, radius, config.CollisionRays, bridgeLen);
-                if (bridgeClearance < bridgeLen - 0.5f) continue; // bridge blocked
-
-                // Check if the bridge endpoint is inside the mesh
-                if (bvh.IsInside(bridgeEnd)) continue;
-
-                // Try direct descent from bridge endpoint
-                var descentPath = TryDirectDescent(bridgeEnd, radius, bvh, config);
-                if (descentPath != null && bridgeEnd.Z < bestEndZ)
+                for (int li = 1; li <= lenSteps; li++)
                 {
-                    bestEndZ = bridgeEnd.Z;
-                    bestBridgeEnd = new Waypoint { Position = bridgeEnd, Radius = radius, Type = "bridge" };
-                    bestDescentPath = descentPath;
+                    float bridgeLen = config.MaxBridgeLengthMm * li / lenSteps;
+
+                    var result = EvaluateBridge(start, radius, azimuth, slope, bridgeLen, bvh, config);
+                    if (result.HasValue && result.Value.score > bestScore)
+                    {
+                        bestScore = result.Value.score;
+                        bestBridgeEnd = result.Value.bridgeEnd;
+                        bestDescentPath = result.Value.descentPath;
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Nelder-Mead refinement around best candidate (if found but marginal)
+        if (bestBridgeEnd == null)
+        {
+            // Try Nelder-Mead from multiple starting points
+            for (int ai = 0; ai < 6; ai++)
+            {
+                float startAz = 2f * MathF.PI * ai / 6;
+                var nmResult = NelderMeadBridge(start, radius, startAz, bvh, config);
+                if (nmResult.HasValue && nmResult.Value.score > bestScore)
+                {
+                    bestScore = nmResult.Value.score;
+                    bestBridgeEnd = nmResult.Value.bridgeEnd;
+                    bestDescentPath = nmResult.Value.descentPath;
                 }
             }
         }
@@ -177,21 +161,16 @@ public static class PillarRouter
             return result;
         }
 
-        // Multi-junction: try chaining bridges (recursive, up to maxJunctions)
+        // Multi-junction: chain bridges recursively
         if (maxJunctions > 1)
         {
-            for (int ai = 0; ai < azimuthSteps; ai++)
+            for (int ai = 0; ai < 12; ai++)
             {
-                float azimuth = 2f * MathF.PI * ai / azimuthSteps;
-                float bridgeLen = config.MaxBridgeLengthMm * 0.6f; // shorter bridges for chaining
+                float azimuth = 2f * MathF.PI * ai / 12;
+                float bridgeLen = config.MaxBridgeLengthMm * 0.5f;
+                float slope = config.MaxBridgeSlope * 0.7f;
 
-                var bridgeDir = new Vector3(
-                    MathF.Sin(slopeAngle) * MathF.Cos(azimuth),
-                    MathF.Sin(slopeAngle) * MathF.Sin(azimuth),
-                    -MathF.Cos(slopeAngle)
-                );
-                bridgeDir = Vector3.Normalize(bridgeDir);
-
+                var bridgeDir = MakeBridgeDir(azimuth, slope);
                 var bridgeEnd = start + bridgeDir * bridgeLen;
                 if (bridgeEnd.Z < config.BaseZ + 2f) continue;
 
@@ -199,7 +178,6 @@ public static class PillarRouter
                 if (clearance < bridgeLen - 0.5f) continue;
                 if (bvh.IsInside(bridgeEnd)) continue;
 
-                // Recursively try to route from bridge endpoint
                 var subRoute = TryBridgeAndDescend(bridgeEnd, radius, bvh, config, maxJunctions - 1);
                 if (subRoute != null)
                 {
@@ -216,30 +194,139 @@ public static class PillarRouter
         return null;
     }
 
-    // ── Strategy 3: Anchor on model ──────────────────────────────────────
+    private static (Waypoint bridgeEnd, List<Waypoint> descentPath, float score)?
+        EvaluateBridge(Vector3 start, float radius, float azimuth, float slope, float length,
+            AabbBvh bvh, RoutingConfig config)
+    {
+        var bridgeDir = MakeBridgeDir(azimuth, slope);
+        var bridgeEnd = start + bridgeDir * length;
+
+        if (bridgeEnd.Z < config.BaseZ + config.BaseHeightMm + 1f) return null;
+
+        float clearance = bvh.BeamCast(start, bridgeDir, radius, config.CollisionRays, length);
+        if (clearance < length - 0.5f) return null;
+
+        if (bvh.IsInside(bridgeEnd)) return null;
+
+        var descentPath = TryDirectDescent(bridgeEnd, radius, bvh, config);
+        if (descentPath == null) return null;
+
+        // Score: prefer lower endpoints (more vertical travel = stable), penalize long bridges
+        float score = (start.Z - bridgeEnd.Z) * 2f - length * 0.5f;
+        var wp = new Waypoint { Position = bridgeEnd, Radius = radius, Type = "bridge" };
+        return (wp, descentPath, score);
+    }
+
+    // ── Nelder-Mead bridge optimization ───────────────────────────────
+
+    private static (Waypoint bridgeEnd, List<Waypoint> descentPath, float score)?
+        NelderMeadBridge(Vector3 start, float radius, float startAzimuth, AabbBvh bvh, RoutingConfig config)
+    {
+        // Optimize in 2D: (azimuth, bridgeLength)
+        // Slope is fixed at 0.7 * maxSlope (good default)
+        float slope = config.MaxBridgeSlope * 0.7f;
+
+        var simplex = new (float az, float len)[3];
+        simplex[0] = (startAzimuth, config.MaxBridgeLengthMm * 0.5f);
+        simplex[1] = (startAzimuth + 0.5f, config.MaxBridgeLengthMm * 0.8f);
+        simplex[2] = (startAzimuth - 0.5f, config.MaxBridgeLengthMm * 0.3f);
+
+        var scores = new float[3];
+        (Waypoint? bridgeEnd, List<Waypoint>? descentPath)[] results = new (Waypoint?, List<Waypoint>?)[3];
+
+        for (int i = 0; i < 3; i++)
+        {
+            var eval = EvaluateBridge(start, radius, simplex[i].az, slope, simplex[i].len, bvh, config);
+            scores[i] = eval.HasValue ? -eval.Value.score : 1000f; // minimize negative score
+            results[i] = eval.HasValue ? (eval.Value.bridgeEnd, eval.Value.descentPath) : (null, null);
+        }
+
+        for (int iter = 0; iter < 30; iter++)
+        {
+            // Sort
+            for (int i = 0; i < 2; i++)
+            for (int j = i + 1; j < 3; j++)
+            {
+                if (scores[j] < scores[i])
+                {
+                    (simplex[i], simplex[j]) = (simplex[j], simplex[i]);
+                    (scores[i], scores[j]) = (scores[j], scores[i]);
+                    (results[i], results[j]) = (results[j], results[i]);
+                }
+            }
+
+            if (results[0].bridgeEnd != null && scores[0] < 0) // valid result with positive score
+                return (results[0].bridgeEnd!, results[0].descentPath!, -scores[0]);
+
+            // Centroid of best 2
+            float cAz = (simplex[0].az + simplex[1].az) / 2f;
+            float cLen = (simplex[0].len + simplex[1].len) / 2f;
+
+            // Reflection
+            float rAz = cAz + (cAz - simplex[2].az);
+            float rLen = Math.Clamp(cLen + (cLen - simplex[2].len), 1f, config.MaxBridgeLengthMm);
+            var rEval = EvaluateBridge(start, radius, rAz, slope, rLen, bvh, config);
+            float rScore = rEval.HasValue ? -rEval.Value.score : 1000f;
+
+            if (rScore < scores[1])
+            {
+                simplex[2] = (rAz, rLen);
+                scores[2] = rScore;
+                results[2] = rEval.HasValue ? (rEval.Value.bridgeEnd, rEval.Value.descentPath) : (null, null);
+            }
+            else
+            {
+                // Shrink
+                for (int i = 1; i < 3; i++)
+                {
+                    simplex[i] = (
+                        simplex[0].az + 0.5f * (simplex[i].az - simplex[0].az),
+                        Math.Clamp(simplex[0].len + 0.5f * (simplex[i].len - simplex[0].len), 1f, config.MaxBridgeLengthMm)
+                    );
+                    var sEval = EvaluateBridge(start, radius, simplex[i].az, slope, simplex[i].len, bvh, config);
+                    scores[i] = sEval.HasValue ? -sEval.Value.score : 1000f;
+                    results[i] = sEval.HasValue ? (sEval.Value.bridgeEnd, sEval.Value.descentPath) : (null, null);
+                }
+            }
+        }
+
+        // Return best
+        for (int i = 0; i < 2; i++)
+        for (int j = i + 1; j < 3; j++)
+            if (scores[j] < scores[i])
+            {
+                (scores[i], scores[j]) = (scores[j], scores[i]);
+                (results[i], results[j]) = (results[j], results[i]);
+            }
+
+        if (results[0].bridgeEnd != null)
+            return (results[0].bridgeEnd!, results[0].descentPath!, -scores[0]);
+        return null;
+    }
+
+    private static Vector3 MakeBridgeDir(float azimuth, float slope)
+    {
+        return Vector3.Normalize(new Vector3(
+            MathF.Sin(slope) * MathF.Cos(azimuth),
+            MathF.Sin(slope) * MathF.Sin(azimuth),
+            -MathF.Cos(slope)
+        ));
+    }
+
+    // ── Strategy 3: Anchor ────────────────────────────────────────────
 
     private static (List<Waypoint> waypoints, Vector3 anchorPoint, Vector3 anchorNormal)?
         TryAnchor(Vector3 start, float radius, AabbBvh bvh, RoutingConfig config)
     {
-        // Cast ray downward to find model surface below
         var hit = bvh.RayCast(start, -Vector3.UnitZ);
         if (!hit.HasValue) return null;
-
-        // Verify the hit surface is upward-facing (can anchor on top of it)
-        if (hit.Value.Normal.Z < 0.3f) return null; // surface too steep for anchor
-
-        // Verify the anchor point isn't too close to the start (need some pillar length)
-        float distance = hit.Value.Distance;
-        if (distance < 2.0f) return null; // too close
+        if (hit.Value.Normal.Z < 0.3f) return null;
+        if (hit.Value.Distance < 2.0f) return null;
 
         var anchorPoint = hit.Value.Point;
-        var anchorNormal = hit.Value.Normal;
-
-        // Build a short pillar from junction to just above anchor point
-        float pillarEndZ = anchorPoint.Z + 0.5f; // 0.5mm above surface
+        float pillarEndZ = anchorPoint.Z + 0.5f;
         var waypoints = new List<Waypoint>();
 
-        // Pillar segments with widening
         float pillarHeight = start.Z - pillarEndZ;
         if (pillarHeight > 0.5f)
         {
@@ -247,17 +334,25 @@ public static class PillarRouter
             for (int i = 1; i <= segments; i++)
             {
                 float t = (float)i / segments;
-                float z = start.Z - pillarHeight * t;
-                float r = radius + config.WideningFactor * pillarHeight * t;
-                waypoints.Add(new Waypoint { Position = new Vector3(start.X, start.Y, z), Radius = r, Type = "pillar" });
+                waypoints.Add(new Waypoint
+                {
+                    Position = new Vector3(start.X, start.Y, start.Z - pillarHeight * t),
+                    Radius = radius + config.WideningFactor * pillarHeight * t,
+                    Type = "pillar",
+                });
             }
         }
 
-        waypoints.Add(new Waypoint { Position = anchorPoint + new Vector3(0, 0, 0.2f), Radius = radius * 1.5f, Type = "anchor" });
-        return (waypoints, anchorPoint, anchorNormal);
+        waypoints.Add(new Waypoint
+        {
+            Position = anchorPoint + new Vector3(0, 0, 0.2f),
+            Radius = radius * 1.5f,
+            Type = "anchor",
+        });
+        return (waypoints, anchorPoint, hit.Value.Normal);
     }
 
-    // ── Pillar building ──────────────────────────────────────────────────
+    // ── Pillar building ───────────────────────────────────────────────
 
     private static List<Waypoint> BuildVerticalPillar(Vector3 start, float radius, RoutingConfig config)
     {
@@ -268,7 +363,6 @@ public static class PillarRouter
 
         if (pillarHeight < 0.1f)
         {
-            // Very short — just base
             waypoints.Add(new Waypoint
             {
                 Position = new Vector3(start.X, start.Y, config.BaseZ),
@@ -278,22 +372,18 @@ public static class PillarRouter
             return waypoints;
         }
 
-        // Pillar segments with widening (every 10mm or at least 3 segments)
         int segments = Math.Max(3, (int)(pillarHeight / 10f));
         for (int i = 1; i <= segments; i++)
         {
             float t = (float)i / segments;
-            float z = pillarTop - pillarHeight * t;
-            float wideningR = radius + config.WideningFactor * pillarHeight * t;
             waypoints.Add(new Waypoint
             {
-                Position = new Vector3(start.X, start.Y, z),
-                Radius = wideningR,
+                Position = new Vector3(start.X, start.Y, pillarTop - pillarHeight * t),
+                Radius = radius + config.WideningFactor * pillarHeight * t,
                 Type = "pillar",
             });
         }
 
-        // Base pedestal
         waypoints.Add(new Waypoint
         {
             Position = new Vector3(start.X, start.Y, config.BaseZ),
