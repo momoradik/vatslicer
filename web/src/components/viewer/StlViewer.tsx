@@ -1085,11 +1085,37 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       positions.needsUpdate = true
       geometry.computeVertexNormals()
 
-      // After Y/Z swap, both model and V2 mesh use the same coordinate convention:
-      // Backend: X centered, Y(=STL Y) centered, Z(=STL Z) bottom at 0
-      // After swap: X centered, Y(=height) bottom at 0, Z(=depth) centered
-      // Model after center+translate: X centered, Y=[0,H], Z centered
-      // → They match. No position offset needed.
+      // The V2 mesh (after Y/Z swap) is in backend-centered space.
+      // The model geometry went through center() + translate(0, ns.y/2, 0).
+      //
+      // Backend centering (on raw STL, Z-up):
+      //   offX = -(minX+W/2), offY = -(minY+D/2), offZ = -minZ
+      // Frontend centering (after Y/Z swap):
+      //   center() subtracts centroid: -(minX+W/2), -(minZ+H/2), -(minY+D/2)
+      //   translate(0, H/2, 0) adds H/2 to Y
+      //
+      // After swap: backend X = frontend X ✓
+      //             backend Z → frontend Y: backend starts at 0, frontend at 0 after translate ✓
+      //             backend Y → frontend Z: backend centered, frontend centered ✓
+      //
+      // The offset between them:
+      //   Frontend Y = backend_Z + (H/2 - H/2) = backend_Z → no offset needed
+      //   BUT: frontend center() uses (minZ+maxZ)/2 as Y centroid before translate
+      //   while backend uses -minZ. These are NOT the same for Y!
+      //
+      // Frontend Y after center: vertex.Z_swapped - (minZ+maxZ)/2
+      // Frontend Y after translate: + (maxZ-minZ)/2
+      // Net: vertex.Z_swapped - (minZ+maxZ)/2 + (maxZ-minZ)/2 = vertex.Z_swapped - minZ
+      // Backend Z: vertex.Z + (-minZ) = vertex.Z - minZ
+      // After swap: backend_Z_swapped_to_Y = vertex.Z - minZ (same as raw STL Z offset)
+      //
+      // So Y = rawZ - minZ for both! They DO match.
+      // X and Z also match (both center at centroid).
+      //
+      // The mesh position should be (0, 0, 0) — no offset.
+      // If supports appear misaligned, the issue is elsewhere.
+
+      const ns = modelData.naturalSize
       const material = new THREE.MeshPhongMaterial({
         color: 0x14b8a6,
         specular: 0x444444,

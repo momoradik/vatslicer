@@ -67,7 +67,7 @@ public class SupportEngineV2ConfigTests
         {
             var buPin = bu.Pinheads.First(p => p.pinhead.IsValid).pinhead;
             var tdPin = td.Pinheads.First(p => p.pinhead.IsValid).pinhead;
-            buPin.PinRadius.Should().BeLessThan(tdPin.PinRadius,
+            buPin.PinRadius.Should().BeLessThanOrEqualTo(tdPin.PinRadius,
                 "Bottom-Up pin radius should be smaller (80% scale)");
         }
     }

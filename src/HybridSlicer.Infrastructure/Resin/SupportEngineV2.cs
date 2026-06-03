@@ -475,19 +475,31 @@ public static class SupportEngineV2
         foreach (var (id, pinhead) in pinheads)
         {
             if (!pinhead.IsValid) continue;
-            // Pinhead mesh
+            // Pinhead mesh — built along +Y with pin at top (Y = totalH - rPin)
             var phMesh = SupportMesher.Pinhead(pinhead.PinRadius, pinhead.BackRadius, pinhead.Width, meshSides);
+
+            // The pin tip in local space is at (0, totalH - rPin, 0).
+            // We need to place the pin tip AT the ContactPoint.
+            // First shift local origin to the pin tip, then rotate and translate.
+            float totalH = pinhead.PinRadius + pinhead.Width + pinhead.BackRadius;
+            float pinTipY = totalH - pinhead.PinRadius;
+            // Shift so pin tip is at local origin
+            for (int vi = 0; vi < phMesh.VertexCount; vi++)
+                phMesh.Vertices[vi] -= new Vector3(0, pinTipY, 0);
+
             var dir = pinhead.Direction;
-            var defaultDir = -Vector3.UnitY;
+            var defaultDir = -Vector3.UnitY; // pin tip points in -Y after shift
             Quaternion rot;
-            float dot = Vector3.Dot(defaultDir, dir);
-            if (dot < -0.999f) rot = Quaternion.CreateFromAxisAngle(Vector3.UnitX, MathF.PI);
-            else if (dot > 0.999f) rot = Quaternion.Identity;
+            float dotVal = Vector3.Dot(defaultDir, dir);
+            if (dotVal < -0.999f) rot = Quaternion.CreateFromAxisAngle(Vector3.UnitX, MathF.PI);
+            else if (dotVal > 0.999f) rot = Quaternion.Identity;
             else
             {
                 var cross = Vector3.Cross(defaultDir, dir);
-                rot = Quaternion.Normalize(new Quaternion(cross.X, cross.Y, cross.Z, 1f + dot));
+                rot = Quaternion.Normalize(new Quaternion(cross.X, cross.Y, cross.Z, 1f + dotVal));
             }
+            // Now pin tip is at origin. Rotate then translate to ContactPoint.
+            // Pin tip ends up exactly at ContactPoint.
             phMesh.Transform(rot, pinhead.ContactPoint);
             meshParts.Add(phMesh);
         }
