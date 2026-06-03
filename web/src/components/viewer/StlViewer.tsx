@@ -810,12 +810,34 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
 
             // Swap Y/Z axes: STL files use Z-up, Three.js uses Y-up.
             // This must happen BEFORE center() so height is along Y.
+            // Swapping Y/Z reverses triangle winding (reflection), so we also
+            // swap vertices 1 and 2 of each triangle to restore correct outward normals.
             const pos = geometry.getAttribute('position')
             for (let i = 0; i < pos.count; i++) {
               const y = pos.getY(i)
               const z = pos.getZ(i)
               pos.setY(i, z)  // Three.js Y = STL Z (height)
               pos.setZ(i, y)  // Three.js Z = STL Y (depth)
+            }
+            // Fix winding: swap vertices 1 and 2 of each triangle
+            // (Y/Z swap is a reflection that reverses handedness)
+            const idx = geometry.getIndex()
+            if (idx) {
+              for (let i = 0; i < idx.count; i += 3) {
+                const a = idx.getX(i + 1)
+                const b = idx.getX(i + 2)
+                idx.setX(i + 1, b)
+                idx.setX(i + 2, a)
+              }
+              idx.needsUpdate = true
+            } else {
+              // Non-indexed: swap position triplets
+              for (let i = 0; i < pos.count; i += 3) {
+                const x1 = pos.getX(i+1), y1 = pos.getY(i+1), z1 = pos.getZ(i+1)
+                const x2 = pos.getX(i+2), y2 = pos.getY(i+2), z2 = pos.getZ(i+2)
+                pos.setXYZ(i+1, x2, y2, z2)
+                pos.setXYZ(i+2, x1, y1, z1)
+              }
             }
             pos.needsUpdate = true
             geometry.computeVertexNormals()
@@ -829,7 +851,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
 
             const mesh = new THREE.Mesh(
               geometry,
-              new THREE.MeshPhongMaterial({ color: C_NORMAL, specular: 0x222222, shininess: 40 }),
+              new THREE.MeshPhongMaterial({ color: C_NORMAL, specular: 0x222222, shininess: 40, side: THREE.DoubleSide }),
             )
             const group = new THREE.Group()
             group.add(mesh)
@@ -1035,14 +1057,30 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       const loader = new STLLoader()
       const geometry = loader.parse(supportMeshBuffer)
 
-      // V2 mesh is in backend Z-up space. Swap Y/Z to match frontend Y-up
-      // (same swap applied to model geometry during loading).
+      // V2 mesh is in backend Z-up space. Swap Y/Z to match frontend Y-up.
+      // Same swap + winding fix as model geometry loading.
       const positions = geometry.getAttribute('position')
       for (let i = 0; i < positions.count; i++) {
         const y = positions.getY(i)
         const z = positions.getZ(i)
-        positions.setY(i, z) // Three.js Y = backend Z (height)
-        positions.setZ(i, y) // Three.js Z = backend Y (depth)
+        positions.setY(i, z)
+        positions.setZ(i, y)
+      }
+      // Fix winding after Y/Z swap (reflection reverses handedness)
+      const vIdx = geometry.getIndex()
+      if (vIdx) {
+        for (let i = 0; i < vIdx.count; i += 3) {
+          const a = vIdx.getX(i + 1), b = vIdx.getX(i + 2)
+          vIdx.setX(i + 1, b); vIdx.setX(i + 2, a)
+        }
+        vIdx.needsUpdate = true
+      } else {
+        for (let i = 0; i < positions.count; i += 3) {
+          const x1=positions.getX(i+1),y1=positions.getY(i+1),z1=positions.getZ(i+1)
+          const x2=positions.getX(i+2),y2=positions.getY(i+2),z2=positions.getZ(i+2)
+          positions.setXYZ(i+1, x2, y2, z2)
+          positions.setXYZ(i+2, x1, y1, z1)
+        }
       }
       positions.needsUpdate = true
       geometry.computeVertexNormals()
