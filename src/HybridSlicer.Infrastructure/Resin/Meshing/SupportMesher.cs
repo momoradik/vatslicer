@@ -206,41 +206,10 @@ public static class SupportMesher
     /// </summary>
     public static IndexedTriangleSet Pinhead(float rPin, float rBack, float width, int sides = DEFAULT_SIDES)
     {
-        var mesh = new IndexedTriangleSet();
+        // Single continuous tapered frustum — no sphere caps, no gaps.
+        // Pin radius at top, back radius at bottom.
         float totalH = rPin + width + rBack;
-
-        // Tangent angle phi that makes the cone tangent to both spheres
-        float h = totalH;
-        float phi = MathF.PI / 2f - MathF.Acos(Math.Clamp((rBack - rPin) / h, -1f, 1f));
-
-        // Pin sphere (top): from north pole to (PI/2 + phi)
-        var pinSphere = PartialSphere(rPin, 0, MathF.PI / 2f + phi, 4, sides);
-        // Translate pin sphere to its position (top of the pinhead)
-        for (int i = 0; i < pinSphere.Vertices.Count; i++)
-            pinSphere.Vertices[i] += new Vector3(0, totalH - rPin, 0); // pin at top
-        mesh.Merge(pinSphere);
-
-        // Back sphere (bottom): from (PI/2 + phi) to south pole
-        var backSphere = PartialSphere(rBack, MathF.PI / 2f + phi, MathF.PI, 4, sides);
-        // Back sphere at bottom, centered at (0, rBack, 0)
-        for (int i = 0; i < backSphere.Vertices.Count; i++)
-            backSphere.Vertices[i] += new Vector3(0, rBack, 0);
-        mesh.Merge(backSphere);
-
-        // Connecting cone (stitch the two edge rings)
-        // For simplicity, add a frustum between the sphere edges
-        var cone = Frustum(
-            rPin * MathF.Cos(phi), // top radius at tangent point
-            rBack * MathF.Cos(phi), // bottom radius at tangent point
-            width, // height of connecting section
-            sides);
-        // Position: between pin and back spheres
-        float coneBottom = rBack + rBack * MathF.Sin(phi);
-        for (int i = 0; i < cone.Vertices.Count; i++)
-            cone.Vertices[i] += new Vector3(0, coneBottom, 0);
-        mesh.Merge(cone);
-
-        return mesh;
+        return Frustum(rPin, rBack, totalH, sides);
     }
 
     // ── Oriented frustum between two 3D points ───────────────────────────
