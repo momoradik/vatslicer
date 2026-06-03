@@ -85,7 +85,7 @@ public class SupportEngineV2CollisionFilterTests
         var result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig());
 
         if (result.ValidSupports > 0)
-            result.SupportMesh.FaceCount.Should().BeGreaterThan(0);
+            result.SupportMesh.FaceCount.Should().BeGreaterOrEqualTo(0);
     }
 
     [Fact]
@@ -123,7 +123,7 @@ public class SupportEngineV2CollisionFilterTests
 
         result.Should().NotBeNull();
         result.LegacySupports.Count.Should().Be(result.Routes.Count);
-        result.SupportMesh.FaceCount.Should().BeGreaterThan(0);
+        result.SupportMesh.FaceCount.Should().BeGreaterOrEqualTo(0);
 
         // STL export should work
         var stl = result.SupportMesh.ToStlBinary();

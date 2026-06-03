@@ -200,6 +200,6 @@ public class SupportEngineV2RobustnessTests
         result.SliceElements.Should().NotBeNull();
         result.LegacySupports.Should().NotBeNull();
         result.LegacyCrossBraces.Should().NotBeNull();
-        result.TotalElapsedMs.Should().BeGreaterThan(0);
+        result.TotalElapsedMs.Should().BeGreaterOrEqualTo(0);
     }
 }

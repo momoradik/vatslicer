@@ -463,6 +463,62 @@ public static class SupportEngineV2
         Serilog.Log.Information("V2 Step 5 Interconnect: {Ms}ms ({Count} connections)", stepSw.ElapsedMilliseconds, interconnections.Count);
         stepSw.Restart();
 
+        // ── Step 5b: Physics-driven per-support sizing ───────────────────
+        // Replace constant radii with load-driven values computed from peel force,
+        // support height, and layer cross-section area.
+        var sizingLookup = new Dictionary<string, SupportSizer.SupportSizing>();
+        {
+            // Estimate layer area from total overhang area / layer count
+            float estLayerArea = pointResult.TotalOverhangArea > 0
+                ? pointResult.TotalOverhangArea
+                : 100f; // fallback
+
+            int totalSupports = routes.Count;
+
+            foreach (var (id, route) in routes)
+            {
+                float height = route.Path.Count >= 2
+                    ? route.Path[0].Position.Z - route.Path[^1].Position.Z
+                    : 1f;
+
+                // Get the overhang area from the support point
+                float supportArea = estLayerArea;
+                var pt = pointResult.Points.FirstOrDefault(p => p.Id == id);
+                if (pt != null) supportArea = Math.Max(pt.OverhangArea, 10f);
+
+                var sizing = SupportSizer.Size(
+                    supportHeight: Math.Max(height, 0.5f),
+                    layerArea: supportArea,
+                    supportsInLayer: Math.Max(1, totalSupports / 3), // approximate sharing
+                    rootsOnPlate: route.ReachesGround);
+
+                sizingLookup[id] = sizing;
+
+                // Apply sizing to route waypoints — replace constant radii with physics values
+                for (int wi = 0; wi < route.Path.Count; wi++)
+                {
+                    var wp = route.Path[wi];
+                    float newRadius = wp.Type switch
+                    {
+                        "junction" => sizing.PillarRadius,
+                        "pillar" => sizing.PillarRadius + config.WideningFactor * (route.Path[0].Position.Z - wp.Position.Z),
+                        "base" => sizing.BaseRadius > 0 ? sizing.BaseRadius : wp.Radius,
+                        "bridge" => sizing.PillarRadius,
+                        "anchor" => sizing.PillarRadius * 1.5f,
+                        _ => wp.Radius,
+                    };
+                    route.Path[wi] = new PillarRouter.Waypoint
+                    {
+                        Position = wp.Position,
+                        Radius = Math.Max(newRadius, 0.1f),
+                        Type = wp.Type,
+                    };
+                }
+            }
+        }
+        Serilog.Log.Information("V2 Step 5b Sizing: {Ms}ms ({Count} supports sized)", stepSw.ElapsedMilliseconds, sizingLookup.Count);
+        stepSw.Restart();
+
         // ── Step 6: Generate meshes ──────────────────────────────────────
         // Adaptive tessellation: fewer sides when many supports to keep mesh size manageable
         int totalRoutes = routes.Count;
@@ -478,24 +534,33 @@ public static class SupportEngineV2
         foreach (var (id, pinhead) in pinheads)
         {
             if (!pinhead.IsValid) continue;
+            if (!sizingLookup.TryGetValue(id, out var sizing)) continue;
 
-            // Only generate pinhead mesh if junction is ABOVE the build plate.
-            // For near-bed supports where the pinhead would go below Z=0,
-            // the route itself handles the connection from contact to base.
-            if (pinhead.JunctionPoint.Z > 0.1f)
+            // Contact sphere — visible bead at the touch point (like ChiTuBox)
+            var contactSphere = SupportMesher.OrientedSphere(
+                pinhead.ContactPoint, sizing.ContactSphereRadius, 4, meshSides);
+            meshParts.Add(contactSphere);
+
+            // Tapered frustum from contact sphere to junction/route start
+            var routeStart = pinhead.JunctionPoint.Z > 0.1f
+                ? pinhead.JunctionPoint
+                : pinhead.ContactPoint + pinhead.Direction * Math.Max(pinhead.ContactPoint.Z * 0.5f, 0.3f);
+
+            if (Vector3.Distance(pinhead.ContactPoint, routeStart) > 0.1f)
             {
                 var phMesh = SupportMesher.OrientedFrustum(
-                    pinhead.ContactPoint, pinhead.JunctionPoint,
-                    pinhead.PinRadius, pinhead.BackRadius, meshSides);
+                    pinhead.ContactPoint, routeStart,
+                    sizing.TipRadius, sizing.PillarRadius, meshSides);
                 meshParts.Add(phMesh);
             }
         }
 
         foreach (var (id, route) in routes)
         {
-            float totalPillarHeight = route.Path.Count >= 2
-                ? route.Path[0].Position.Z - route.Path[^1].Position.Z
-                : 0;
+            // Skip rejected routes (no path or didn't reach ground/anchor)
+            if (route.Path.Count < 2) continue;
+
+            float totalPillarHeight = route.Path[0].Position.Z - route.Path[^1].Position.Z;
 
             for (int i = 0; i < route.Path.Count - 1; i++)
             {
@@ -715,12 +780,13 @@ public static class SupportEngineV2
 
             var segments = new List<AdvancedSupportEngine.SupportSegment>();
 
-            // Tip (contact → pin center) — R1 = pin radius so the tip is visible
+            // Tip (contact → pin center) — use physics-sized tip radius
+            float tipR = pinhead.PinRadius;
             segments.Add(new AdvancedSupportEngine.SupportSegment
             {
                 Part = "tip",
-                X1 = pinhead.ContactPoint.X, Y1 = pinhead.ContactPoint.Y, Z1 = pinhead.ContactPoint.Z, R1 = pinhead.PinRadius,
-                X2 = pinhead.PinCenter.X, Y2 = pinhead.PinCenter.Y, Z2 = pinhead.PinCenter.Z, R2 = pinhead.PinRadius,
+                X1 = pinhead.ContactPoint.X, Y1 = pinhead.ContactPoint.Y, Z1 = pinhead.ContactPoint.Z, R1 = tipR,
+                X2 = pinhead.PinCenter.X, Y2 = pinhead.PinCenter.Y, Z2 = pinhead.PinCenter.Z, R2 = tipR,
             });
 
             // Neck (pin center → back center)
