@@ -198,7 +198,18 @@ public static class MeshValidator
         var max = new Vector3(float.MinValue);
         foreach (var v in vertices) { min = Vector3.Min(min, v); max = Vector3.Max(max, v); }
 
-        var repaired = new StlMesh(vertices, min, max);
+        // Recompute normals from vertex winding for repaired mesh
+        int triCount2 = vertices.Length / 3;
+        var repairedNormals = new Vector3[triCount2];
+        for (int t = 0; t < triCount2; t++)
+        {
+            var e1 = vertices[t * 3 + 1] - vertices[t * 3];
+            var e2 = vertices[t * 3 + 2] - vertices[t * 3];
+            var n = Vector3.Cross(e1, e2);
+            float nl = n.Length();
+            repairedNormals[t] = nl > 1e-8f ? n / nl : Vector3.UnitZ;
+        }
+        var repaired = new StlMesh(vertices, repairedNormals, min, max);
         var finalResult = Validate(repaired);
 
         return (repaired, new ValidationResult

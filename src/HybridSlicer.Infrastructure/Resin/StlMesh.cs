@@ -10,13 +10,16 @@ namespace HybridSlicer.Infrastructure.Resin;
 public sealed class StlMesh
 {
     public Vector3[] Vertices { get; }  // 3 vertices per triangle
+    /// <summary>Per-triangle normals from the STL file header (outward-pointing from CAD).</summary>
+    public Vector3[] FileNormals { get; }
     public int TriangleCount { get; }
     public Vector3 Min { get; }
     public Vector3 Max { get; }
 
-    internal StlMesh(Vector3[] vertices, Vector3 min, Vector3 max)
+    internal StlMesh(Vector3[] vertices, Vector3[] fileNormals, Vector3 min, Vector3 max)
     {
         Vertices = vertices;
+        FileNormals = fileNormals;
         TriangleCount = vertices.Length / 3;
         Min = min;
         Max = max;
@@ -36,13 +39,18 @@ public sealed class StlMesh
             throw new InvalidOperationException($"STL claims {triCount} triangles but file is too short.");
 
         var vertices = new Vector3[triCount * 3];
+        var fileNormals = new Vector3[triCount];
         var min = new Vector3(float.MaxValue);
         var max = new Vector3(float.MinValue);
 
         var offset = 84;
         for (uint i = 0; i < triCount; i++)
         {
-            // Skip normal (12 bytes)
+            // Read normal from STL header (outward-pointing from CAD software)
+            var nx = BitConverter.ToSingle(data, offset);
+            var ny = BitConverter.ToSingle(data, offset + 4);
+            var nz = BitConverter.ToSingle(data, offset + 8);
+            fileNormals[i] = new Vector3(nx, ny, nz);
             offset += 12;
 
             for (int v = 0; v < 3; v++)
@@ -62,7 +70,7 @@ public sealed class StlMesh
             offset += 2;
         }
 
-        return new StlMesh(vertices, min, max);
+        return new StlMesh(vertices, fileNormals, min, max);
     }
 
     /// <summary>
@@ -83,7 +91,7 @@ public sealed class StlMesh
             max = Vector3.Max(max, v);
         }
 
-        return new StlMesh(newVerts, min, max);
+        return new StlMesh(newVerts, FileNormals, min, max); // normals unchanged by translate+scale
     }
 
     /// <summary>

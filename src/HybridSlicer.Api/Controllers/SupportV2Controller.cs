@@ -68,7 +68,9 @@ public sealed class SupportV2Controller : ControllerBase
         if (Enum.TryParse<LatticeBase.LatticePattern>(baseLatticePattern, true, out var lp))
             lattice = lp;
 
-        var (mesh, _) = MeshValidator.ValidateAndRepair(data);
+        // Parse directly from STL to preserve file normals (outward-pointing from CAD)
+        // MeshValidator would recompute normals from winding, losing interior/exterior info
+        var mesh = StlMesh.FromBinary(data);
 
         var result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig
         {
