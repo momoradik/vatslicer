@@ -716,11 +716,11 @@ public static class SupportEngineV2
 
             var segments = new List<AdvancedSupportEngine.SupportSegment>();
 
-            // Tip (contact → pin center)
+            // Tip (contact → pin center) — R1 = pin radius so the tip is visible
             segments.Add(new AdvancedSupportEngine.SupportSegment
             {
                 Part = "tip",
-                X1 = pinhead.ContactPoint.X, Y1 = pinhead.ContactPoint.Y, Z1 = pinhead.ContactPoint.Z, R1 = 0,
+                X1 = pinhead.ContactPoint.X, Y1 = pinhead.ContactPoint.Y, Z1 = pinhead.ContactPoint.Z, R1 = pinhead.PinRadius,
                 X2 = pinhead.PinCenter.X, Y2 = pinhead.PinCenter.Y, Z2 = pinhead.PinCenter.Z, R2 = pinhead.PinRadius,
             });
 

@@ -104,22 +104,20 @@ public static class PinheadOptimizer
         }
 
         // All phases failed with full geometry. For near-bed supports (Z < 3mm),
-        // create a short but structurally valid pinhead — these are needed for
-        // bed adhesion even if the full pinhead doesn't fit. For higher supports,
-        // reject entirely — a colliding support is worse than no support.
+        // create a compact but VISIBLE pinhead with minimum structural radius.
+        // For higher supports, reject entirely.
         if (contactPoint.Z < 3f)
         {
-            float shortScale = Math.Max(0.2f, contactPoint.Z / 3f);
+            // Minimum visible radius: 0.15mm pin, 0.3mm back — small but printable
+            float pinR = Math.Max(config.PinRadiusMm * 0.5f, 0.15f);
+            float backR = Math.Max(config.BackRadiusMm * 0.5f, 0.3f);
+            float w = Math.Max(contactPoint.Z * 0.3f, 0.3f);
             return MakePinhead(contactPoint, initialDir,
-                contactPoint + initialDir * (config.PinRadiusMm * shortScale),
-                contactPoint + initialDir * (config.PinRadiusMm * shortScale * 2),
-                contactPoint + initialDir * (config.PinRadiusMm * shortScale * 3),
-                config with
-                {
-                    PinRadiusMm = config.PinRadiusMm * shortScale,
-                    BackRadiusMm = config.BackRadiusMm * shortScale,
-                    WidthMm = config.WidthMm * shortScale,
-                }, 0, true);
+                contactPoint + initialDir * pinR,
+                contactPoint + initialDir * (pinR + w),
+                contactPoint + initialDir * (pinR + w + backR),
+                config with { PinRadiusMm = pinR, BackRadiusMm = backR, WidthMm = w },
+                0, true);
         }
 
         return MakePinhead(contactPoint, initialDir, contactPoint, contactPoint, contactPoint,
@@ -293,8 +291,8 @@ public static class PinheadOptimizer
         var backCenter = contact + dir * (totalLen - rBack - penetration);
         var junction = contact + dir * (totalLen - penetration);
 
-        // Check if junction is inside mesh — immediate reject
-        if (bvh.IsInside(junction))
+        // Check if junction is below build plate or inside mesh — immediate reject
+        if (junction.Z < -0.5f || bvh.IsInside(junction))
         {
             return MakePinhead(contact, dir, pinCenter, backCenter, junction, config, float.MinValue, false);
         }
