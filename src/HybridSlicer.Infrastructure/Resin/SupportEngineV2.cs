@@ -603,6 +603,56 @@ public static class SupportEngineV2
             routeData, allRegions, coverageGrid, null, config.MinSafetyFactor,
             sourceMesh: mesh, bvh: bvh);
 
+        // ── Step 7b: Structural feedback — re-route failed supports ──────
+        // If any supports failed buckling or tensile, increase their radius and re-route.
+        // This closes the feedback loop that PrusaSlicer uses: generate → validate → fix.
+        if (structuralResult.FailedBuckling > 0 || structuralResult.FailedTensile > 0)
+        {
+            var failedIds = new HashSet<string>(
+                structuralResult.Issues
+                    .Where(i => i.Category == "buckling" || i.Category == "tensile")
+                    .Select(i => i.SupportId));
+
+            int reRouted = 0;
+            for (int ri = 0; ri < routes.Count; ri++)
+            {
+                if (!failedIds.Contains(routes[ri].id)) continue;
+
+                var oldRoute = routes[ri];
+                var ph = pinheadLookup.TryGetValue(oldRoute.id, out var p) ? p : null;
+                if (ph == null) continue;
+
+                // Increase radius by 50% and re-route
+                float newRadius = Math.Max(ph.BackRadius * 1.5f, 1.0f);
+                var biggerCfg = routingConfig with
+                {
+                    PillarRadiusMm = newRadius,
+                    BaseRadiusMm = Math.Max(routingConfig.BaseRadiusMm, newRadius * 2.5f),
+                    WideningFactor = Math.Max(routingConfig.WideningFactor, 0.03f),
+                };
+
+                var newRoute = PillarRouter.Route(ph.JunctionPoint, newRadius, bvh, biggerCfg);
+                if (newRoute.Path.Count > 1)
+                {
+                    routes[ri] = (oldRoute.id, newRoute);
+                    reRouted++;
+                }
+            }
+
+            if (reRouted > 0)
+            {
+                Serilog.Log.Information("V2 Step 7b: Re-routed {Count} failed supports with larger radius", reRouted);
+
+                // Re-validate after re-routing
+                routeLookup = routes.ToDictionary(r => r.id, r => r.route);
+                routeData = routes.Select(r => (r.id, r.route,
+                    pinheadLookup.TryGetValue(r.id, out var ph2) ? ph2.ContactPoint.Z : r.route.Path[0].Position.Z)).ToList();
+                structuralResult = StructuralValidator.Validate(
+                    routeData, allRegions, coverageGrid, null, config.MinSafetyFactor,
+                    sourceMesh: mesh, bvh: bvh);
+            }
+        }
+
         Serilog.Log.Information("V2 Step 7 Validation: {Ms}ms (collisions: {Coll})", stepSw.ElapsedMilliseconds, collisionResult.CollidingSupports);
         stepSw.Restart();
 

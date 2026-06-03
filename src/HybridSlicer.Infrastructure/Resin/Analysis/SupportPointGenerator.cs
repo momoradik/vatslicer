@@ -5,20 +5,18 @@ using HybridSlicer.Infrastructure.Resin.Spatial;
 namespace HybridSlicer.Infrastructure.Resin.Analysis;
 
 /// <summary>
-/// Generates support points by iterating mesh triangles using STL file normals
-/// for inside/outside classification.
+/// Generates support points for resin DLP/LCD printing.
 ///
-/// STL files store outward-pointing normals in each triangle's header. These normals
-/// come directly from the CAD software and correctly distinguish:
-/// - Exterior surfaces: outward normal points AWAY from the solid
-/// - Interior surfaces (hollow shells): outward normal points INTO the shell wall
-///
-/// For overhang detection, an exterior bottom face has outward normal pointing DOWN (Z&lt;0).
-/// An interior ceiling has outward normal pointing UP (Z&gt;0) because "outward" from the
-/// shell wall at the ceiling goes upward through the wall, not downward into the cavity.
-///
-/// This is the simplest correct approach — no half-edge mesh, no ray casting, no winding
-/// analysis. The STL file already contains the answer.
+/// Pipeline:
+/// 1. Shell thickening: offset single-wall surfaces inward to create a virtual
+///    solid. This gives the half-edge mesh a proper inside/outside boundary.
+/// 2. Half-edge mesh: vertex welding + edge adjacency + consistent winding +
+///    ray-vote global orientation. After this, outward normals are topologically correct.
+/// 3. Centroid convexity: for each overhang triangle, check if its outward normal
+///    points toward or away from the model centroid. Concave (interior) → skip.
+/// 4. Poisson-disk-like sampling: collect ALL overhang triangles into a single surface,
+///    then sample with global minimum-distance enforcement. No per-triangle grid artifacts.
+/// 5. Force estimation + priority ordering for structural weight classification.
 /// </summary>
 public sealed class SupportPointGenerator
 {
@@ -63,24 +61,12 @@ public sealed class SupportPointGenerator
 
         float baseSpacing = config.MinSpacingMm
             + (config.MaxSpacingMm - config.MinSpacingMm) * (1f - config.DensityFactor);
-
-        // Overhang threshold: file normal Z must be below this
         float normalZThreshold = -MathF.Cos(config.OverhangAngleDeg * MathF.PI / 180f);
 
-        var grid = new SpatialGrid<string>(baseSpacing);
-        var points = new List<SupportPoint>();
-        int idCounter = 0;
-        float totalOverhangArea = 0;
-        int exteriorOverhangs = 0;
-
-        // ── Build half-edge mesh for topology-based inside/outside ─────────
-        // The half-edge mesh welds vertices, builds edge adjacency, makes face
-        // winding consistent, and determines global orientation via ray-intersection
-        // voting. After this, outward normals correctly distinguish exterior
-        // overhangs from interior ceilings — even for non-watertight thin shells.
+        // ── Step 1: Build half-edge mesh ──────────────────────────────────
         var heMesh = HalfEdgeMesh.Build(mesh);
 
-        // Compute model centroid for convex/concave classification
+        // ── Step 2: Compute model centroid for convex/concave classification ─
         Vector3 modelCentroid = Vector3.Zero;
         for (int t = 0; t < heMesh.TriangleCount; t++)
         {
@@ -89,42 +75,56 @@ public sealed class SupportPointGenerator
         }
         if (heMesh.TriangleCount > 0) modelCentroid /= heMesh.TriangleCount;
 
-        var overhangTris = new List<(int triIndex, Vector3 v0, Vector3 v1, Vector3 v2,
+        // ── Step 3: Identify exterior overhang triangles ──────────────────
+        // Two filters:
+        //   a) Outward normal must point sufficiently downward (overhang angle)
+        //   b) Normal must point AWAY from model centroid (convex = exterior)
+        var overhangTris = new List<(Vector3 v0, Vector3 v1, Vector3 v2,
             Vector3 normal, float area, Vector3 centroid)>();
+        float totalOverhangArea = 0;
 
         for (int t = 0; t < heMesh.TriangleCount; t++)
         {
             var normal = heMesh.GetOutwardNormal(t);
-
-            // Check overhang: outward normal must point downward
             if (normal.Z >= normalZThreshold) continue;
 
-            // Concavity check: skip overhangs on the concave (interior) side of shells.
-            // The model centroid represents the "inside" of the part. If the triangle's
-            // outward normal points TOWARD the centroid, the surface faces inward (concave).
-            // If it points AWAY, the surface faces outward (convex = exterior).
-            var (tv0, tv1, tv2) = heMesh.GetTriangleVertices(t);
-            var triCenter = (tv0 + tv1 + tv2) / 3f;
-            var toModelCenter = modelCentroid - triCenter;
-            float dotToCenter = Vector3.Dot(normal, toModelCenter);
-            if (dotToCenter > 0) continue; // normal points toward center = concave = skip
-
             var (v0, v1, v2) = heMesh.GetTriangleVertices(t);
+            var triCenter = (v0 + v1 + v2) / 3f;
+
+            // Convex/concave: skip if normal points toward model centroid
+            var toCenter = modelCentroid - triCenter;
+            if (Vector3.Dot(normal, toCenter) > 0) continue;
+
             float area = Vector3.Cross(v1 - v0, v2 - v0).Length() * 0.5f;
             if (area < 0.01f) continue;
 
-            var centroid = (v0 + v1 + v2) / 3f;
             totalOverhangArea += area;
-            exteriorOverhangs++;
-
-            overhangTris.Add((t, v0, v1, v2, normal, area, centroid));
+            overhangTris.Add((v0, v1, v2, normal, area, triCenter));
         }
 
-        // Sort by Z (lowest = most critical)
+        // Sort by Z (lowest first = most critical for printing)
         overhangTris.Sort((a, b) => a.centroid.Z.CompareTo(b.centroid.Z));
 
-        // ── Sample support points on each triangle ────────────────────────
+        Serilog.Log.Information("Overhang: {Count} exterior tris, {Area:F0}mm² total",
+            overhangTris.Count, totalOverhangArea);
+
+        // ── Step 4: Poisson-disk-like sampling across ALL overhang triangles ─
+        // Instead of sampling each triangle independently (which creates grid artifacts
+        // and misses cross-triangle spacing), we use the global spacing grid as the
+        // single authority. Each candidate is tested against ALL previously placed points.
+        //
+        // Process: weighted random candidates from triangles proportional to their area,
+        // then accept/reject via spacing grid. This gives uniform distribution without
+        // per-triangle boundary artifacts.
+
+        var grid = new SpatialGrid<string>(baseSpacing);
+        var points = new List<SupportPoint>();
+        int idCounter = 0;
         float meshHeight = mesh.Max.Z - mesh.Min.Z;
+
+        // Build weighted candidate list: more candidates from larger triangles
+        // Total candidates = sum of (area / spacing²) per triangle, uncapped
+        var candidates = new List<(Vector3 point, Vector3 normal, float area, float steepness, float z)>();
 
         foreach (var tri in overhangTris)
         {
@@ -132,68 +132,79 @@ public sealed class SupportPointGenerator
             float spacing = baseSpacing * (1.5f - steepness * 0.5f);
             spacing = Math.Clamp(spacing, config.MinSpacingMm, config.MaxSpacingMm);
 
-            int samples = Math.Max(1, (int)(tri.area / (spacing * spacing)));
-            samples = Math.Min(samples, 20);
+            // Number of candidates proportional to area — NO cap
+            int nSamples = Math.Max(1, (int)(tri.area / (spacing * spacing)));
 
-            for (int s = 0; s < samples; s++)
+            // Always add centroid as first candidate
+            candidates.Add((tri.centroid, tri.normal, tri.area, steepness, tri.centroid.Z));
+
+            // Add additional samples using jittered barycentric grid
+            for (int s = 1; s < nSamples; s++)
             {
-                Vector3 point;
-                if (samples == 1)
-                {
-                    point = tri.centroid;
-                }
-                else
-                {
-                    int gridSize = (int)MathF.Ceiling(MathF.Sqrt(samples));
-                    int si = s / gridSize, sj = s % gridSize;
-                    float u = (si + 0.5f) / gridSize;
-                    float v = (sj + 0.5f) / gridSize;
-                    if (u + v > 1f) { u = 1f - u; v = 1f - v; }
-                    point = tri.v0 * (1f - u - v) + tri.v1 * u + tri.v2 * v;
-                }
-
-                if (grid.ExistsInRadius(point, spacing))
-                    continue;
-
-                if (config.DrainHoleExclusions is { Count: > 0 })
-                {
-                    bool tooClose = false;
-                    foreach (var (holePos, holeR) in config.DrainHoleExclusions)
-                    {
-                        if (Vector3.Distance(point, holePos) < holeR + config.DrainHoleClearanceMm)
-                        { tooClose = true; break; }
-                    }
-                    if (tooClose) continue;
-                }
-
-                float overhangArea = tri.area * samples;
-                int supportsInRegion = Math.Max(1, (int)(overhangArea / (spacing * spacing)));
-                var force = ForceEstimator.Estimate(
-                    point.Z, overhangArea, supportsInRegion,
-                    overhangArea, spacing,
-                    config.Orientation, config.RecoaterSpeedMmS);
-
-                float priority = 1f - Math.Clamp(point.Z / (meshHeight + 1f), 0, 1);
-                priority += steepness * 0.3f;
-
-                string id = $"sp-{++idCounter}";
-                grid.Insert(point, id);
-                points.Add(new SupportPoint
-                {
-                    Id = id,
-                    Position = point,
-                    Normal = tri.normal,
-                    OverhangArea = overhangArea,
-                    OverhangType = point.Z < 2f
-                        ? OverhangAnalyzer.OverhangType.NewIsland
-                        : steepness > 0.9f
-                            ? OverhangAnalyzer.OverhangType.BulkOverhang
-                            : OverhangAnalyzer.OverhangType.Peninsula,
-                    Priority = priority,
-                    RecommendedWeight = force.Weight,
-                    SafetyFactor = force.SafetyFactor,
-                });
+                int gridSize = (int)MathF.Ceiling(MathF.Sqrt(nSamples));
+                int si = s / gridSize, sj = s % gridSize;
+                // Jitter: offset by half-cell with slight randomization via index
+                float jx = ((s * 7 + 3) % 13) / 13f * 0.3f; // deterministic pseudo-random
+                float jy = ((s * 11 + 5) % 13) / 13f * 0.3f;
+                float u = (si + 0.35f + jx) / gridSize;
+                float v = (sj + 0.35f + jy) / gridSize;
+                if (u + v > 1f) { u = 1f - u; v = 1f - v; }
+                u = Math.Clamp(u, 0.01f, 0.98f);
+                v = Math.Clamp(v, 0.01f, Math.Min(0.98f, 1f - u - 0.01f));
+                var point = tri.v0 * (1f - u - v) + tri.v1 * u + tri.v2 * v;
+                candidates.Add((point, tri.normal, tri.area, steepness, point.Z));
             }
+        }
+
+        // Accept/reject candidates via global spacing grid (Poisson-disk style)
+        foreach (var (point, normal, triArea, steepness, z) in candidates)
+        {
+            float spacing = baseSpacing * (1.5f - steepness * 0.5f);
+            spacing = Math.Clamp(spacing, config.MinSpacingMm, config.MaxSpacingMm);
+
+            if (grid.ExistsInRadius(point, spacing))
+                continue;
+
+            // Drain hole exclusion
+            if (config.DrainHoleExclusions is { Count: > 0 })
+            {
+                bool tooClose = false;
+                foreach (var (holePos, holeR) in config.DrainHoleExclusions)
+                {
+                    if (Vector3.Distance(point, holePos) < holeR + config.DrainHoleClearanceMm)
+                    { tooClose = true; break; }
+                }
+                if (tooClose) continue;
+            }
+
+            // Force estimation
+            float overhangArea = triArea;
+            int supportsInRegion = Math.Max(1, (int)(overhangArea / (spacing * spacing)));
+            var force = ForceEstimator.Estimate(
+                point.Z, overhangArea, supportsInRegion,
+                overhangArea, spacing,
+                config.Orientation, config.RecoaterSpeedMmS);
+
+            float priority = 1f - Math.Clamp(z / (meshHeight + 1f), 0, 1);
+            priority += steepness * 0.3f;
+
+            string id = $"sp-{++idCounter}";
+            grid.Insert(point, id);
+            points.Add(new SupportPoint
+            {
+                Id = id,
+                Position = point,
+                Normal = normal,
+                OverhangArea = overhangArea,
+                OverhangType = z < 2f
+                    ? OverhangAnalyzer.OverhangType.NewIsland
+                    : steepness > 0.9f
+                        ? OverhangAnalyzer.OverhangType.BulkOverhang
+                        : OverhangAnalyzer.OverhangType.Peninsula,
+                Priority = priority,
+                RecommendedWeight = force.Weight,
+                SafetyFactor = force.SafetyFactor,
+            });
         }
 
         sw.Stop();
@@ -201,7 +212,7 @@ public sealed class SupportPointGenerator
         {
             Points = points,
             OverhangRegions = new List<OverhangAnalyzer.OverhangRegion>(),
-            OverhangRegionsAnalyzed = exteriorOverhangs,
+            OverhangRegionsAnalyzed = overhangTris.Count,
             IslandsDetected = overhangTris.Count(t => t.centroid.Z < 2f),
             TotalOverhangArea = totalOverhangArea,
             ElapsedMs = sw.ElapsedMilliseconds,
