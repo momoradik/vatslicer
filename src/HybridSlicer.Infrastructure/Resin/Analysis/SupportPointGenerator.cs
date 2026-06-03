@@ -109,6 +109,9 @@ public sealed class SupportPointGenerator
             if (normal.Z >= normalZThreshold) continue;
 
             var centroid = (v0 + v1 + v2) / 3f;
+
+            // No Z threshold — bottom-face supports are needed for bed adhesion.
+            // The pinhead optimizer handles short supports with reduced dimensions.
             totalOverhangArea += area;
 
             overhangTris.Add((t, v0, v1, v2, normal, area, centroid));

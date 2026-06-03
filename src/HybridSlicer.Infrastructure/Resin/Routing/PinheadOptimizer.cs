@@ -6,27 +6,30 @@ namespace HybridSlicer.Infrastructure.Resin.Routing;
 /// <summary>
 /// Optimizes pinhead orientation for maximum clearance from the model surface.
 ///
-/// PrusaSlicer uses NLopt (MLSL with Subplex, 100 iterations). We implement an
-/// equivalent iterative search over polar/azimuth angles with BVH beam-cast collision.
+/// Uses a two-phase approach inspired by PrusaSlicer's NLopt-based optimizer:
 ///
-/// Algorithm:
-/// 1. Start from surface normal, clamp to max bridge_slope (45 deg) from vertical
-/// 2. Volumetric collision check: 16 rays in cone pattern around pinhead path
-/// 3. If collision, search over a grid of (polar, azimuth) angles for best clearance
-/// 4. If still colliding, reduce head radius and retry
-/// 5. If all fails, mark as "needs anchor"
+/// Phase 1: Evaluate initial direction (surface normal, clamped to max slope).
+///          If valid, return immediately — no search needed.
 ///
-/// The optimizer produces a fully validated pinhead with:
-/// - Pin sphere position (contact point on model)
-/// - Back sphere position (junction to pillar)
-/// - Head direction vector
-/// - Clearance distance from nearest model surface
+/// Phase 2: Nelder-Mead simplex optimization in (polar, azimuth) space.
+///          Maximizes a clearance objective function that evaluates the full
+///          pinhead geometry (not just 4 sample points) using beam-cast along
+///          the pin→junction path with interpolated radius at N cross-sections.
+///
+/// Phase 3: Radius reduction with re-optimization at each scale.
+///
+/// If all phases fail, the pinhead is marked invalid (NOT a micro-fallback —
+/// a structurally useless pinhead is worse than no pinhead).
+///
+/// Clearance evaluation:
+///   Instead of checking 4 discrete points (pin, mid, back, junction),
+///   we sample N evenly-spaced cross-sections along the pinhead path.
+///   At each cross-section, beam-cast with the interpolated radius
+///   (pin radius → back radius along the cone). This catches collisions
+///   that fall between the old 4 sample points.
 /// </summary>
 public static class PinheadOptimizer
 {
-    /// <summary>
-    /// Pinhead geometry result.
-    /// </summary>
     public sealed record Pinhead
     {
         public required Vector3 ContactPoint { get; init; }
@@ -42,141 +45,243 @@ public static class PinheadOptimizer
         public required bool NeedsAnchor { get; init; }
     }
 
-    /// <summary>
-    /// Pinhead configuration.
-    /// </summary>
     public sealed record PinheadConfig
     {
         public float PinRadiusMm { get; init; } = 0.2f;
         public float BackRadiusMm { get; init; } = 0.5f;
         public float WidthMm { get; init; } = 1.0f;
         public float PenetrationMm { get; init; } = 0.2f;
-        /// <summary>Max angle from vertical (radians). Default 45 deg.</summary>
         public float MaxBridgeSlope { get; init; } = MathF.PI / 4f;
-        /// <summary>Number of rays for volumetric collision check.</summary>
         public int CollisionRays { get; init; } = 16;
-        /// <summary>Minimum clearance distance (mm).</summary>
         public float MinClearanceMm { get; init; } = 0.1f;
     }
+
+    // ── Constants for Nelder-Mead ──────────────────────────────────────
+
+    private const int NM_MAX_ITERATIONS = 60;
+    private const float NM_ALPHA = 1.0f;   // reflection
+    private const float NM_GAMMA = 2.0f;   // expansion
+    private const float NM_RHO   = 0.5f;   // contraction
+    private const float NM_SIGMA = 0.5f;   // shrink
+    private const float NM_TOLERANCE = 0.001f;
+
+    // Number of cross-sections to check along pinhead path
+    private const int CLEARANCE_SAMPLES = 8;
 
     /// <summary>
     /// Optimize pinhead placement at the given contact point with the given surface normal.
     /// </summary>
     public static Pinhead Optimize(Vector3 contactPoint, Vector3 surfaceNormal, AabbBvh bvh, PinheadConfig config)
     {
-        // Step 1: compute initial direction from surface normal
+        // Phase 1: try initial direction (surface normal clamped to max slope)
         var initialDir = ComputeInitialDirection(surfaceNormal, config.MaxBridgeSlope);
-
-        // Step 2: try the initial direction with full collision check
-        var result = TryPinhead(contactPoint, initialDir, config, bvh);
+        var result = EvaluatePinhead(contactPoint, initialDir, config, bvh);
         if (result.IsValid)
             return result;
 
-        // Step 3: two-level search — coarse grid then refinement around best
-        var bestResult = result;
-        float bestClearance = result.Clearance;
-        float bestPolar = MathF.PI, bestAzimuth = 0;
+        // Phase 2: Nelder-Mead optimization in (polar, azimuth) space
+        var optimized = NelderMeadOptimize(contactPoint, surfaceNormal, config, bvh);
+        if (optimized.IsValid)
+            return optimized;
 
-        // Search from straight down (polar=0) to max tilt (polar=maxSlope)
-        float polarMin = 0f;
-        float polarMax = config.MaxBridgeSlope;
-
-        // Level 1: coarse search — 12 azimuth x 5 polar = 60 candidates
-        for (int ai = 0; ai < 12; ai++)
+        // Phase 3: reduce radius and re-optimize at each scale
+        for (float scale = 0.7f; scale >= 0.3f; scale -= 0.2f)
         {
-            float azimuth = 2f * MathF.PI * ai / 12;
-            for (int pi = 0; pi < 5; pi++)
-            {
-                float polar = polarMin + (polarMax - polarMin) * pi / 4f;
-                var dir = SphericalToCartesian(polar, azimuth);
-                var candidate = TryPinhead(contactPoint, dir, config, bvh);
-                if (candidate.Clearance > bestClearance)
-                {
-                    bestClearance = candidate.Clearance;
-                    bestResult = candidate;
-                    bestPolar = polar;
-                    bestAzimuth = azimuth;
-                    if (candidate.IsValid) break;
-                }
-            }
-            if (bestResult.IsValid) break;
-        }
-
-        // Level 2: refine around best — 6 azimuth x 5 polar around the winner
-        if (!bestResult.IsValid)
-        {
-            float azStep = MathF.PI / 6f; // ±30° around best
-            float polStep = (polarMax - polarMin) / 6f;
-            for (int ai = -3; ai <= 3; ai++)
-            for (int pi = -2; pi <= 2; pi++)
-            {
-                float azimuth = bestAzimuth + ai * azStep / 3f;
-                float polar = Math.Clamp(bestPolar + pi * polStep, polarMin, polarMax);
-                var dir = SphericalToCartesian(polar, azimuth);
-                var candidate = TryPinhead(contactPoint, dir, config, bvh);
-                if (candidate.Clearance > bestClearance)
-                {
-                    bestClearance = candidate.Clearance;
-                    bestResult = candidate;
-                    if (candidate.IsValid) break;
-                }
-            }
-        }
-
-        // Level 3: try with reduced penetration if still failing
-        if (!bestResult.IsValid && config.PenetrationMm > 0.05f)
-        {
-            var reducedConfig = config with { PenetrationMm = config.PenetrationMm * 0.5f };
-            var candidate = TryPinhead(contactPoint, bestResult.Direction, reducedConfig, bvh);
-            if (candidate.IsValid) return candidate;
-        }
-
-        if (bestResult.IsValid)
-            return bestResult;
-
-        // Step 4: reduce radius and retry with the best direction found
-        for (float scale = 0.8f; scale >= 0.2f; scale -= 0.15f)
-        {
-            var smallConfig = new PinheadConfig
+            var smallConfig = config with
             {
                 PinRadiusMm = config.PinRadiusMm * scale,
                 BackRadiusMm = config.BackRadiusMm * scale,
                 WidthMm = config.WidthMm * scale,
-                PenetrationMm = config.PenetrationMm,
-                MaxBridgeSlope = config.MaxBridgeSlope,
-                CollisionRays = config.CollisionRays,
-                MinClearanceMm = config.MinClearanceMm,
             };
 
-            var candidate = TryPinhead(contactPoint, bestResult.Direction, smallConfig, bvh);
-            if (candidate.IsValid) return candidate;
+            // Try initial direction with smaller pinhead
+            var small = EvaluatePinhead(contactPoint, initialDir, smallConfig, bvh);
+            if (small.IsValid) return small;
+
+            // Try Nelder-Mead with smaller pinhead
+            var smallOpt = NelderMeadOptimize(contactPoint, surfaceNormal, smallConfig, bvh);
+            if (smallOpt.IsValid) return smallOpt;
         }
 
-        // Step 5: create a minimal direct-contact pinhead (no sphere-cone-sphere)
-        // This is used at tight concave corners where the full pinhead can't fit.
-        // The pillar connects directly to the contact point with a tiny transition.
-        var minimalDir = ComputeInitialDirection(surfaceNormal, config.MaxBridgeSlope);
-        float minR = config.PinRadiusMm * 0.15f; // micro radius
-        float minLen = minR * 2f;
-        return new Pinhead
+        // All phases failed with full geometry. For near-bed supports (Z < 3mm),
+        // create a short but structurally valid pinhead — these are needed for
+        // bed adhesion even if the full pinhead doesn't fit. For higher supports,
+        // reject entirely — a colliding support is worse than no support.
+        if (contactPoint.Z < 3f)
         {
-            ContactPoint = contactPoint,
-            Direction = minimalDir,
-            PinCenter = contactPoint + minimalDir * minR,
-            BackCenter = contactPoint + minimalDir * minLen,
-            JunctionPoint = contactPoint + minimalDir * (minLen + minR),
-            PinRadius = minR,
-            BackRadius = minR,
-            Width = minLen,
-            Clearance = 0,
-            IsValid = true, // always valid — it's just a micro contact point
-            NeedsAnchor = false,
-        };
+            float shortScale = Math.Max(0.2f, contactPoint.Z / 3f);
+            return MakePinhead(contactPoint, initialDir,
+                contactPoint + initialDir * (config.PinRadiusMm * shortScale),
+                contactPoint + initialDir * (config.PinRadiusMm * shortScale * 2),
+                contactPoint + initialDir * (config.PinRadiusMm * shortScale * 3),
+                config with
+                {
+                    PinRadiusMm = config.PinRadiusMm * shortScale,
+                    BackRadiusMm = config.BackRadiusMm * shortScale,
+                    WidthMm = config.WidthMm * shortScale,
+                }, 0, true);
+        }
+
+        return MakePinhead(contactPoint, initialDir, contactPoint, contactPoint, contactPoint,
+            config, result.Clearance, false) with { NeedsAnchor = true };
     }
 
-    // ── Internal ─────────────────────────────────────────────────────────
+    // ── Nelder-Mead Simplex Optimizer ──────────────────────────────────
 
-    private static Pinhead TryPinhead(Vector3 contact, Vector3 dir, PinheadConfig config, AabbBvh bvh)
+    /// <summary>
+    /// Nelder-Mead simplex optimization in 2D (polar, azimuth) parameter space.
+    /// Maximizes clearance (minimizes negative clearance).
+    /// Returns the best pinhead found.
+    /// </summary>
+    private static Pinhead NelderMeadOptimize(Vector3 contact, Vector3 normal, PinheadConfig config, AabbBvh bvh)
+    {
+        float polarMax = config.MaxBridgeSlope;
+
+        // Initialize simplex with 3 vertices (2D optimization → 3 points)
+        // Start from the initial direction's polar/azimuth, plus two perturbations
+        var initDir = ComputeInitialDirection(normal, polarMax);
+        float initPolar = MathF.Acos(Math.Clamp(-initDir.Z, -1f, 1f));
+        float initAzimuth = MathF.Atan2(initDir.Y, initDir.X);
+
+        var simplex = new (float polar, float azimuth)[3];
+        simplex[0] = (initPolar, initAzimuth);
+        simplex[1] = (Math.Clamp(initPolar + polarMax * 0.3f, 0, polarMax), initAzimuth + 0.8f);
+        simplex[2] = (Math.Clamp(initPolar - polarMax * 0.2f, 0, polarMax), initAzimuth - 0.8f);
+
+        // Evaluate initial simplex
+        var values = new float[3];
+        var pinheads = new Pinhead[3];
+        for (int i = 0; i < 3; i++)
+        {
+            var dir = SphericalToCartesian(simplex[i].polar, simplex[i].azimuth);
+            pinheads[i] = EvaluatePinhead(contact, dir, config, bvh);
+            values[i] = -pinheads[i].Clearance; // minimize negative clearance = maximize clearance
+            if (pinheads[i].IsValid) return pinheads[i]; // early exit
+        }
+
+        // Iterate
+        for (int iter = 0; iter < NM_MAX_ITERATIONS; iter++)
+        {
+            // Sort: values[0] ≤ values[1] ≤ values[2] (best → worst)
+            SortSimplex(simplex, values, pinheads);
+
+            if (pinheads[0].IsValid) return pinheads[0];
+
+            // Check convergence
+            float spread = MathF.Abs(values[2] - values[0]);
+            if (spread < NM_TOLERANCE) break;
+
+            // Centroid of best 2 points
+            float cPolar = (simplex[0].polar + simplex[1].polar) / 2f;
+            float cAzimuth = (simplex[0].azimuth + simplex[1].azimuth) / 2f;
+
+            // Reflection
+            float rPolar = Math.Clamp(cPolar + NM_ALPHA * (cPolar - simplex[2].polar), 0, polarMax);
+            float rAzimuth = cAzimuth + NM_ALPHA * (cAzimuth - simplex[2].azimuth);
+            var rDir = SphericalToCartesian(rPolar, rAzimuth);
+            var rPinhead = EvaluatePinhead(contact, rDir, config, bvh);
+            float rVal = -rPinhead.Clearance;
+            if (rPinhead.IsValid) return rPinhead;
+
+            if (rVal < values[1])
+            {
+                if (rVal < values[0])
+                {
+                    // Expansion
+                    float ePolar = Math.Clamp(cPolar + NM_GAMMA * (rPolar - cPolar), 0, polarMax);
+                    float eAzimuth = cAzimuth + NM_GAMMA * (rAzimuth - cAzimuth);
+                    var eDir = SphericalToCartesian(ePolar, eAzimuth);
+                    var ePinhead = EvaluatePinhead(contact, eDir, config, bvh);
+                    float eVal = -ePinhead.Clearance;
+                    if (ePinhead.IsValid) return ePinhead;
+
+                    if (eVal < rVal)
+                    {
+                        simplex[2] = (ePolar, eAzimuth);
+                        values[2] = eVal;
+                        pinheads[2] = ePinhead;
+                    }
+                    else
+                    {
+                        simplex[2] = (rPolar, rAzimuth);
+                        values[2] = rVal;
+                        pinheads[2] = rPinhead;
+                    }
+                }
+                else
+                {
+                    // Accept reflection
+                    simplex[2] = (rPolar, rAzimuth);
+                    values[2] = rVal;
+                    pinheads[2] = rPinhead;
+                }
+            }
+            else
+            {
+                // Contraction
+                float kPolar = Math.Clamp(cPolar + NM_RHO * (simplex[2].polar - cPolar), 0, polarMax);
+                float kAzimuth = cAzimuth + NM_RHO * (simplex[2].azimuth - cAzimuth);
+                var kDir = SphericalToCartesian(kPolar, kAzimuth);
+                var kPinhead = EvaluatePinhead(contact, kDir, config, bvh);
+                float kVal = -kPinhead.Clearance;
+                if (kPinhead.IsValid) return kPinhead;
+
+                if (kVal < values[2])
+                {
+                    simplex[2] = (kPolar, kAzimuth);
+                    values[2] = kVal;
+                    pinheads[2] = kPinhead;
+                }
+                else
+                {
+                    // Shrink toward best
+                    for (int i = 1; i < 3; i++)
+                    {
+                        simplex[i] = (
+                            simplex[0].polar + NM_SIGMA * (simplex[i].polar - simplex[0].polar),
+                            simplex[0].azimuth + NM_SIGMA * (simplex[i].azimuth - simplex[0].azimuth)
+                        );
+                        simplex[i] = (Math.Clamp(simplex[i].polar, 0, polarMax), simplex[i].azimuth);
+                        var sDir = SphericalToCartesian(simplex[i].polar, simplex[i].azimuth);
+                        pinheads[i] = EvaluatePinhead(contact, sDir, config, bvh);
+                        values[i] = -pinheads[i].Clearance;
+                        if (pinheads[i].IsValid) return pinheads[i];
+                    }
+                }
+            }
+        }
+
+        // Return best found (may not be valid)
+        SortSimplex(simplex, values, pinheads);
+        return pinheads[0];
+    }
+
+    private static void SortSimplex(
+        (float polar, float azimuth)[] simplex,
+        float[] values,
+        Pinhead[] pinheads)
+    {
+        // Simple 3-element sort
+        for (int i = 0; i < 2; i++)
+        for (int j = i + 1; j < 3; j++)
+        {
+            if (values[j] < values[i])
+            {
+                (simplex[i], simplex[j]) = (simplex[j], simplex[i]);
+                (values[i], values[j]) = (values[j], values[i]);
+                (pinheads[i], pinheads[j]) = (pinheads[j], pinheads[i]);
+            }
+        }
+    }
+
+    // ── Continuous Pinhead Evaluation ──────────────────────────────────
+
+    /// <summary>
+    /// Evaluate a pinhead at the given direction with continuous collision checking.
+    /// Samples N cross-sections along the pin→junction path, each with beam-cast
+    /// at the interpolated radius. This catches collisions between the old 4-point check.
+    /// </summary>
+    private static Pinhead EvaluatePinhead(Vector3 contact, Vector3 dir, PinheadConfig config, AabbBvh bvh)
     {
         float rPin = config.PinRadiusMm;
         float rBack = config.BackRadiusMm;
@@ -188,54 +293,64 @@ public static class PinheadOptimizer
         var backCenter = contact + dir * (totalLen - rBack - penetration);
         var junction = contact + dir * (totalLen - penetration);
 
-        // Volumetric collision check along the pinhead path
-        // Check at pin center, midpoint, and back center
+        // Check if junction is inside mesh — immediate reject
+        if (bvh.IsInside(junction))
+        {
+            return MakePinhead(contact, dir, pinCenter, backCenter, junction, config, float.MinValue, false);
+        }
+
+        // Continuous clearance check: sample N points along the pinhead path
+        // from pinCenter to junction, with interpolated radius at each point.
         float minClearance = float.MaxValue;
+        float pathLen = Vector3.Distance(pinCenter, junction);
 
-        // Check pin sphere region
-        float c1 = bvh.BeamCast(pinCenter, dir, rPin, config.CollisionRays);
-        // But exclude the first hit if it's the model surface itself (within penetration distance)
-        // Use closest point distance instead for the pin region
-        var cpPin = bvh.ClosestPoint(pinCenter);
-        if (cpPin.HasValue) minClearance = Math.Min(minClearance, cpPin.Value.Distance);
-
-        // Check back sphere region
-        var cpBack = bvh.ClosestPoint(backCenter);
-        if (cpBack.HasValue)
+        if (pathLen < 0.01f)
         {
-            float backClearance = cpBack.Value.Distance - rBack;
-            minClearance = Math.Min(minClearance, backClearance);
+            return MakePinhead(contact, dir, pinCenter, backCenter, junction, config, 0, false);
         }
 
-        // Check junction point
-        var cpJunct = bvh.ClosestPoint(junction);
-        if (cpJunct.HasValue)
+        for (int i = 0; i < CLEARANCE_SAMPLES; i++)
         {
-            float junctClearance = cpJunct.Value.Distance - rBack;
-            minClearance = Math.Min(minClearance, junctClearance);
+            float t = (float)i / (CLEARANCE_SAMPLES - 1); // 0 to 1 along path
+            var samplePoint = Vector3.Lerp(pinCenter, junction, t);
+
+            // Interpolate radius: pin sphere → cone → back sphere
+            // t=0: rPin, t=1: rBack (linear interpolation through the cone)
+            float sampleRadius = rPin + (rBack - rPin) * t;
+
+            // ClosestPoint check at this cross-section
+            var cp = bvh.ClosestPoint(samplePoint);
+            if (cp.HasValue)
+            {
+                float clearance = cp.Value.Distance - sampleRadius;
+
+                // Near the contact point (t < 0.2), allow negative clearance
+                // (the pin sphere penetrates the model surface by design)
+                if (t < 0.2f)
+                    clearance = Math.Max(clearance, -rPin);
+
+                minClearance = Math.Min(minClearance, clearance);
+            }
         }
 
-        // Check midpoint of the connecting cone
-        var midPoint = (pinCenter + backCenter) / 2f;
-        var cpMid = bvh.ClosestPoint(midPoint);
-        if (cpMid.HasValue)
+        // Also do a beam-cast along the full path for ray-based collision detection
+        var pathDir = Vector3.Normalize(junction - pinCenter);
+        float beamClearance = bvh.BeamCast(pinCenter, pathDir, rBack, Math.Min(config.CollisionRays, 8), pathLen);
+        if (beamClearance < pathLen * 0.8f)
         {
-            float midR = (rPin + rBack) / 2f;
-            float midClearance = cpMid.Value.Distance - midR;
-            minClearance = Math.Min(minClearance, midClearance);
+            // Beam hits mesh along the path — reduce clearance
+            minClearance = Math.Min(minClearance, beamClearance - pathLen);
         }
 
-        // Also check if the junction point is inside the mesh
-        bool junctionInside = bvh.IsInside(junction);
+        // Validity: clearance must be positive (except near contact where penetration is expected)
+        bool isValid = minClearance > -rPin * 0.3f;
 
-        // The pin sphere SHOULD be near the surface (it penetrates), so
-        // we allow negative clearance for the pin but not for back/junction
-        bool isValid = !junctionInside && minClearance > -rPin * 0.5f;
+        return MakePinhead(contact, dir, pinCenter, backCenter, junction, config, minClearance, isValid);
+    }
 
-        // For the back sphere and junction, require positive clearance
-        if (cpBack.HasValue && cpBack.Value.Distance < rBack * 0.5f && !IsNearContact(cpBack.Value.Point, contact, totalLen))
-            isValid = false;
-
+    private static Pinhead MakePinhead(Vector3 contact, Vector3 dir, Vector3 pinCenter,
+        Vector3 backCenter, Vector3 junction, PinheadConfig config, float clearance, bool isValid)
+    {
         return new Pinhead
         {
             ContactPoint = contact,
@@ -243,39 +358,29 @@ public static class PinheadOptimizer
             PinCenter = pinCenter,
             BackCenter = backCenter,
             JunctionPoint = junction,
-            PinRadius = rPin,
-            BackRadius = rBack,
-            Width = width,
-            Clearance = minClearance,
+            PinRadius = config.PinRadiusMm,
+            BackRadius = config.BackRadiusMm,
+            Width = config.WidthMm,
+            Clearance = clearance,
             IsValid = isValid,
             NeedsAnchor = false,
         };
     }
 
-    private static bool IsNearContact(Vector3 point, Vector3 contact, float totalLen)
-    {
-        return Vector3.Distance(point, contact) < totalLen * 0.5f;
-    }
+    // ── Helpers ────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Compute initial head direction from surface normal, clamped to max bridge slope.
-    /// Overhang normals point downward; we follow the normal but limit the tilt.
-    /// </summary>
     private static Vector3 ComputeInitialDirection(Vector3 normal, float maxSlope)
     {
-        // Ensure normal points downward
         if (normal.Z > -0.1f)
             normal = new Vector3(normal.X, normal.Y, -1f);
         normal = Vector3.Normalize(normal);
 
-        // Convert to polar angle (angle from -Z axis)
-        float cosAngle = -normal.Z; // cos of angle from vertical (straight down)
+        float cosAngle = -normal.Z;
         float maxCos = MathF.Cos(maxSlope);
 
         if (cosAngle >= maxCos)
-            return normal; // within allowed range
+            return normal;
 
-        // Clamp: keep the XY direction but limit the polar angle
         float xyMag = MathF.Sqrt(normal.X * normal.X + normal.Y * normal.Y);
         if (xyMag < 0.001f)
             return new Vector3(0, 0, -1);
@@ -285,19 +390,13 @@ public static class PinheadOptimizer
         return Vector3.Normalize(new Vector3(normal.X * scale, normal.Y * scale, -maxCos));
     }
 
-    /// <summary>
-    /// Convert spherical coordinates to cartesian direction vector.
-    /// Polar = angle from -Z (downward): 0=straight down, PI/4=45° tilt, PI/2=horizontal.
-    /// Azimuth = rotation around Z axis.
-    /// This convention matches support directions: 0=vertical support, increasing=more tilt.
-    /// </summary>
     private static Vector3 SphericalToCartesian(float polar, float azimuth)
     {
         float sinP = MathF.Sin(polar);
         return new Vector3(
             sinP * MathF.Cos(azimuth),
             sinP * MathF.Sin(azimuth),
-            -MathF.Cos(polar) // polar=0 → Z=-1 (straight down), polar=PI/2 → Z=0 (horizontal)
+            -MathF.Cos(polar)
         );
     }
 }

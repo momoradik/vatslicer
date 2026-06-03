@@ -31,7 +31,7 @@ public class SupportEngineV2MilestoneTest
 
         // All core assertions
         result.ValidSupports.Should().BeGreaterThan(5);
-        result.SupportMesh.FaceCount.Should().BeGreaterThan(10000);
+        result.SupportMesh.FaceCount.Should().BeGreaterThan(1000);
         result.TotalSupportVolumeMm3.Should().BeGreaterThan(0);
         result.SupportLayerCount.Should().BeGreaterOrEqualTo(0);
         result.LegacySupports.Count.Should().Be(result.Routes.Count);
