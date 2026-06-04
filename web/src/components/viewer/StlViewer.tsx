@@ -1142,7 +1142,6 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       manualMarkerGroupRef.current.children.forEach(c => {
         const m = c as THREE.Mesh
         if (m.material) (m.material as THREE.Material).dispose()
-        // Dispose non-shared geometry (pillar cylinders)
         if (m.geometry && m.geometry !== markerSharedGeoRef.current) m.geometry.dispose()
       })
       manualMarkerGroupRef.current = null
@@ -1170,61 +1169,99 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     const sharedGeo = new THREE.SphereGeometry(markerRadius, 10, 10)
     markerSharedGeoRef.current = sharedGeo
 
-    // Collect model meshes for collision raycasting
+    // Collect raycast targets: model meshes + existing V2 support mesh
     const modelMeshes: THREE.Mesh[] = []
     meshMapRef.current.forEach(d => modelMeshes.push(d.mesh))
+    const allTargets = [...modelMeshes]
+    if (v2MeshRef.current) allTargets.push(v2MeshRef.current)
 
     const downDir = new THREE.Vector3(0, -1, 0) // world -Y = build direction (Y-up)
-    const pillarRaycaster = new THREE.Raycaster()
+    const rc = new THREE.Raycaster()
+    const DRAINAGE_CLEARANCE = 1.0 // mm — resin drainage spacing
 
     markers.forEach(m => {
-      // ── Contact marker sphere (red if uncoverable) ──
-      const markerColor = m.uncoverable ? 0xff0000 : 0xff6600
-      const markerEmissive = m.uncoverable ? 0x440000 : 0x331100
-      const markerMat = new THREE.MeshPhongMaterial({ color: markerColor, emissive: markerEmissive })
+      const shaftR = Math.max(0.1, (m.shaftDiameter ?? 0.6) / 2)
+
+      // ── Raycast straight down from just below contact ──
+      const startY = m.y - markerRadius * 0.5
+      rc.set(new THREE.Vector3(m.x, startY, m.z), downDir)
+      rc.far = startY + 1 // don't go below Y=-1
+
+      const hits = rc.intersectObjects(allTargets, false)
+
+      let pillarEndY = 0
+      let status: 'clear' | 'collision' | 'bundle' = 'clear'
+
+      for (const hit of hits) {
+        if (hit.distance < shaftR * 2) continue // skip contact surface itself
+        const isExistingSupport = hit.object === v2MeshRef.current
+        if (isExistingSupport) {
+          // -Z ray meets existing support column → will bundle
+          pillarEndY = hit.point.y
+          status = 'bundle'
+          break
+        }
+        const isModel = modelMeshes.includes(hit.object as THREE.Mesh)
+        if (isModel) {
+          // Pillar passes through model surface → collision
+          pillarEndY = hit.point.y
+          status = 'collision'
+          break
+        }
+      }
+
+      // ── Proximity clearance check (drainage spacing) ──
+      // Cast 4 offset rays around the pillar to detect features within 1mm
+      if (status === 'clear') {
+        const offsets = [
+          new THREE.Vector3(DRAINAGE_CLEARANCE, 0, 0),
+          new THREE.Vector3(-DRAINAGE_CLEARANCE, 0, 0),
+          new THREE.Vector3(0, 0, DRAINAGE_CLEARANCE),
+          new THREE.Vector3(0, 0, -DRAINAGE_CLEARANCE),
+        ]
+        const pillarHeight = m.y - pillarEndY
+        for (const off of offsets) {
+          // Horizontal ray from pillar midpoint outward, short range
+          rc.set(new THREE.Vector3(m.x, m.y - pillarHeight * 0.5, m.z), off.normalize())
+          rc.far = DRAINAGE_CLEARANCE + shaftR
+          const proxHits = rc.intersectObjects(modelMeshes, false)
+          if (proxHits.length > 0 && proxHits[0].distance < DRAINAGE_CLEARANCE + shaftR) {
+            status = 'collision' // too close to model feature
+            break
+          }
+        }
+      }
+
+      // Override with uncoverable from backend
+      if (m.uncoverable) status = 'collision'
+
+      // ── Colors ──
+      const colors = {
+        clear:     { marker: 0xff6600, emissive: 0x331100, pillar: 0x44aaff },
+        collision: { marker: 0xff3333, emissive: 0x441111, pillar: 0xff3333 },
+        bundle:    { marker: 0x44cc88, emissive: 0x113322, pillar: 0x44cc88 },
+      }
+      const c = colors[status]
+
+      // ── Contact marker sphere ──
+      const markerMat = new THREE.MeshPhongMaterial({ color: c.marker, emissive: c.emissive })
       const sphere = new THREE.Mesh(sharedGeo, markerMat)
       sphere.position.set(m.x, m.y, m.z)
       sphere.userData = { supportPointId: m.id }
       group.add(sphere)
 
-      // ── Preview pillar: contact point → bed (Y=0) or first lower surface ──
-      // Raycast downward from just below the contact to find the bed or a lower surface
-      const pillarStart = new THREE.Vector3(m.x, m.y - markerRadius * 0.5, m.z)
-      pillarRaycaster.set(pillarStart, downDir)
-      pillarRaycaster.far = m.y + 1 // can't go below Y=0 much
-      const surfaceHits = pillarRaycaster.intersectObjects(modelMeshes, false)
-
-      // Pillar ends at first model surface below contact, or the bed (Y=0)
-      let pillarEndY = 0
-      let collides = false
-      if (surfaceHits.length > 0) {
-        const firstHit = surfaceHits[0]
-        // If hit is very close to start, it's the surface we clicked on — skip it
-        if (firstHit.distance > markerRadius * 2) {
-          pillarEndY = firstHit.point.y
-          collides = true // pillar passes through model → collision hint
-        }
-      }
-
+      // ── Preview pillar ──
       const pillarHeight = m.y - pillarEndY
-      if (pillarHeight < 0.1) return // contact is on the bed, no pillar needed
+      if (pillarHeight < 0.1) return
 
-      const shaftR = Math.max(0.1, (m.shaftDiameter ?? 0.6) / 2)
       const pillarGeo = new THREE.CylinderGeometry(shaftR, shaftR, pillarHeight, 8)
       const pillarMat = new THREE.MeshPhongMaterial({
-        color: collides ? 0xff3333 : 0x44aaff,
-        transparent: true,
-        opacity: 0.35,
-        depthWrite: false,
+        color: c.pillar, transparent: true, opacity: 0.3, depthWrite: false,
       })
       const pillar = new THREE.Mesh(pillarGeo, pillarMat)
-      // CylinderGeometry is centered — shift to span from contact to end
       pillar.position.set(m.x, pillarEndY + pillarHeight / 2, m.z)
       pillar.renderOrder = 2
       group.add(pillar)
-
-      // Tint marker red too if collision
-      if (collides) markerMat.color.setHex(0xff3333)
     })
 
     sceneRef.current.add(group)
