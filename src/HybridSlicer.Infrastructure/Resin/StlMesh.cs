@@ -95,6 +95,30 @@ public sealed class StlMesh
     }
 
     /// <summary>
+    /// Apply a rotation (quaternion) to all vertices and normals. Returns a new mesh.
+    /// </summary>
+    public StlMesh Rotate(Quaternion rotation)
+    {
+        var newVerts = new Vector3[Vertices.Length];
+        var newNormals = new Vector3[FileNormals.Length];
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+
+        for (int i = 0; i < Vertices.Length; i++)
+        {
+            var v = Vector3.Transform(Vertices[i], rotation);
+            newVerts[i] = v;
+            min = Vector3.Min(min, v);
+            max = Vector3.Max(max, v);
+        }
+
+        for (int i = 0; i < FileNormals.Length; i++)
+            newNormals[i] = Vector3.Transform(FileNormals[i], rotation);
+
+        return new StlMesh(newVerts, newNormals, min, max);
+    }
+
+    /// <summary>
     /// Find triangle indices that are overhang candidates at a given Z height.
     /// Returns indices of triangles that span Z and have downward-facing normals.
     /// </summary>

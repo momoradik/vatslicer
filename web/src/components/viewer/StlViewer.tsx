@@ -1059,25 +1059,17 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       const loader = new STLLoader()
       const geometry = loader.parse(supportMeshBuffer)
 
-      // ── Return path: V2 mesh → display space ─────────────────────────
-      // The V2 mesh is in backend Z-up space (the baked mesh we sent was
-      // converted to Z-up at the boundary). The backend only XY-centered
-      // and dropped to plate (pure translation, no orientation change).
-      //
-      // To display correctly:
-      // 1. Z-up → Y-up basis change (swap Y↔Z, fix winding)
-      // 2. Inverse-apply the model group's matrixWorld so that when the
-      //    group's transform is applied on render, the supports end up
-      //    at the same world position as the baked geometry.
-
-      // Step 1: Z-up → Y-up
+      // V2 mesh is in backend Z-up centered space (same centering as the
+      // raw STL the backend received, with user rotation applied).
+      // Apply Z-up → Y-up swap to match the model geometry in the group.
+      // Position at (0,0,0) in the group — no inverse matrix tricks.
       const positions = geometry.getAttribute('position')
       for (let i = 0; i < positions.count; i++) {
         const y = positions.getY(i), z = positions.getZ(i)
         positions.setY(i, z)
         positions.setZ(i, y)
       }
-      // Winding fix (Y/Z swap = reflection)
+      // Winding fix
       for (let i = 0; i < positions.count; i += 3) {
         const x1=positions.getX(i+1),y1=positions.getY(i+1),z1=positions.getZ(i+1)
         const x2=positions.getX(i+2),y2=positions.getY(i+2),z2=positions.getZ(i+2)
@@ -1086,17 +1078,6 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       }
       positions.needsUpdate = true
       geometry.computeVertexNormals()
-
-      // Step 2: inverse-apply group matrixWorld
-      // The baked mesh was in world space. The backend XY-centered and dropped
-      // to plate. The V2 mesh (after Z→Y swap) is now in a space that
-      // corresponds to world space but with backend centering applied.
-      // To place it in the group: inverse-apply the group's world matrix.
-      // When the group's matrixWorld is applied on render, it undoes the
-      // inverse → supports land at the correct world position.
-      const inverseWorld = modelData.group.matrixWorld.clone().invert()
-      geometry.applyMatrix4(inverseWorld)
-      geometry.computeVertexNormals() // recompute after transform
 
       const material = new THREE.MeshPhongMaterial({
         color: 0x14b8a6,

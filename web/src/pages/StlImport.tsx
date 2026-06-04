@@ -571,70 +571,19 @@ export default function StlImport() {
     if (!selectedId || !selected) return
     setGenerating(true)
     try {
-      // ── CANONICAL SPACE: bake matrixWorld into vertices ─────────────
-      // The frontend's matrixWorld is ground truth. Bake it into the geometry
-      // so the backend receives the exact oriented mesh the user sees.
-      // Then apply Y-up → Z-up basis change so the backend gets its expected Z-up.
-      // The backend has zero knowledge of rotation/translation/scale.
-      const meshData = (window as any).__stlViewerMeshMap?.get(selectedId)
-      let stlBlob: Blob
-      if (meshData?.mesh && meshData?.group) {
-        const { STLExporter } = await import('three/examples/jsm/exporters/STLExporter.js')
-        const THREE_mod = await import('three')
-
-        // Clone geometry and apply the full world transform
-        const clone = meshData.mesh.clone()
-        clone.applyMatrix4(meshData.group.matrixWorld)
-
-        // Basis change: Three.js Y-up → backend Z-up
-        // Swap Y and Z in vertex positions, fix winding
-        const pos = clone.geometry.getAttribute('position')
-        for (let i = 0; i < pos.count; i++) {
-          const y = pos.getY(i), z = pos.getZ(i)
-          pos.setY(i, z) // backend Y = Three.js Z (depth)
-          pos.setZ(i, y) // backend Z = Three.js Y (height)
-        }
-        // Fix winding (Y/Z swap is a reflection)
-        for (let i = 0; i < pos.count; i += 3) {
-          const x1=pos.getX(i+1),y1=pos.getY(i+1),z1=pos.getZ(i+1)
-          const x2=pos.getX(i+2),y2=pos.getY(i+2),z2=pos.getZ(i+2)
-          pos.setXYZ(i+1, x2, y2, z2)
-          pos.setXYZ(i+2, x1, y1, z1)
-        }
-        pos.needsUpdate = true
-
-        // Check determinant — if negative (mirror/negative scale), normals flip
-        const det = meshData.group.matrixWorld.determinant()
-        if (det < 0) {
-          // Reverse all winding again to compensate for mirror
-          for (let i = 0; i < pos.count; i += 3) {
-            const x1=pos.getX(i+1),y1=pos.getY(i+1),z1=pos.getZ(i+1)
-            const x2=pos.getX(i+2),y2=pos.getY(i+2),z2=pos.getZ(i+2)
-            pos.setXYZ(i+1, x2, y2, z2)
-            pos.setXYZ(i+2, x1, y1, z1)
-          }
-          pos.needsUpdate = true
-        }
-
-        // Export to binary STL
-        const tempScene = new THREE_mod.Scene()
-        tempScene.add(clone)
-        const exporter = new STLExporter()
-        const stlBinary = exporter.parse(tempScene, { binary: true })
-        stlBlob = new Blob([stlBinary as any], { type: 'application/octet-stream' })
-        tempScene.remove(clone)
-        clone.geometry.dispose()
-
-        // Log for verification
-        clone.geometry?.computeBoundingBox?.()
-        console.log('[Bake] matrixWorld determinant:', det.toFixed(3))
-      } else {
-        // Fallback: no mesh data available, send raw file
-        const resp = await fetch(selected.url)
-        stlBlob = await resp.blob()
-      }
+      // Send raw STL file + user transform as separate parameters.
+      // The backend applies the rotation to the raw mesh before generating supports.
+      // This avoids double-transform issues from baking/unbaking matrixWorld.
+      const resp = await fetch(selected.url)
+      const blob = await resp.blob()
       const fd = new FormData()
-      fd.append('stlFile', stlBlob, selected.fileName)
+      fd.append('stlFile', blob, selected.fileName)
+
+      // Send the user's current transform so backend can orient the mesh
+      fd.append('userRotX', String(selected.transform.rotX))
+      fd.append('userRotY', String(selected.transform.rotY))
+      fd.append('userRotZ', String(selected.transform.rotZ))
+      fd.append('userScale', String(selected.transform.scaleX)) // uniform scale
       fd.append('orientation', activePrinter?.orientation ?? 'BottomUp')
       if (selectedPrinterId) fd.append('printerId', selectedPrinterId)
       fd.append('overhangAngleDeg', String(autoSupportConfig.overhangAngle))

@@ -120,6 +120,12 @@ public static class SupportEngineV2
 
         public int Seed { get; init; } = 42;
 
+        // User transform from frontend viewport (applied to raw STL before centering)
+        public float UserRotXDeg { get; init; } = 0;
+        public float UserRotYDeg { get; init; } = 0;
+        public float UserRotZDeg { get; init; } = 0;
+        public float UserScale { get; init; } = 1.0f;
+
         // Model transform (from frontend viewport)
         public float TranslateX { get; init; } = 0;
         public float TranslateY { get; init; } = 0;
@@ -190,16 +196,33 @@ public static class SupportEngineV2
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        // ── Step 0: Center mesh (pure translation only) ───────────────
-        // The frontend bakes the full world transform (rotation/scale/position)
-        // into the mesh vertices before sending. The backend receives an already-
-        // oriented Z-up mesh. We only XY-center and drop to plate (Z=0).
-        // This is pure translation — it never changes which faces are overhangs.
+        // ── Step 0: Apply user rotation, then center ─────────────────
+        // The frontend sends the raw STL file + user rotation angles.
+        // Apply rotation first (changes which faces are overhangs),
+        // then XY-center and drop to plate.
+
+        // Apply user rotation if any (rotX, rotY, rotZ in degrees)
+        if (config.UserRotXDeg != 0 || config.UserRotYDeg != 0 || config.UserRotZDeg != 0)
+        {
+            float rx = config.UserRotXDeg * MathF.PI / 180f;
+            float ry = config.UserRotYDeg * MathF.PI / 180f;
+            float rz = config.UserRotZDeg * MathF.PI / 180f;
+            var rotQuat = Quaternion.CreateFromYawPitchRoll(ry, rx, rz);
+            mesh = mesh.Rotate(rotQuat);
+        }
+
+        // Apply uniform scale if not 1.0
+        if (config.UserScale != 1.0f && config.UserScale > 0)
+        {
+            mesh = mesh.Transform(Vector3.Zero, config.UserScale);
+        }
+
+        // Center mesh: XY at origin, Z bottom at 0
         float meshW = mesh.Max.X - mesh.Min.X;
         float meshD = mesh.Max.Y - mesh.Min.Y;
         float offX = -(mesh.Min.X + meshW / 2);
         float offY = -(mesh.Min.Y + meshD / 2);
-        float offZ = -mesh.Min.Z; // drop to plate
+        float offZ = -mesh.Min.Z;
         mesh = mesh.Transform(new Vector3(offX, offY, offZ), 1.0f);
 
         // Bottom-Up specific: reduce pin radius for better surface quality
