@@ -88,8 +88,8 @@ interface Props {
   supportMeshBuffer?: ArrayBuffer | null
   // Backend centering offset — used to reverse XY/Z centering on the return path
   supportMeshOffset?: { x: number; y: number; z: number } | null
-  // Manual support markers — rendered as proxy spheres for visual feedback + delete raycast
-  manualMarkers?: { id: string; x: number; y: number; z: number }[]
+  // Manual support markers — rendered as proxy spheres + preview pillars
+  manualMarkers?: { id: string; x: number; y: number; z: number; shaftDiameter: number }[]
   // True once commitOrientation has completed — clicks are blocked until this is true
   orientationCommitted?: boolean
   // Raft/Skirt visualization
@@ -1140,7 +1140,10 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     if (manualMarkerGroupRef.current) {
       sceneRef.current.remove(manualMarkerGroupRef.current)
       manualMarkerGroupRef.current.children.forEach(c => {
-        if ((c as THREE.Mesh).material) ((c as THREE.Mesh).material as THREE.Material).dispose()
+        const m = c as THREE.Mesh
+        if (m.material) (m.material as THREE.Material).dispose()
+        // Dispose non-shared geometry (pillar cylinders)
+        if (m.geometry && m.geometry !== markerSharedGeoRef.current) m.geometry.dispose()
       })
       manualMarkerGroupRef.current = null
     }
@@ -1167,12 +1170,59 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     const sharedGeo = new THREE.SphereGeometry(markerRadius, 10, 10)
     markerSharedGeoRef.current = sharedGeo
 
+    // Collect model meshes for collision raycasting
+    const modelMeshes: THREE.Mesh[] = []
+    meshMapRef.current.forEach(d => modelMeshes.push(d.mesh))
+
+    const downDir = new THREE.Vector3(0, -1, 0) // world -Y = build direction (Y-up)
+    const pillarRaycaster = new THREE.Raycaster()
+
     markers.forEach(m => {
-      const mat = new THREE.MeshPhongMaterial({ color: 0xff6600, emissive: 0x331100 })
-      const sphere = new THREE.Mesh(sharedGeo, mat)
+      // ── Contact marker sphere ──
+      const markerMat = new THREE.MeshPhongMaterial({ color: 0xff6600, emissive: 0x331100 })
+      const sphere = new THREE.Mesh(sharedGeo, markerMat)
       sphere.position.set(m.x, m.y, m.z)
       sphere.userData = { supportPointId: m.id }
       group.add(sphere)
+
+      // ── Preview pillar: contact point → bed (Y=0) or first lower surface ──
+      // Raycast downward from just below the contact to find the bed or a lower surface
+      const pillarStart = new THREE.Vector3(m.x, m.y - markerRadius * 0.5, m.z)
+      pillarRaycaster.set(pillarStart, downDir)
+      pillarRaycaster.far = m.y + 1 // can't go below Y=0 much
+      const surfaceHits = pillarRaycaster.intersectObjects(modelMeshes, false)
+
+      // Pillar ends at first model surface below contact, or the bed (Y=0)
+      let pillarEndY = 0
+      let collides = false
+      if (surfaceHits.length > 0) {
+        const firstHit = surfaceHits[0]
+        // If hit is very close to start, it's the surface we clicked on — skip it
+        if (firstHit.distance > markerRadius * 2) {
+          pillarEndY = firstHit.point.y
+          collides = true // pillar passes through model → collision hint
+        }
+      }
+
+      const pillarHeight = m.y - pillarEndY
+      if (pillarHeight < 0.1) return // contact is on the bed, no pillar needed
+
+      const shaftR = Math.max(0.1, (m.shaftDiameter ?? 0.6) / 2)
+      const pillarGeo = new THREE.CylinderGeometry(shaftR, shaftR, pillarHeight, 8)
+      const pillarMat = new THREE.MeshPhongMaterial({
+        color: collides ? 0xff3333 : 0x44aaff,
+        transparent: true,
+        opacity: 0.35,
+        depthWrite: false,
+      })
+      const pillar = new THREE.Mesh(pillarGeo, pillarMat)
+      // CylinderGeometry is centered — shift to span from contact to end
+      pillar.position.set(m.x, pillarEndY + pillarHeight / 2, m.z)
+      pillar.renderOrder = 2
+      group.add(pillar)
+
+      // Tint marker red too if collision
+      if (collides) markerMat.color.setHex(0xff3333)
     })
 
     sceneRef.current.add(group)

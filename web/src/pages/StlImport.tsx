@@ -49,7 +49,9 @@ interface SupportPoint {
   id: string
   x: number; y: number; z: number       // contact point on mesh surface (Y-up world space)
   nx: number; ny: number; nz: number    // surface normal at contact (Y-up world space)
-  tipDiameterMm: number                 // support tip size
+  tipDiameterMm: number
+  shaftDiameterMm: number
+  baseDiameterMm: number
   type: 'light' | 'medium' | 'heavy'
 }
 
@@ -476,8 +478,9 @@ export default function StlImport() {
 
   const addSupportPoint = (x: number, y: number, z: number, nx: number, ny: number, nz: number) => {
     if (!selectedId) return
-    const tipDiameter = supportTipType === 'light' ? 0.3 : supportTipType === 'medium' ? 0.5 : 0.8
-    const point: SupportPoint = { id: mkId(), x, y, z, nx, ny, nz, tipDiameterMm: tipDiameter, type: supportTipType }
+    const presets = { light: { tip: 0.3, shaft: 0.6, base: 1.2 }, medium: { tip: 0.5, shaft: 1.0, base: 2.0 }, heavy: { tip: 0.8, shaft: 1.5, base: 3.0 } }
+    const p = presets[supportTipType]
+    const point: SupportPoint = { id: mkId(), x, y, z, nx, ny, nz, tipDiameterMm: p.tip, shaftDiameterMm: p.shaft, baseDiameterMm: p.base, type: supportTipType }
     updateModels(prev => prev.map(m =>
       m.id === selectedId ? { ...m, manualSupports: { ...m.manualSupports, points: [...m.manualSupports.points, point] } } : m
     ))
@@ -721,10 +724,8 @@ export default function StlImport() {
         fd.append('manualContacts', JSON.stringify(manualPts.map(p => {
           const [px, py, pz] = yUpToZUp(p.x, p.y, p.z)
           const [nx, ny, nz] = yUpToZUp(p.nx, p.ny, p.nz)
-          console.log('[ManualPt] Y-up:', p.x.toFixed(2), p.y.toFixed(2), p.z.toFixed(2),
-            '→ Z-up:', px.toFixed(2), py.toFixed(2), pz.toFixed(2),
-            '| normal:', nx.toFixed(2), ny.toFixed(2), nz.toFixed(2))
-          return { x: px, y: py, z: pz, nx, ny, nz }
+          return { x: px, y: py, z: pz, nx, ny, nz,
+            tipDiameterMm: p.tipDiameterMm, shaftDiameterMm: p.shaftDiameterMm, baseDiameterMm: p.baseDiameterMm }
         })))
       }
 
@@ -1016,7 +1017,9 @@ export default function StlImport() {
                   crossBraces={selectedPrep.crossBraces}
                   supportMeshBuffer={selectedPrep.v2MeshBuffer}
                   supportMeshOffset={selectedPrep.v2MeshOffset}
-                  manualMarkers={selectedSupportData.points.map(p => ({ id: p.id, x: p.x, y: p.y, z: p.z }))}
+                  manualMarkers={selectedSupportData.points.map(p => ({
+                    id: p.id, x: p.x, y: p.y, z: p.z, shaftDiameter: p.shaftDiameterMm,
+                  }))}
                   orientationCommitted={orientationCommitted}
                   paintedRegions={selectedSupportData.paintedRegions}
                   supportTipType={supportTipType}

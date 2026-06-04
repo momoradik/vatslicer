@@ -30,6 +30,10 @@ public sealed class SupportPointGenerator
         public required float Priority { get; init; }
         public required ForceEstimator.SupportWeight RecommendedWeight { get; init; }
         public required float SafetyFactor { get; init; }
+        // Per-support diameter overrides (from manual placement). null = use engine defaults.
+        public float? ManualTipRadiusMm { get; init; }
+        public float? ManualPillarRadiusMm { get; init; }
+        public float? ManualBaseRadiusMm { get; init; }
     }
 
     public sealed class GenerationConfig

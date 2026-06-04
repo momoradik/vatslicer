@@ -114,9 +114,17 @@ public static class SupportEngineV2
         /// <summary>
         /// Manual support contacts from user clicks. These bypass overhang detection
         /// but still run through pinhead → route → recover → gate.
-        /// Each is a (position, normal) pair in the same coordinate space as the mesh.
         /// </summary>
-        public List<(Vector3 position, Vector3 normal)>? ManualContacts { get; init; }
+        public List<ManualContact>? ManualContacts { get; init; }
+
+        public sealed class ManualContact
+        {
+            public required Vector3 Position { get; init; }
+            public required Vector3 Normal { get; init; }
+            public float? TipDiameterMm { get; init; }
+            public float? ShaftDiameterMm { get; init; }
+            public float? BaseDiameterMm { get; init; }
+        }
 
         public int Seed { get; init; } = 42;
 
@@ -254,18 +262,27 @@ public static class SupportEngineV2
         if (config.ManualContacts is { Count: > 0 })
         {
             int manualId = 9000;
-            foreach (var (pos, normal) in config.ManualContacts)
+            foreach (var mc in config.ManualContacts)
             {
+                var n = mc.Normal.LengthSquared() > 0.01f ? Vector3.Normalize(mc.Normal) : new Vector3(0, 0, -1);
+                // Per-support diameter overrides from frontend
+                var weight = mc.ShaftDiameterMm >= 1.2f ? ForceEstimator.SupportWeight.Heavy
+                    : mc.ShaftDiameterMm >= 0.8f ? ForceEstimator.SupportWeight.Medium
+                    : ForceEstimator.SupportWeight.Light;
                 pointResult.Points.Add(new SupportPointGenerator.SupportPoint
                 {
                     Id = $"manual-{++manualId}",
-                    Position = pos + centeringOffset,
-                    Normal = normal.LengthSquared() > 0.01f ? Vector3.Normalize(normal) : new Vector3(0, 0, -1),
+                    Position = mc.Position + centeringOffset,
+                    Normal = n,
                     OverhangArea = 25f,
                     OverhangType = OverhangAnalyzer.OverhangType.NewIsland,
-                    Priority = 1.0f, // manual = highest priority
-                    RecommendedWeight = ForceEstimator.SupportWeight.Medium,
+                    Priority = 1.0f,
+                    RecommendedWeight = weight,
                     SafetyFactor = 2.0f,
+                    // Store diameter overrides for downstream sizing
+                    ManualTipRadiusMm = mc.TipDiameterMm.HasValue ? mc.TipDiameterMm.Value / 2f : null,
+                    ManualPillarRadiusMm = mc.ShaftDiameterMm.HasValue ? mc.ShaftDiameterMm.Value / 2f : null,
+                    ManualBaseRadiusMm = mc.BaseDiameterMm.HasValue ? mc.BaseDiameterMm.Value / 2f : null,
                 });
             }
             Serilog.Log.Information("V2 Step 2b: Added {Count} manual contacts", config.ManualContacts.Count);
@@ -591,6 +608,21 @@ public static class SupportEngineV2
                     layerArea: supportArea,
                     supportsInLayer: Math.Max(1, totalSupports / 3), // approximate sharing
                     rootsOnPlate: route.ReachesGround);
+
+                // Per-support manual diameter overrides (from interactive placement)
+                if (pt?.ManualPillarRadiusMm.HasValue == true || pt?.ManualBaseRadiusMm.HasValue == true || pt?.ManualTipRadiusMm.HasValue == true)
+                {
+                    sizing = new SupportSizer.SupportSizing
+                    {
+                        TipRadius = pt.ManualTipRadiusMm ?? sizing.TipRadius,
+                        ContactSphereRadius = sizing.ContactSphereRadius,
+                        ContactDepth = sizing.ContactDepth,
+                        PillarRadius = pt.ManualPillarRadiusMm ?? sizing.PillarRadius,
+                        BaseRadius = pt.ManualBaseRadiusMm ?? sizing.BaseRadius,
+                        BaseHeight = sizing.BaseHeight,
+                        Force = sizing.Force,
+                    };
+                }
 
                 sizingLookup[id] = sizing;
 

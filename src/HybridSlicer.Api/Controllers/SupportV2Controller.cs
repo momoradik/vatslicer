@@ -58,16 +58,21 @@ public sealed class SupportV2Controller : ControllerBase
         using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
 
         // Parse manual contacts from JSON
-        List<(System.Numerics.Vector3 position, System.Numerics.Vector3 normal)>? manualContactList = null;
+        List<SupportEngineV2.EngineConfig.ManualContact>? manualContactList = null;
         if (!string.IsNullOrEmpty(manualContacts))
         {
             try
             {
                 var parsed = System.Text.Json.JsonSerializer.Deserialize<List<ManualContactDto>>(manualContacts);
                 if (parsed?.Count > 0)
-                    manualContactList = parsed.Select(c => (
-                        new System.Numerics.Vector3(c.x, c.y, c.z),
-                        new System.Numerics.Vector3(c.nx, c.ny, c.nz))).ToList();
+                    manualContactList = parsed.Select(c => new SupportEngineV2.EngineConfig.ManualContact
+                    {
+                        Position = new System.Numerics.Vector3(c.x, c.y, c.z),
+                        Normal = new System.Numerics.Vector3(c.nx, c.ny, c.nz),
+                        TipDiameterMm = c.tipDiameterMm,
+                        ShaftDiameterMm = c.shaftDiameterMm,
+                        BaseDiameterMm = c.baseDiameterMm,
+                    }).ToList();
             }
             catch { /* ignore parse errors */ }
         }
@@ -530,5 +535,6 @@ public sealed class SupportV2Controller : ControllerBase
         return File(zipStream.ToArray(), "application/zip", "model_with_supports.zip");
     }
 
-    private record ManualContactDto(float x, float y, float z, float nx, float ny, float nz);
+    private record ManualContactDto(float x, float y, float z, float nx, float ny, float nz,
+        float? tipDiameterMm = null, float? shaftDiameterMm = null, float? baseDiameterMm = null);
 }
