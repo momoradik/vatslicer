@@ -445,8 +445,19 @@ public static class SupportEngineV2
             routes.Add((id, route));
         }
 
-        // Post-routing collision filter: remove routes whose pillar passes through the mesh
-        // Uses both waypoint checks and segment beam-casts
+        // Post-routing collision filter: penetration-depth based, not binary hit.
+        //
+        // Check 1: signed-distance-to-surface replaces IsInside (which fails on
+        //   non-watertight shells). A waypoint is buried only if its center is
+        //   closer to the wall than its own radius minus a graze tolerance.
+        //
+        // Check 2: beam-cast with incidence-angle discrimination. A near-tangent
+        //   hit on a curved surface (graze) is allowed; a near-normal hit (burial)
+        //   is killed. This stops curved shells from false-killing pillars that
+        //   merely skim the surface curvature.
+        const float GRAZE_TOLERANCE = 0.15f; // mm — contact below this is OK
+        const float GRAZE_ANGLE_COS = 0.26f; // cos(75°) — rays within 15° of tangent are grazes
+
         int removedByCollision = 0;
         routes = routes.Where(r =>
         {
@@ -456,14 +467,27 @@ public static class SupportEngineV2
                 var wp = path[wi];
                 if (wp.Type == "base") continue;
 
-                // Check if waypoint is inside mesh (check ALL types except base)
-                if (bvh.IsInside(wp.Position))
+                // Check 1: signed-distance with direction check (replaces IsInside)
+                // Only kill if the waypoint is on the WRONG side of the surface
+                // (buried inside the shell wall). A waypoint below an overhang
+                // surface is in open air and valid even if close to the surface.
+                var cp = bvh.ClosestPoint(wp.Position);
+                if (cp.HasValue && cp.Value.Distance < wp.Radius)
                 {
-                    removedByCollision++;
-                    return false;
+                    // Check which side: dot product of (waypoint - surface) with surface normal
+                    // Positive = waypoint is on the outward (model) side = buried
+                    // Negative = waypoint is on the support side = open air = OK
+                    var toWaypoint = wp.Position - cp.Value.Point;
+                    float side = Vector3.Dot(toWaypoint, cp.Value.Normal);
+                    if (side > 0 && cp.Value.Distance < GRAZE_TOLERANCE)
+                    {
+                        // Waypoint is on the model side AND very close → buried
+                        removedByCollision++;
+                        return false;
+                    }
                 }
 
-                // Beam-cast along each segment to check for clipping
+                // Check 2: beam-cast with incidence angle discrimination
                 if (wi < path.Count - 1)
                 {
                     var wp2 = path[wi + 1];
@@ -471,13 +495,28 @@ public static class SupportEngineV2
                     float segLen = Vector3.Distance(wp.Position, wp2.Position);
                     if (segLen > 0.1f)
                     {
-                        var dir = Vector3.Normalize(wp2.Position - wp.Position);
+                        var segDir = Vector3.Normalize(wp2.Position - wp.Position);
                         float radius = Math.Max(wp.Radius, wp2.Radius);
-                        float clearance = bvh.BeamCast(wp.Position, dir, radius, 8, segLen);
-                        if (clearance < segLen * 0.95f)
+
+                        // Cast the beam and check each ray's incidence angle
+                        float clearance = bvh.BeamCast(wp.Position, segDir, radius, 8, segLen);
+                        if (clearance < segLen * 0.9f)
                         {
-                            removedByCollision++;
-                            return false;
+                            // Something was hit — check if it's a graze or a burial
+                            // by examining the hit point's surface normal vs ray direction
+                            var hitPoint = wp.Position + segDir * clearance;
+                            var hitCp = bvh.ClosestPoint(hitPoint);
+                            if (hitCp.HasValue)
+                            {
+                                float incidenceCos = MathF.Abs(Vector3.Dot(segDir, hitCp.Value.Normal));
+                                if (incidenceCos > GRAZE_ANGLE_COS)
+                                {
+                                    // Near-normal hit → real collision → kill
+                                    removedByCollision++;
+                                    return false;
+                                }
+                                // Near-tangent hit → graze on curved surface → allow
+                            }
                         }
                     }
                 }
