@@ -1131,27 +1131,42 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
   // ── Manual support proxy markers (visual feedback + delete raycast target) ──
 
   const manualMarkerGroupRef = useRef<THREE.Group | null>(null)
+  const markerSharedGeoRef = useRef<THREE.SphereGeometry | null>(null)
 
   useEffect(() => {
     if (!sceneReady || !sceneRef.current) return
 
-    // Remove old markers
+    // Remove old markers — dispose shared geometry ONCE, materials per-child
     if (manualMarkerGroupRef.current) {
       sceneRef.current.remove(manualMarkerGroupRef.current)
-      manualMarkerGroupRef.current.traverse(c => {
-        if ((c as THREE.Mesh).geometry) (c as THREE.Mesh).geometry.dispose()
+      manualMarkerGroupRef.current.children.forEach(c => {
         if ((c as THREE.Mesh).material) ((c as THREE.Mesh).material as THREE.Material).dispose()
       })
       manualMarkerGroupRef.current = null
+    }
+    if (markerSharedGeoRef.current) {
+      markerSharedGeoRef.current.dispose()
+      markerSharedGeoRef.current = null
     }
 
     const markers = manualMarkers ?? []
     if (markers.length === 0) return
 
+    // Scale marker radius to model bbox diagonal, clamped to [0.3, 2.0] mm
+    let markerRadius = 0.5
+    const selId = selectedIdRef.current
+    const selData = selId ? meshMapRef.current.get(selId) : null
+    if (selData) {
+      const diag = selData.naturalSize.length()
+      markerRadius = Math.max(0.3, Math.min(2.0, diag * 0.012))
+    }
+
     const group = new THREE.Group()
     group.name = 'manual-support-markers'
 
-    const sharedGeo = new THREE.SphereGeometry(0.4, 10, 10)
+    const sharedGeo = new THREE.SphereGeometry(markerRadius, 10, 10)
+    markerSharedGeoRef.current = sharedGeo
+
     markers.forEach(m => {
       const mat = new THREE.MeshPhongMaterial({ color: 0xff6600, emissive: 0x331100 })
       const sphere = new THREE.Mesh(sharedGeo, mat)
@@ -1191,9 +1206,16 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       )
     }
 
+    // Track pointer down position to distinguish click from drag/orbit
+    let pointerDownPx = { x: 0, y: 0 }
+    const onPointerDown = (e: PointerEvent) => { pointerDownPx = { x: e.clientX, y: e.clientY } }
+
     const onClick = (e: MouseEvent) => {
-      // Only handle left click, ignore if dragging
+      // Only handle left click
       if (e.button !== 0) return
+      // Suppress if pointer moved > 4px (orbit/pan gesture, not a click)
+      const dx = e.clientX - pointerDownPx.x, dy = e.clientY - pointerDownPx.y
+      if (Math.sqrt(dx * dx + dy * dy) > 4) return
 
       raycaster.setFromCamera(toNDC(e), camera)
 
@@ -1251,8 +1273,12 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       }
     }
 
+    renderer.domElement.addEventListener('pointerdown', onPointerDown)
     renderer.domElement.addEventListener('click', onClick)
-    return () => renderer.domElement.removeEventListener('click', onClick)
+    return () => {
+      renderer.domElement.removeEventListener('pointerdown', onPointerDown)
+      renderer.domElement.removeEventListener('click', onClick)
+    }
   }, [supportEditMode, sceneReady])
 
   // (callback refs declared above the click handler useEffect)
