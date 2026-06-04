@@ -868,6 +868,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
             bb.getSize(size)
             geometry.translate(0, size.y / 2, 0) // base at Y=0 (Y is now height)
             geometry.computeBoundingBox()
+            geometry.computeBoundingSphere()
 
             const mesh = new THREE.Mesh(
               geometry,
@@ -1266,6 +1267,19 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
 
     sceneRef.current.add(group)
     manualMarkerGroupRef.current = group
+
+    // ── Step I+J instrumentation ──
+    const sphereCount = group.children.filter(c => c.userData?.supportPointId).length
+    const pillarCount = group.children.length - sphereCount
+    console.log(`[TRACE] I marker-render`, JSON.stringify({
+      markersInScene: sphereCount,
+      pointsInState: markers.length,
+      pass: sphereCount === markers.length,
+    }))
+    console.log(`[TRACE] J preview-pillars`, JSON.stringify({
+      pillarCreated: pillarCount,
+      markerCount: markers.length,
+    }))
   }, [manualMarkers, sceneReady])
 
   // ── Support callback refs (avoid stale closures) ─────────────────────────
@@ -1300,43 +1314,85 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     const onPointerDown = (e: PointerEvent) => { pointerDownPx = { x: e.clientX, y: e.clientY } }
 
     const onClick = (e: MouseEvent) => {
-      // Only handle left click
-      if (e.button !== 0) return
-      // Suppress if pointer moved > 4px (orbit/pan gesture, not a click)
+      const traceId = Math.random().toString(36).slice(2, 8)
+      const T = (step: string, data: Record<string, unknown>) => console.log(`[TRACE ${traceId}] ${step}`, JSON.stringify(data))
+
+      // ── Step A: click fired ──
       const dx = e.clientX - pointerDownPx.x, dy = e.clientY - pointerDownPx.y
-      if (Math.sqrt(dx * dx + dy * dy) > 4) return
+      const dragPx = Math.sqrt(dx * dx + dy * dy)
+      const passA = e.button === 0 && dragPx <= 4
+      T('A click', { button: e.button, dragPx: +dragPx.toFixed(1), pass: passA })
+      if (!passA) return
 
+      // ── Step B: orientation gate ──
+      const passB = !!orientationCommittedRef.current
+      T('B orientation', { orientationCommitted: passB, pass: passB })
+      if (!passB) return
+
+      // ── Step C: identity gate ──
       raycaster.setFromCamera(toNDC(e), camera)
-
-      // ── GATE: block ALL support clicks until orientation is committed ──
-      if (!orientationCommittedRef.current) {
-        console.error('[ManualSupport] BLOCKED — orientationCommitted is false')
-        return
-      }
-      // Full identity check on every model group (hard reject, not warning)
       const identity4 = new THREE.Matrix4()
-      for (const d of meshMapRef.current.values()) {
-        if (!d.group.matrixWorld.equals(identity4)) {
-          console.error('[ManualSupport] BLOCKED — group matrixWorld is NOT identity')
-          return
-        }
+      let passC = true
+      for (const [id, d] of meshMapRef.current) {
+        const eq = d.group.matrixWorld.equals(identity4)
+        if (!eq) { T('C identity', { modelId: id, matrixIsIdentity: false, pass: false }); passC = false }
       }
+      if (!passC) return
+      T('C identity', { matrixIsIdentity: true, pass: true })
 
       if (mode === 'add') {
-        // Raycast against model meshes to find surface point
+        // ── Step D: raycast inputs ──
         const meshes: THREE.Mesh[] = []
-        meshMapRef.current.forEach(d => meshes.push(d.mesh))
+        const dInfo: Record<string, unknown>[] = []
+        meshMapRef.current.forEach((d, id) => {
+          meshes.push(d.mesh)
+          const geo = d.mesh.geometry
+          const pos = geo.getAttribute('position')
+          const bt = (geo as any).boundsTree
+          dInfo.push({
+            modelId: id,
+            geoId: geo.uuid,
+            vertexCount: pos?.count ?? 0,
+            hasBoundingSphere: !!geo.boundingSphere,
+            boundingSphereR: geo.boundingSphere?.radius?.toFixed(2) ?? 'null',
+            hasBoundsTree: !!bt,
+            boundsTreeVertexCount: bt?._roots?.[0]?.byteLength != null ? 'exists' : 'none',
+            meshVisible: d.mesh.visible,
+            meshParent: d.mesh.parent?.type ?? 'null',
+          })
+        })
+        T('D raycast-inputs', { meshCount: meshes.length, meshes: dInfo })
+
+        // ── Step E: raycast result ──
         const hits = raycaster.intersectObjects(meshes, false)
-        if (hits.length > 0) {
-          const hit = hits[0]
-          // Group is at identity → local == world. hit.point and hit.face.normal are in world space.
-          const wp = hit.point
-          const wn = hit.face?.normal ?? new THREE.Vector3(0, -1, 0)
-          console.log('[ManualSupport] click Y-up:', wp.x.toFixed(2), wp.y.toFixed(2), wp.z.toFixed(2),
-            '| normal:', wn.x.toFixed(2), wn.y.toFixed(2), wn.z.toFixed(2))
-          onSupportPointAddRef.current?.(wp.x, wp.y, wp.z, wn.x, wn.y, wn.z)
-          e.stopPropagation()
+        const passE = hits.length > 0
+        T('E raycast-result', {
+          hitCount: hits.length,
+          pass: passE,
+          ...(passE ? {
+            hitGeoId: (hits[0].object as THREE.Mesh).geometry?.uuid,
+            hitFaceIndex: hits[0].faceIndex,
+            hitPointWorld: [+hits[0].point.x.toFixed(3), +hits[0].point.y.toFixed(3), +hits[0].point.z.toFixed(3)],
+            hitDistance: +hits[0].distance.toFixed(3),
+          } : {}),
+        })
+        if (!passE) return
+
+        const hit = hits[0]
+        const wp = hit.point
+        const wn = hit.face?.normal ?? new THREE.Vector3(0, -1, 0)
+
+        // ── Step F: derived normal ──
+        const passF = isFinite(wn.x) && isFinite(wn.y) && isFinite(wn.z) && wn.lengthSq() > 0.001
+        T('F normal', { nx: +wn.x.toFixed(4), ny: +wn.y.toFixed(4), nz: +wn.z.toFixed(4), pass: passF })
+
+        // ── Step G: callback invoked ──
+        const hasCallback = !!onSupportPointAddRef.current
+        T('G callback', { hasCallback, argsCount: 6, pass: hasCallback })
+        if (hasCallback) {
+          onSupportPointAddRef.current!(wp.x, wp.y, wp.z, wn.x, wn.y, wn.z)
         }
+        e.stopPropagation()
       } else if (mode === 'delete') {
         // Raycast against manual support proxy markers
         if (manualMarkerGroupRef.current) {
