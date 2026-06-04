@@ -482,9 +482,11 @@ export default function StlImport() {
     const presets = { light: { tip: 0.3, shaft: 0.6, base: 1.2 }, medium: { tip: 0.5, shaft: 1.0, base: 2.0 }, heavy: { tip: 0.8, shaft: 1.5, base: 3.0 } }
     const p = presets[supportTipType]
     const point: SupportPoint = { id: mkId(), x, y, z, nx, ny, nz, tipDiameterMm: p.tip, shaftDiameterMm: p.shaft, baseDiameterMm: p.base, type: supportTipType }
+    const before = selected?.manualSupports?.points?.length ?? 0
     updateModels(prev => prev.map(m =>
       m.id === selectedId ? { ...m, manualSupports: { ...m.manualSupports, points: [...m.manualSupports.points, point] } } : m
     ))
+    console.log(`%c[TRACE] H state-write`, 'color:#f0a', JSON.stringify({ before, after: before + 1, id: point.id, pass: true }))
   }
 
   const deleteSupportPoint = (pointId: string) => {
@@ -544,59 +546,85 @@ export default function StlImport() {
 
     // Full 16-element identity check via Three.js Matrix4.equals (epsilon-exact)
     const identityMatrix = new meshData.group.matrix.constructor() // THREE.Matrix4
-    if (meshData.group.matrixWorld.equals(identityMatrix)) {
-      // Already at identity — no bake needed, committed.
-      setOrientationCommitted(true)
-      return
+    const alreadyIdentity = meshData.group.matrixWorld.equals(identityMatrix)
+
+    if (!alreadyIdentity) {
+      setOrientationCommitted(false)
+
+      const displayGeo = meshData.mesh.geometry.clone()
+      displayGeo.applyMatrix4(meshData.group.matrixWorld)
+      // Drop to bed (Y-up: lowest Y = 0)
+      displayGeo.computeBoundingBox()
+      const minY = displayGeo.boundingBox!.min.y
+      const p = displayGeo.getAttribute('position')
+      for (let i = 0; i < p.count; i++) p.setY(i, p.getY(i) - minY)
+      p.needsUpdate = true
+
+      // ── Rebuild ALL bounds on baked geometry ──
+      displayGeo.computeVertexNormals()
+      displayGeo.computeBoundingBox()
+      displayGeo.computeBoundingSphere()
+      // three-mesh-bvh (conditional)
+      if (typeof (displayGeo as any).disposeBoundsTree === 'function') (displayGeo as any).disposeBoundsTree()
+      if (typeof (displayGeo as any).computeBoundsTree === 'function') (displayGeo as any).computeBoundsTree()
+
+      // Assign baked geometry to the SAME mesh object the raycaster collects
+      const oldGeo = meshData.mesh.geometry
+      if (typeof (oldGeo as any).disposeBoundsTree === 'function') (oldGeo as any).disposeBoundsTree()
+      meshData.mesh.geometry = displayGeo
+      oldGeo.dispose()
+
+      meshData.group.position.set(0, 0, 0)
+      meshData.group.rotation.set(0, 0, 0)
+      meshData.group.scale.set(1, 1, 1)
+      meshData.group.updateMatrixWorld(true)
+      const newSize = displayGeo.boundingBox!.getSize(meshData.naturalSize.clone())
+      meshData.naturalSize.copy(newSize)
+      meshData.currentTransform = { ...DEFAULT_TRANSFORM }
+      updateModels(prev => prev.map(m => m.id === modelId ? { ...m, transform: { ...DEFAULT_TRANSFORM } } : m))
     }
 
-    setOrientationCommitted(false)
-
-    const displayGeo = meshData.mesh.geometry.clone()
-    displayGeo.applyMatrix4(meshData.group.matrixWorld)
-    // Drop to bed (Y-up: lowest Y = 0)
-    displayGeo.computeBoundingBox()
-    const minY = displayGeo.boundingBox!.min.y
-    const p = displayGeo.getAttribute('position')
-    for (let i = 0; i < p.count; i++) p.setY(i, p.getY(i) - minY)
-    p.needsUpdate = true
-
-    // ── Rebuild ALL bounds on baked geometry (order matters) ──
-    // clone() copies the OLD boundingSphere — must recompute after vertex transform.
-    // Without this, raycaster early-rejects against the stale sphere → 0 hits.
-    displayGeo.computeVertexNormals()
-    displayGeo.computeBoundingBox()
-    displayGeo.computeBoundingSphere()
-    // three-mesh-bvh: dispose old tree, rebuild if the extension is present
-    if (typeof (displayGeo as any).disposeBoundsTree === 'function') {
-      (displayGeo as any).disposeBoundsTree()
-    }
-    if (typeof (displayGeo as any).computeBoundsTree === 'function') {
-      (displayGeo as any).computeBoundsTree()
-    }
-
-    // ── Freeze display: assign baked geometry to the SAME mesh object ──
-    const oldGeo = meshData.mesh.geometry
-    // Dispose old boundsTree before disposing old geometry
-    if (typeof (oldGeo as any).disposeBoundsTree === 'function') {
-      (oldGeo as any).disposeBoundsTree()
-    }
-    meshData.mesh.geometry = displayGeo
-    oldGeo.dispose()
-    meshData.group.position.set(0, 0, 0)
-    meshData.group.rotation.set(0, 0, 0)
-    meshData.group.scale.set(1, 1, 1)
-    meshData.group.updateMatrixWorld(true)
-    const newSize = displayGeo.boundingBox!.getSize(meshData.naturalSize.clone())
-    meshData.naturalSize.copy(newSize)
-    meshData.currentTransform = { ...DEFAULT_TRANSFORM }
-    updateModels(prev => prev.map(m => m.id === modelId ? { ...m, transform: { ...DEFAULT_TRANSFORM } } : m))
+    // ── Ensure bounds are fresh on the CURRENT geometry (both paths) ──
+    const geo = meshData.mesh.geometry
+    if (!geo.boundingBox) geo.computeBoundingBox()
+    if (!geo.boundingSphere) geo.computeBoundingSphere()
 
     setOrientationCommitted(true)
 
-    // Permanent assertions
-    if (meshData.mesh.geometry !== displayGeo) console.error('[CommitOrientation] ASSERT FAIL: mesh.geometry !== bakedGeo')
-    if (!displayGeo.boundingSphere) console.error('[CommitOrientation] ASSERT FAIL: boundingSphere is null after rebuild')
+    // ── T1: Reference identity ──
+    console.log('[Commit] T1 ref:', meshData.mesh.geometry === geo ? 'PASS' : 'FAIL',
+      '| uuid:', geo.uuid)
+
+    // ── T2: Bounds freshness ──
+    const pos = geo.getAttribute('position')
+    const bt = (geo as any).boundsTree
+    console.log('[Commit] T2 bounds:',
+      'bSphere:', geo.boundingSphere ? `r=${geo.boundingSphere.radius.toFixed(2)}` : 'NULL',
+      '| bTree:', bt ? 'present' : 'none',
+      '| vtx:', pos?.count,
+      '| baked:', !alreadyIdentity)
+
+    // ── T3: Headless raycast hit test ──
+    // Pick triangle 0, build ray from 2mm along outward normal, cast back into mesh
+    const T = (window as any).__THREE
+    if (pos && pos.count >= 3 && T) {
+      const v0 = new T.Vector3(pos.getX(0), pos.getY(0), pos.getZ(0))
+      const v1 = new T.Vector3(pos.getX(1), pos.getY(1), pos.getZ(1))
+      const v2 = new T.Vector3(pos.getX(2), pos.getY(2), pos.getZ(2))
+      const center = v0.clone().add(v1).add(v2).multiplyScalar(1/3)
+      const edge1 = v1.clone().sub(v0)
+      const edge2 = v2.clone().sub(v0)
+      const normal = new T.Vector3().crossVectors(edge1, edge2).normalize()
+      const origin = center.clone().add(normal.clone().multiplyScalar(2))
+      const dir = normal.clone().negate()
+      const rc = new T.Raycaster(origin, dir, 0, 5)
+      const hits = rc.intersectObject(meshData.mesh, false)
+      const passT3 = hits.length >= 1 && hits[0].point.distanceTo(center) < 0.1
+      console.log('[Commit] T3 headless:', passT3 ? 'PASS' : 'FAIL',
+        '| hits:', hits.length,
+        '| dist:', hits.length > 0 ? hits[0].point.distanceTo(center).toFixed(4) : 'N/A',
+        '| face:', hits.length > 0 ? hits[0].faceIndex : 'N/A')
+    }
   }, [updateModels])
 
   const enterSupportEditMode = useCallback((mode: SupportEditMode) => {

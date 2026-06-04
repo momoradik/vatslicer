@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, forwardRef, useImperativeHandle, useState } from 'react'
 import * as THREE from 'three'
+;(window as any).__THREE = THREE // expose for headless raycast tests in commitOrientation
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { GizmoManager } from './GizmoManager'
@@ -1268,11 +1269,13 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     sceneRef.current.add(group)
     manualMarkerGroupRef.current = group
 
-    // ── RENDER INVARIANT: markersInScene === points.length ──
+    // ── I: marker render + J: preview pillar ──
     const markersInScene = group.children.filter(c => c.userData?.supportPointId).length
-    if (markersInScene !== markers.length) {
-      console.error(`[ManualSupport] RENDER INVARIANT FAILED: ${markersInScene} markers in scene vs ${markers.length} points in state`)
-    }
+    const pillarsInScene = group.children.length - markersInScene
+    const passI = markersInScene === markers.length
+    console.log(`%c[TRACE] I marker-render`, 'color:#f0a', JSON.stringify({ markersInScene, pointsInState: markers.length, pass: passI }))
+    console.log(`%c[TRACE] J pillars`, 'color:#f0a', JSON.stringify({ pillarCount: pillarsInScene, markerCount: markers.length }))
+    if (!passI) console.error(`[ManualSupport] RENDER INVARIANT FAILED: ${markersInScene} markers vs ${markers.length} points`)
   }, [manualMarkers, sceneReady])
 
   // ── Support callback refs (avoid stale closures) ─────────────────────────
@@ -1307,51 +1310,85 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     const onPointerDown = (e: PointerEvent) => { pointerDownPx = { x: e.clientX, y: e.clientY } }
 
     const onClick = (e: MouseEvent) => {
-      // ── Gate A: left-click, not a drag ──
-      if (e.button !== 0) return
+      const tid = Math.random().toString(36).slice(2, 8)
+      const T = (step: string, obj: Record<string, unknown>) => console.log(`%c[TRACE ${tid}] ${step}`, 'color:#f0a', JSON.stringify(obj))
+
+      // ── A: click fired ──
       const dx = e.clientX - pointerDownPx.x, dy = e.clientY - pointerDownPx.y
-      if (Math.sqrt(dx * dx + dy * dy) > 4) return
+      const dragPx = Math.sqrt(dx * dx + dy * dy)
+      const passA = e.button === 0 && dragPx <= 4
+      T('A click', { button: e.button, dragPx: +dragPx.toFixed(1), pass: passA })
+      if (!passA) return
 
-      // ── Gate B: orientation committed ──
-      if (!orientationCommittedRef.current) {
-        console.error('[ManualSupport] GATE B: orientation not committed — click rejected')
-        return
-      }
+      // ── B: orientation gate ──
+      const passB = !!orientationCommittedRef.current
+      T('B orientation', { orientationCommitted: orientationCommittedRef.current, pass: passB })
+      if (!passB) return
 
-      // ── Gate C: all model groups at identity ──
+      // ── C: identity gate ──
       raycaster.setFromCamera(toNDC(e), camera)
       const identity4 = new THREE.Matrix4()
-      for (const d of meshMapRef.current.values()) {
-        if (!d.group.matrixWorld.equals(identity4)) {
-          console.error('[ManualSupport] GATE C: group matrixWorld not identity — click rejected')
-          return
+      let passC = true
+      for (const [id, d] of meshMapRef.current) {
+        const eq = d.group.matrixWorld.equals(identity4)
+        if (!eq) {
+          const el = d.group.matrixWorld.elements
+          T('C identity FAIL', { modelId: id, diag: [el[0],el[5],el[10]], trans: [el[12],el[13],el[14]], pass: false })
+          passC = false
         }
       }
+      if (!passC) return
+      T('C identity', { pass: true })
 
       if (mode === 'add') {
-        // Collect meshes + assert bounds are fresh
+        // ── D: raycast inputs ──
         const meshes: THREE.Mesh[] = []
-        meshMapRef.current.forEach(d => {
+        const dArr: unknown[] = []
+        meshMapRef.current.forEach((d, id) => {
           const geo = d.mesh.geometry
-          if (!geo.boundingSphere) {
-            console.error('[ManualSupport] ASSERT: boundingSphere is null — computing now')
-            geo.computeBoundingSphere()
-          }
+          const pos = geo.getAttribute('position')
+          const bt = (geo as any).boundsTree
+          dArr.push({
+            id, geoUuid: geo.uuid, vtxCount: pos?.count ?? 0,
+            hasBSphere: !!geo.boundingSphere,
+            bSphereR: geo.boundingSphere?.radius?.toFixed(2) ?? 'null',
+            hasBTree: !!bt,
+            visible: d.mesh.visible,
+            parent: d.mesh.parent?.type ?? 'null',
+          })
+          if (!geo.boundingSphere) geo.computeBoundingSphere()
           meshes.push(d.mesh)
         })
+        T('D inputs', { meshCount: meshes.length, meshes: dArr })
 
+        // ── E: raycast result ──
         const hits = raycaster.intersectObjects(meshes, false)
-        if (hits.length === 0) return
+        const passE = hits.length > 0
+        T('E raycast', {
+          hitCount: hits.length, pass: passE,
+          ...(passE ? {
+            geoUuid: (hits[0].object as THREE.Mesh).geometry?.uuid,
+            face: hits[0].faceIndex,
+            pt: [+hits[0].point.x.toFixed(3), +hits[0].point.y.toFixed(3), +hits[0].point.z.toFixed(3)],
+            dist: +hits[0].distance.toFixed(3),
+          } : {}),
+        })
+        if (!passE) return
 
         const hit = hits[0]
         const wp = hit.point
         const wn = hit.face?.normal ?? new THREE.Vector3(0, -1, 0)
-        if (!isFinite(wn.x) || !isFinite(wn.y) || !isFinite(wn.z) || wn.lengthSq() < 0.001) {
-          console.error('[ManualSupport] ASSERT: face normal is degenerate:', wn)
-          return
-        }
 
-        onSupportPointAddRef.current?.(wp.x, wp.y, wp.z, wn.x, wn.y, wn.z)
+        // ── F: normal ──
+        const passF = isFinite(wn.x) && isFinite(wn.y) && isFinite(wn.z) && wn.lengthSq() > 0.001
+        T('F normal', { n: [+wn.x.toFixed(4), +wn.y.toFixed(4), +wn.z.toFixed(4)], pass: passF })
+        if (!passF) return
+
+        // ── G: callback ──
+        const passG = !!onSupportPointAddRef.current
+        T('G callback', { exists: passG, pass: passG })
+        if (!passG) return
+        onSupportPointAddRef.current!(wp.x, wp.y, wp.z, wn.x, wn.y, wn.z)
         e.stopPropagation()
       } else if (mode === 'delete') {
         // Raycast against manual support proxy markers
