@@ -571,31 +571,12 @@ export default function StlImport() {
     if (!selectedId || !selected) return
     setGenerating(true)
     try {
-      // Bake the full display transform (Y/Z swap + center + translate + rotation + scale)
-      // into the mesh vertices, then export as STL. This ensures the backend works on
-      // exactly the geometry the user sees — no transform desync.
-      const { STLExporter } = await import('three/examples/jsm/exporters/STLExporter.js')
-      const viewerMeshData = (window as any).__stlViewerMeshMap?.get(selectedId)
-      let stlBlob: Blob
-      if (viewerMeshData?.mesh) {
-        // Export the displayed mesh with all transforms baked in
-        const exporter = new STLExporter()
-        const THREE_mod = await import('three')
-        const tempScene = new THREE_mod.Scene()
-        const clone = viewerMeshData.mesh.clone()
-        clone.applyMatrix4(viewerMeshData.group.matrixWorld)
-        tempScene.add(clone)
-        const stlBinary = exporter.parse(tempScene, { binary: true })
-        stlBlob = new Blob([stlBinary as any], { type: 'application/octet-stream' })
-        tempScene.remove(clone)
-        clone.geometry.dispose()
-      } else {
-        // Fallback: send raw file (no transform)
-        const resp = await fetch(selected.url)
-        stlBlob = await resp.blob()
-      }
+      // Send the raw STL file — the backend handles centering in its own space.
+      // The V2 mesh output is positioned in the model group to match.
+      const resp = await fetch(selected.url)
+      const blob = await resp.blob()
       const fd = new FormData()
-      fd.append('stlFile', stlBlob, selected.fileName)
+      fd.append('stlFile', blob, selected.fileName)
       fd.append('orientation', activePrinter?.orientation ?? 'BottomUp')
       if (selectedPrinterId) fd.append('printerId', selectedPrinterId)
       fd.append('overhangAngleDeg', String(autoSupportConfig.overhangAngle))
