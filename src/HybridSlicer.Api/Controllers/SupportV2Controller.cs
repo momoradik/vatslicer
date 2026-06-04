@@ -199,6 +199,81 @@ public sealed class SupportV2Controller : ControllerBase
         });
     }
 
+    // ── BVH cache for interactive single-support calls ──
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (AabbBvh bvh, StlMesh mesh, SupportEngineV2.EngineConfig config, System.Numerics.Vector3 offset)> _bvhCache = new();
+
+    /// <summary>
+    /// Compute a single support in real time — same engine as auto, for ONE tip.
+    /// Uses cached BVH for speed (target &lt;16ms compute).
+    /// </summary>
+    [HttpPost("single")]
+    [RequestSizeLimit(200_000_000)]
+    public async Task<IActionResult> ComputeSingle(
+        [FromForm] IFormFile stlFile,
+        [FromForm] float tipX, [FromForm] float tipY, [FromForm] float tipZ,
+        [FromForm] float normalX, [FromForm] float normalY, [FromForm] float normalZ,
+        [FromForm] string orientation = "BottomUp",
+        [FromForm] float pinRadius = 0.2f, [FromForm] float pillarRadius = 0.5f, [FromForm] float baseRadius = 2.0f,
+        [FromForm] string? existingRoutesJson = null,
+        CancellationToken ct = default)
+    {
+        if (stlFile is null || stlFile.Length == 0) return BadRequest("STL file required.");
+
+        byte[] data;
+        using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
+
+        // Cache key: hash of the STL data
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data))[..16];
+
+        if (!_bvhCache.TryGetValue(hash, out var cached))
+        {
+            var rawMesh = StlMesh.FromBinary(data);
+            // Center mesh (same as Generate Step 0)
+            float meshW = rawMesh.Max.X - rawMesh.Min.X, meshD = rawMesh.Max.Y - rawMesh.Min.Y;
+            float offX = -(rawMesh.Min.X + meshW / 2), offY = -(rawMesh.Min.Y + meshD / 2), offZ = -rawMesh.Min.Z;
+            rawMesh = rawMesh.Transform(new System.Numerics.Vector3(offX, offY, offZ), 1.0f);
+            var bvh = AabbBvh.Build(rawMesh);
+
+            var orient = PrinterOrientation.BottomUp;
+            if (Enum.TryParse<PrinterOrientation>(orientation, true, out var o)) orient = o;
+
+            var cfg = new SupportEngineV2.EngineConfig
+            {
+                Orientation = orient,
+                PinRadiusMm = pinRadius, PillarRadiusMm = pillarRadius, BaseRadiusMm = baseRadius,
+            };
+            cached = (bvh, rawMesh, cfg, new System.Numerics.Vector3(offX, offY, offZ));
+            _bvhCache[hash] = cached;
+        }
+
+        // Apply centering to the tip position (same offset as mesh centering)
+        var tipPos = new System.Numerics.Vector3(tipX, tipY, tipZ) + cached.offset;
+        var tipNormal = new System.Numerics.Vector3(normalX, normalY, normalZ);
+
+        var result = SupportEngineV2.ComputeSingleSupport(
+            tipPos, tipNormal, cached.bvh, cached.mesh, cached.config,
+            overridePillarRadius: pillarRadius > 0 ? pillarRadius / 2f : null,
+            overrideBaseRadius: baseRadius > 0 ? baseRadius / 2f : null);
+
+        // Return mesh as base64 + status
+        var stlBytes = result.Mesh.FaceCount > 0 ? result.Mesh.ToStlBinary() : Array.Empty<byte>();
+
+        return Ok(new
+        {
+            status = result.Status,
+            pillarAxis = new { x = result.PillarAxis.X, y = result.PillarAxis.Y, z = result.PillarAxis.Z },
+            baseZ = result.BaseZ,
+            bundledIntoId = result.BundledIntoId,
+            computeMs = result.ComputeMs,
+            meshOffset = new { x = cached.offset.X, y = cached.offset.Y, z = cached.offset.Z },
+            mesh = new
+            {
+                faces = result.Mesh.FaceCount,
+                stlBase64 = stlBytes.Length > 0 ? Convert.ToBase64String(stlBytes) : null,
+            },
+        });
+    }
+
     /// <summary>
     /// Download the watertight support mesh as binary STL.
     /// </summary>

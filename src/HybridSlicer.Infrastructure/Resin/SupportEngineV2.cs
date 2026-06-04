@@ -1060,6 +1060,265 @@ public static class SupportEngineV2
         };
     }
 
+    // ── Single-support computation (same pipeline as auto, for ONE tip) ──
+
+    public sealed class SingleSupportResult
+    {
+        public required IndexedTriangleSet Mesh { get; init; }
+        public required string Status { get; init; } // "routed" | "bundled" | "collision" | "uncoverable"
+        public required Vector3 PillarAxis { get; init; }
+        public required float BaseZ { get; init; }
+        public string? BundledIntoId { get; init; }
+        public required float ComputeMs { get; init; }
+    }
+
+    /// <summary>
+    /// Compute a single support using the SAME pipeline as auto supports.
+    /// Calls the same PinheadOptimizer, PillarRouter, SupportSizer, and SupportMesher.
+    /// </summary>
+    public static SingleSupportResult ComputeSingleSupport(
+        Vector3 tipPosition, Vector3 tipNormal,
+        AabbBvh bvh, StlMesh mesh, EngineConfig config,
+        List<(string id, PillarRouter.PillarRoute route)>? existingRoutes = null,
+        float? overrideTipRadius = null, float? overridePillarRadius = null, float? overrideBaseRadius = null)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        float pinRadiusScale = config.Orientation == PrinterOrientation.BottomUp ? 0.8f : 1.0f;
+
+        // ── Step 1: Pinhead optimization (same as auto Step 3) ──
+        var phCfg = new PinheadOptimizer.PinheadConfig
+        {
+            PinRadiusMm = config.PinRadiusMm * pinRadiusScale,
+            BackRadiusMm = config.BackRadiusMm,
+            WidthMm = config.HeadWidthMm,
+            PenetrationMm = config.PenetrationMm,
+            CollisionRays = Math.Min(config.CollisionRays, 8),
+        };
+        var pinhead = PinheadOptimizer.Optimize(tipPosition, tipNormal, bvh, phCfg);
+
+        if (!pinhead.IsValid)
+        {
+            sw.Stop();
+            return new SingleSupportResult
+            {
+                Mesh = new IndexedTriangleSet(),
+                Status = "uncoverable",
+                PillarAxis = new Vector3(0, 0, 1),
+                BaseZ = 0,
+                ComputeMs = sw.ElapsedMilliseconds,
+            };
+        }
+
+        // ── Step 2: Pillar routing (same as auto Step 4) ──
+        var routingConfig = new PillarRouter.RoutingConfig
+        {
+            BaseZ = 0,
+            PillarRadiusMm = config.PillarRadiusMm,
+            BaseRadiusMm = config.BaseRadiusMm,
+            BaseHeightMm = config.BaseHeightMm,
+            WideningFactor = config.WideningFactor,
+            MaxBridgeLengthMm = config.MaxBridgeLengthMm,
+            CollisionRays = config.CollisionRays,
+        };
+
+        var routeStart = pinhead.JunctionPoint.Z > 0.1f ? pinhead.JunctionPoint : pinhead.ContactPoint;
+        var route = PillarRouter.Route(routeStart, pinhead.BackRadius, bvh, routingConfig);
+
+        // ── Step 3: Bundling — check if we can merge into an existing column ──
+        string? bundledIntoId = null;
+        if (existingRoutes is { Count: > 0 } && route.ReachesGround)
+        {
+            float bestDist = float.MaxValue;
+            int bestIdx = -1;
+            var myTop = routeStart;
+            for (int j = 0; j < existingRoutes.Count; j++)
+            {
+                var nr = existingRoutes[j];
+                if (nr.route.Path.Count < 2) continue;
+                float d = Vector2.Distance(
+                    new Vector2(myTop.X, myTop.Y),
+                    new Vector2(nr.route.Path[0].Position.X, nr.route.Path[0].Position.Y));
+                if (d > 0.5f && d < config.TreeMergeDistMm && d < bestDist)
+                { bestDist = d; bestIdx = j; }
+            }
+
+            if (bestIdx >= 0)
+            {
+                var neighbor = existingRoutes[bestIdx];
+                float mergeZ = Math.Max(routeStart.Z * 0.5f, neighbor.route.Path[^1].Position.Z + 1f);
+                mergeZ = Math.Clamp(mergeZ, neighbor.route.Path[^1].Position.Z + 1f, neighbor.route.Path[0].Position.Z);
+
+                var newPath = new List<PillarRouter.Waypoint>();
+                foreach (var wp in route.Path)
+                {
+                    if (wp.Position.Z > mergeZ) newPath.Add(wp);
+                    else break;
+                }
+                if (newPath.Count == 0) newPath.Add(route.Path[0]);
+
+                var nPos = neighbor.route.Path[0].Position;
+                newPath.Add(new PillarRouter.Waypoint
+                {
+                    Position = new Vector3(nPos.X, nPos.Y, mergeZ),
+                    Radius = pinhead.BackRadius, Type = "bridge"
+                });
+                foreach (var wp in neighbor.route.Path)
+                {
+                    if (wp.Position.Z <= mergeZ) newPath.Add(wp);
+                }
+
+                if (newPath.Count >= 2)
+                {
+                    route = new PillarRouter.PillarRoute
+                    {
+                        Path = newPath,
+                        ReachesGround = neighbor.route.ReachesGround,
+                        TotalLength = 0,
+                    };
+                    bundledIntoId = neighbor.id;
+                }
+            }
+        }
+
+        // Emission gate
+        bool hasLoadPath = route.Path.Count >= 2 &&
+            (route.ReachesGround || route.AnchorPoint.HasValue || route.Path.Any(wp => wp.Type == "base"));
+
+        if (!hasLoadPath)
+        {
+            sw.Stop();
+            return new SingleSupportResult
+            {
+                Mesh = new IndexedTriangleSet(),
+                Status = "uncoverable",
+                PillarAxis = new Vector3(0, 0, 1),
+                BaseZ = 0,
+                ComputeMs = sw.ElapsedMilliseconds,
+            };
+        }
+
+        // ── Step 4: Physics sizing (same as auto Step 5b) ──
+        float supportHeight = route.Path.Count >= 2
+            ? route.Path[0].Position.Z - route.Path[^1].Position.Z : 1f;
+        var sizing = SupportSizer.Size(
+            supportHeight: Math.Max(supportHeight, 0.5f),
+            layerArea: 25f,
+            supportsInLayer: 1,
+            rootsOnPlate: route.ReachesGround);
+
+        // Apply manual overrides
+        if (overrideTipRadius.HasValue || overridePillarRadius.HasValue || overrideBaseRadius.HasValue)
+        {
+            sizing = new SupportSizer.SupportSizing
+            {
+                TipRadius = overrideTipRadius ?? sizing.TipRadius,
+                ContactSphereRadius = sizing.ContactSphereRadius,
+                ContactDepth = sizing.ContactDepth,
+                PillarRadius = overridePillarRadius ?? sizing.PillarRadius,
+                BaseRadius = overrideBaseRadius ?? sizing.BaseRadius,
+                BaseHeight = sizing.BaseHeight,
+                Force = sizing.Force,
+            };
+        }
+
+        // Apply sizing to route waypoints
+        for (int wi = 0; wi < route.Path.Count; wi++)
+        {
+            var wp = route.Path[wi];
+            float newRadius = wp.Type switch
+            {
+                "junction" => sizing.PillarRadius,
+                "pillar" => sizing.PillarRadius + config.WideningFactor * (route.Path[0].Position.Z - wp.Position.Z),
+                "base" => sizing.BaseRadius > 0 ? sizing.BaseRadius : wp.Radius,
+                "bridge" => sizing.PillarRadius,
+                "anchor" => sizing.PillarRadius * 1.5f,
+                _ => wp.Radius,
+            };
+            route.Path[wi] = new PillarRouter.Waypoint
+            {
+                Position = wp.Position,
+                Radius = Math.Max(newRadius, 0.1f),
+                Type = wp.Type,
+            };
+        }
+
+        // ── Step 5: Mesh generation (same as auto Step 6) ──
+        int meshSides = 8;
+        var parts = new List<IndexedTriangleSet>();
+
+        // Contact sphere
+        var contactSphere = SupportMesher.OrientedSphere(
+            pinhead.ContactPoint, sizing.ContactSphereRadius, 4, meshSides);
+        parts.Add(contactSphere);
+
+        // Pinhead frustum (contact → junction/route start)
+        if (Vector3.Distance(pinhead.ContactPoint, routeStart) > 0.1f)
+        {
+            var phMesh = SupportMesher.OrientedFrustum(
+                pinhead.ContactPoint, routeStart,
+                sizing.TipRadius, sizing.PillarRadius, meshSides);
+            parts.Add(phMesh);
+        }
+
+        // Pillar segments + junction spheres
+        float totalPillarHeight = route.Path[0].Position.Z - route.Path[^1].Position.Z;
+        for (int i = 0; i < route.Path.Count - 1; i++)
+        {
+            var wp1 = route.Path[i];
+            var wp2 = route.Path[i + 1];
+            var seg = SupportMesher.OrientedFrustum(wp1.Position, wp2.Position, wp1.Radius, wp2.Radius, meshSides);
+            parts.Add(seg);
+            if (i > 0)
+            {
+                var sphere = SupportMesher.OrientedSphere(wp1.Position, wp1.Radius, 4, meshSides);
+                parts.Add(sphere);
+            }
+        }
+
+        // Mini raft under base
+        if (config.EnableMiniRafts && route.ReachesGround && route.Path.Count > 0)
+        {
+            var baseWp = route.Path[^1];
+            if (baseWp.Type == "base")
+            {
+                var raft = MiniRaft.Generate(
+                    baseWp.Position, baseWp.Radius,
+                    config.RaftMarginMm, config.RaftThicknessMm, 12);
+                parts.Add(raft);
+            }
+        }
+
+        // Combine
+        var combined = new IndexedTriangleSet();
+        foreach (var part in parts) combined.Merge(part);
+
+        // Collision check against model
+        bool collides = false;
+        for (int i = 0; i < route.Path.Count - 1 && !collides; i++)
+        {
+            var wp1 = route.Path[i];
+            var wp2 = route.Path[i + 1];
+            float clearance = bvh.BeamCast(wp1.Position, Vector3.Normalize(wp2.Position - wp1.Position),
+                wp1.Radius * 0.5f, 4, Vector3.Distance(wp1.Position, wp2.Position));
+            if (clearance < Vector3.Distance(wp1.Position, wp2.Position) * 0.9f)
+                collides = true;
+        }
+
+        sw.Stop();
+        string status = collides ? "collision" : bundledIntoId != null ? "bundled" : "routed";
+
+        return new SingleSupportResult
+        {
+            Mesh = combined,
+            Status = status,
+            PillarAxis = new Vector3(0, 0, 1), // always vertical in Z-up
+            BaseZ = route.Path[^1].Position.Z,
+            BundledIntoId = bundledIntoId,
+            ComputeMs = sw.ElapsedMilliseconds,
+        };
+    }
+
     // ── Legacy format builders ───────────────────────────────────────────
 
     private static List<AdvancedSupportEngine.AdvancedSupport> BuildLegacySupports(

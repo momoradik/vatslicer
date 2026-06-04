@@ -226,6 +226,19 @@ export const supportV2Api = {
       headers: { 'Content-Type': 'multipart/form-data' },
       responseType: 'blob', timeout: 120000,
     }).then(r => r.data as Blob),
+  /** Compute a single support in real time (same engine as auto, for ONE tip) */
+  computeSingle: (fd: FormData) =>
+    http.post<{
+      status: string  // 'routed' | 'bundled' | 'collision' | 'uncoverable'
+      pillarAxis: { x: number; y: number; z: number }
+      baseZ: number
+      bundledIntoId: string | null
+      computeMs: number
+      meshOffset: { x: number; y: number; z: number }
+      mesh: { faces: number; stlBase64: string | null }
+    }>('/support-v2/single', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 5000,
+    }).then(r => r.data),
   /** Get support mesh as ArrayBuffer for Three.js STLLoader */
   getMeshBuffer: (fd: FormData) =>
     http.post('/support-v2/mesh', fd, {

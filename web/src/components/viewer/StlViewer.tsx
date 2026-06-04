@@ -81,7 +81,7 @@ interface Props {
   paintedRegions?: PaintedRegionData[]
   supportTipType?: 'light' | 'medium' | 'heavy'
   supportBrushSize?: number
-  onSupportPointAdd?: (x: number, y: number, z: number, nx: number, ny: number, nz: number) => void
+  onSupportPointAdd?: (x: number, y: number, z: number, nx: number, ny: number, nz: number, faceIndex?: number, baryU?: number, baryV?: number) => void
   onSupportPointDelete?: (id: string) => void
   onPaintRegionAdd?: (mode: 'enforcer' | 'blocker', cx: number, cy: number, cz: number) => void
   crossBraces?: CrossBraceDisplayData[]
@@ -89,8 +89,12 @@ interface Props {
   supportMeshBuffer?: ArrayBuffer | null
   // Backend centering offset — used to reverse XY/Z centering on the return path
   supportMeshOffset?: { x: number; y: number; z: number } | null
-  // Manual support markers — rendered as proxy spheres + preview pillars
-  manualMarkers?: { id: string; x: number; y: number; z: number; shaftDiameter: number; uncoverable: boolean }[]
+  // Manual support markers — rendered as real engine geometry when available, proxy sphere otherwise
+  manualMarkers?: {
+    id: string; x: number; y: number; z: number; shaftDiameter: number; uncoverable: boolean
+    engineStatus?: string; engineMeshBase64?: string
+    engineMeshOffset?: { x: number; y: number; z: number }
+  }[]
   // True once commitOrientation has completed — clicks are blocked until this is true
   orientationCommitted?: boolean
   // Raft/Skirt visualization
@@ -1119,6 +1123,18 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       sceneRef.current.add(mesh)
       v2MeshRef.current = mesh
 
+      // Clear individual manual support previews — V2 mesh supersedes them
+      if (manualMarkerGroupRef.current) {
+        sceneRef.current.remove(manualMarkerGroupRef.current)
+        manualMarkerGroupRef.current.children.forEach(c => {
+          const m = c as THREE.Mesh
+          if (m.material) (m.material as THREE.Material).dispose()
+          if (m.geometry && m.geometry !== markerSharedGeoRef.current) m.geometry.dispose()
+        })
+        manualMarkerGroupRef.current = null
+        if (markerSharedGeoRef.current) { markerSharedGeoRef.current.dispose(); markerSharedGeoRef.current = null }
+      }
+
       // MANDATORY VERIFICATION: support bases must be at Y≈0 (bed level)
       geometry.computeBoundingBox()
       const bb = geometry.boundingBox!
@@ -1171,111 +1187,91 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     const sharedGeo = new THREE.SphereGeometry(markerRadius, 10, 10)
     markerSharedGeoRef.current = sharedGeo
 
-    // Collect raycast targets: model meshes + existing V2 support mesh
-    const modelMeshes: THREE.Mesh[] = []
-    meshMapRef.current.forEach(d => modelMeshes.push(d.mesh))
-    const allTargets = [...modelMeshes]
-    if (v2MeshRef.current) allTargets.push(v2MeshRef.current)
-
-    const downDir = new THREE.Vector3(0, -1, 0) // world -Y = build direction (Y-up)
-    const rc = new THREE.Raycaster()
-    const DRAINAGE_CLEARANCE = 1.0 // mm — resin drainage spacing
+    const loader = new STLLoader()
 
     markers.forEach(m => {
-      const shaftR = Math.max(0.1, (m.shaftDiameter ?? 0.6) / 2)
-
-      // ── Raycast straight down from just below contact ──
-      const startY = m.y - markerRadius * 0.5
-      rc.set(new THREE.Vector3(m.x, startY, m.z), downDir)
-      rc.far = startY + 1 // don't go below Y=-1
-
-      const hits = rc.intersectObjects(allTargets, false)
-
-      let pillarEndY = 0
-      let status: 'clear' | 'collision' | 'bundle' = 'clear'
-
-      for (const hit of hits) {
-        if (hit.distance < shaftR * 2) continue // skip contact surface itself
-        const isExistingSupport = hit.object === v2MeshRef.current
-        if (isExistingSupport) {
-          // -Z ray meets existing support column → will bundle
-          pillarEndY = hit.point.y
-          status = 'bundle'
-          break
-        }
-        const isModel = modelMeshes.includes(hit.object as THREE.Mesh)
-        if (isModel) {
-          // Pillar passes through model surface → collision
-          pillarEndY = hit.point.y
-          status = 'collision'
-          break
-        }
+      // ── Determine status from engine or frontend hint ──
+      const engineStatus = m.engineStatus ?? (m.uncoverable ? 'uncoverable' : undefined)
+      const statusColors: Record<string, { marker: number; emissive: number; support: number }> = {
+        routed:      { marker: 0xff6600, emissive: 0x331100, support: 0x14b8a6 },
+        bundled:     { marker: 0x44cc88, emissive: 0x113322, support: 0x44cc88 },
+        collision:   { marker: 0xff3333, emissive: 0x441111, support: 0xff3333 },
+        uncoverable: { marker: 0xff0000, emissive: 0x440000, support: 0xff0000 },
+        pending:     { marker: 0xff6600, emissive: 0x331100, support: 0x44aaff },
       }
+      const c = statusColors[engineStatus ?? 'pending']
 
-      // ── Proximity clearance check (drainage spacing) ──
-      // Cast 4 offset rays around the pillar to detect features within 1mm
-      if (status === 'clear') {
-        const offsets = [
-          new THREE.Vector3(DRAINAGE_CLEARANCE, 0, 0),
-          new THREE.Vector3(-DRAINAGE_CLEARANCE, 0, 0),
-          new THREE.Vector3(0, 0, DRAINAGE_CLEARANCE),
-          new THREE.Vector3(0, 0, -DRAINAGE_CLEARANCE),
-        ]
-        const pillarHeight = m.y - pillarEndY
-        for (const off of offsets) {
-          // Horizontal ray from pillar midpoint outward, short range
-          rc.set(new THREE.Vector3(m.x, m.y - pillarHeight * 0.5, m.z), off.normalize())
-          rc.far = DRAINAGE_CLEARANCE + shaftR
-          const proxHits = rc.intersectObjects(modelMeshes, false)
-          if (proxHits.length > 0 && proxHits[0].distance < DRAINAGE_CLEARANCE + shaftR) {
-            status = 'collision' // too close to model feature
-            break
-          }
-        }
-      }
-
-      // Override with uncoverable from backend
-      if (m.uncoverable) status = 'collision'
-
-      // ── Colors ──
-      const colors = {
-        clear:     { marker: 0xff6600, emissive: 0x331100, pillar: 0x44aaff },
-        collision: { marker: 0xff3333, emissive: 0x441111, pillar: 0xff3333 },
-        bundle:    { marker: 0x44cc88, emissive: 0x113322, pillar: 0x44cc88 },
-      }
-      const c = colors[status]
-
-      // ── Contact marker sphere ──
+      // ── Contact marker sphere (always shown) ──
       const markerMat = new THREE.MeshPhongMaterial({ color: c.marker, emissive: c.emissive })
       const sphere = new THREE.Mesh(sharedGeo, markerMat)
       sphere.position.set(m.x, m.y, m.z)
       sphere.userData = { supportPointId: m.id }
       group.add(sphere)
 
-      // ── Preview pillar ──
-      const pillarHeight = m.y - pillarEndY
-      if (pillarHeight < 0.1) return
+      // ── Real engine geometry (replaces fake cylinder) ──
+      if (m.engineMeshBase64) {
+        try {
+          const binary = atob(m.engineMeshBase64)
+          const bytes = new Uint8Array(binary.length)
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+          const geo = loader.parse(bytes.buffer)
 
-      const pillarGeo = new THREE.CylinderGeometry(shaftR, shaftR, pillarHeight, 8)
-      const pillarMat = new THREE.MeshPhongMaterial({
-        color: c.pillar, transparent: true, opacity: 0.3, depthWrite: false,
-      })
-      const pillar = new THREE.Mesh(pillarGeo, pillarMat)
-      pillar.position.set(m.x, pillarEndY + pillarHeight / 2, m.z)
-      pillar.renderOrder = 2
-      group.add(pillar)
+          // Same space conversion as V2 mesh: reverse centering + Z→Y swap + winding
+          const positions = geo.getAttribute('position')
+          if (m.engineMeshOffset) {
+            for (let i = 0; i < positions.count; i++) {
+              positions.setX(i, positions.getX(i) - m.engineMeshOffset.x)
+              positions.setY(i, positions.getY(i) - m.engineMeshOffset.y)
+              positions.setZ(i, positions.getZ(i) - m.engineMeshOffset.z)
+            }
+          }
+          for (let i = 0; i < positions.count; i++) {
+            const y = positions.getY(i), z = positions.getZ(i)
+            positions.setY(i, z); positions.setZ(i, y)
+          }
+          for (let i = 0; i < positions.count; i += 3) {
+            const x1=positions.getX(i+1),y1=positions.getY(i+1),z1=positions.getZ(i+1)
+            const x2=positions.getX(i+2),y2=positions.getY(i+2),z2=positions.getZ(i+2)
+            positions.setXYZ(i+1, x2, y2, z2)
+            positions.setXYZ(i+2, x1, y1, z1)
+          }
+          positions.needsUpdate = true
+          geo.computeVertexNormals()
+
+          // Same material style as V2 auto mesh — identical appearance
+          const mat = new THREE.MeshPhongMaterial({
+            color: c.support,
+            specular: 0x444444,
+            transparent: true,
+            opacity: engineStatus === 'routed' || engineStatus === 'bundled' ? 0.7 : 0.5,
+            shininess: 50,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          })
+
+          const supportMesh = new THREE.Mesh(geo, mat)
+          supportMesh.renderOrder = 1
+          group.add(supportMesh)
+        } catch (err) {
+          console.error('[ManualSupport] Failed to parse engine mesh:', err)
+        }
+      } else if (!engineStatus || engineStatus === 'pending') {
+        // Pending engine call — show lightweight ghost (sphere only, no fake cylinder)
+        // The marker sphere is already added above
+      }
     })
 
     sceneRef.current.add(group)
     manualMarkerGroupRef.current = group
 
-    // ── I: marker render + J: preview pillar ──
+    // ── STEP J: marker render ──
     const markersInScene = group.children.filter(c => c.userData?.supportPointId).length
+    const passJ = markersInScene === markers.length
+    console.log('MSADD', { step: 'J', pointsInState: markers.length, markersInScene, pass: passJ })
+    if (!passJ) console.error('MSADD RENDER INVARIANT FAILED:', markersInScene, 'markers vs', markers.length, 'points')
+    // ── STEP K: preview pillar ──
     const pillarsInScene = group.children.length - markersInScene
-    const passI = markersInScene === markers.length
-    console.log(`%c[TRACE] I marker-render`, 'color:#f0a', JSON.stringify({ markersInScene, pointsInState: markers.length, pass: passI }))
-    console.log(`%c[TRACE] J pillars`, 'color:#f0a', JSON.stringify({ pillarCount: pillarsInScene, markerCount: markers.length }))
-    if (!passI) console.error(`[ManualSupport] RENDER INVARIANT FAILED: ${markersInScene} markers vs ${markers.length} points`)
+    console.log('MSADD', { step: 'K', pillarCreated: pillarsInScene, pillarBaseZ: 0 })
   }, [manualMarkers, sceneReady])
 
   // ── Support callback refs (avoid stale closures) ─────────────────────────
@@ -1310,85 +1306,96 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     const onPointerDown = (e: PointerEvent) => { pointerDownPx = { x: e.clientX, y: e.clientY } }
 
     const onClick = (e: MouseEvent) => {
-      const tid = Math.random().toString(36).slice(2, 8)
-      const T = (step: string, obj: Record<string, unknown>) => console.log(`%c[TRACE ${tid}] ${step}`, 'color:#f0a', JSON.stringify(obj))
+      const traceId = Math.random().toString(36).slice(2, 10)
+      const M = (step: string, obj: Record<string, unknown>) => console.log('MSADD', { traceId, step, ...obj })
 
-      // ── A: click fired ──
+      // ── STEP A: click fired ──
       const dx = e.clientX - pointerDownPx.x, dy = e.clientY - pointerDownPx.y
-      const dragPx = Math.sqrt(dx * dx + dy * dy)
+      const dragPx = +(Math.sqrt(dx * dx + dy * dy).toFixed(1))
       const passA = e.button === 0 && dragPx <= 4
-      T('A click', { button: e.button, dragPx: +dragPx.toFixed(1), pass: passA })
+      M('A', { button: e.button, dragPx, pass: passA })
       if (!passA) return
 
-      // ── B: orientation gate ──
-      const passB = !!orientationCommittedRef.current
-      T('B orientation', { orientationCommitted: orientationCommittedRef.current, pass: passB })
-      if (!passB) return
+      // ── STEP B: edit-mode ref ──
+      const modeRef = supportEditModeRef.current
+      const passB = modeRef === 'add'
+      M('B', { supportEditModeRef: modeRef, pass: passB })
+      if (modeRef !== 'add' && modeRef !== 'delete' && modeRef !== 'paint-enforcer' && modeRef !== 'paint-blocker') return
 
-      // ── C: identity gate ──
+      // ── STEP C: orientation gate ──
+      const passC = !!orientationCommittedRef.current
+      M('C', { orientationCommitted: orientationCommittedRef.current, pass: passC })
+      if (!passC) return
+
+      // ── STEP D: identity gate (all 16 elements) ──
       raycaster.setFromCamera(toNDC(e), camera)
       const identity4 = new THREE.Matrix4()
-      let passC = true
+      let passD = true
       for (const [id, d] of meshMapRef.current) {
-        const eq = d.group.matrixWorld.equals(identity4)
-        if (!eq) {
-          const el = d.group.matrixWorld.elements
-          T('C identity FAIL', { modelId: id, diag: [el[0],el[5],el[10]], trans: [el[12],el[13],el[14]], pass: false })
-          passC = false
+        if (!d.group.matrixWorld.equals(identity4)) {
+          M('D', { matrixIsIdentity: false, modelId: id, matrix: Array.from(d.group.matrixWorld.elements).map(v => +v.toFixed(4)), pass: false })
+          passD = false
         }
       }
-      if (!passC) return
-      T('C identity', { pass: true })
+      if (!passD) return
+      M('D', { matrixIsIdentity: true, pass: true })
 
-      if (mode === 'add') {
-        // ── D: raycast inputs ──
+      if (modeRef === 'add') {
+        // ── STEP E: raycast inputs ──
         const meshes: THREE.Mesh[] = []
-        const dArr: unknown[] = []
-        meshMapRef.current.forEach((d, id) => {
+        const perMesh: unknown[] = []
+        const accelPatched = (THREE.Mesh.prototype as any).raycast?.toString().includes('boundsTree') ?? false
+        meshMapRef.current.forEach((d, mid) => {
           const geo = d.mesh.geometry
           const pos = geo.getAttribute('position')
           const bt = (geo as any).boundsTree
-          dArr.push({
-            id, geoUuid: geo.uuid, vtxCount: pos?.count ?? 0,
-            hasBSphere: !!geo.boundingSphere,
+          const vtxCount = pos?.count ?? 0
+          perMesh.push({
+            modelId: mid, geomId: geo.uuid,
+            vertexCount: vtxCount,
+            hasBoundingSphere: !!geo.boundingSphere,
             bSphereR: geo.boundingSphere?.radius?.toFixed(2) ?? 'null',
-            hasBTree: !!bt,
-            visible: d.mesh.visible,
-            parent: d.mesh.parent?.type ?? 'null',
+            hasBoundsTree: !!bt,
+            boundsTreeVertexCount: bt ? (bt._roots?.[0] ? 'exists' : 'empty') : 'none',
+            meshVisible: d.mesh.visible,
+            meshParent: d.mesh.parent?.type ?? 'null',
           })
           if (!geo.boundingSphere) geo.computeBoundingSphere()
           meshes.push(d.mesh)
         })
-        T('D inputs', { meshCount: meshes.length, meshes: dArr })
+        M('E', { meshCount: meshes.length, accelRaycastPatched: accelPatched, perMesh, pass: meshes.length > 0 })
 
-        // ── E: raycast result ──
+        // ── STEP F: raycast result ──
         const hits = raycaster.intersectObjects(meshes, false)
-        const passE = hits.length > 0
-        T('E raycast', {
-          hitCount: hits.length, pass: passE,
-          ...(passE ? {
-            geoUuid: (hits[0].object as THREE.Mesh).geometry?.uuid,
-            face: hits[0].faceIndex,
-            pt: [+hits[0].point.x.toFixed(3), +hits[0].point.y.toFixed(3), +hits[0].point.z.toFixed(3)],
-            dist: +hits[0].distance.toFixed(3),
+        const passF = hits.length > 0
+        M('F', {
+          hitCount: hits.length, pass: passF,
+          ...(passF ? {
+            hitGeomId: (hits[0].object as THREE.Mesh).geometry?.uuid,
+            hitFaceIndex: hits[0].faceIndex,
+            hitPointWorld: [+hits[0].point.x.toFixed(3), +hits[0].point.y.toFixed(3), +hits[0].point.z.toFixed(3)],
+            hitDistance: +hits[0].distance.toFixed(3),
           } : {}),
         })
-        if (!passE) return
-
-        const hit = hits[0]
-        const wp = hit.point
-        const wn = hit.face?.normal ?? new THREE.Vector3(0, -1, 0)
-
-        // ── F: normal ──
-        const passF = isFinite(wn.x) && isFinite(wn.y) && isFinite(wn.z) && wn.lengthSq() > 0.001
-        T('F normal', { n: [+wn.x.toFixed(4), +wn.y.toFixed(4), +wn.z.toFixed(4)], pass: passF })
         if (!passF) return
 
-        // ── G: callback ──
-        const passG = !!onSupportPointAddRef.current
-        T('G callback', { exists: passG, pass: passG })
+        const wp = hits[0].point
+        const wn = hits[0].face?.normal ?? new THREE.Vector3(0, -1, 0)
+
+        // ── STEP G: derived normal ──
+        const passG = isFinite(wn.x) && isFinite(wn.y) && isFinite(wn.z) && wn.lengthSq() > 0.001
+        M('G', { faceNormalWorld: [+wn.x.toFixed(4), +wn.y.toFixed(4), +wn.z.toFixed(4)], pass: passG })
         if (!passG) return
-        onSupportPointAddRef.current!(wp.x, wp.y, wp.z, wn.x, wn.y, wn.z)
+
+        // ── STEP H: callback invoked (with face anchor) ──
+        const cb = onSupportPointAddRef.current
+        const passH = !!cb
+        M('H', { argCount: passH ? 9 : 0, faceIndex: hits[0].faceIndex, pass: passH })
+        if (!passH) return
+        // Compute barycentric coords from hit
+        let baryU: number | undefined, baryV: number | undefined
+        if (hits[0].uv) { baryU = hits[0].uv.x; baryV = hits[0].uv.y }
+        cb!(wp.x, wp.y, wp.z, wn.x, wn.y, wn.z, hits[0].faceIndex ?? undefined, baryU, baryV)
         e.stopPropagation()
       } else if (mode === 'delete') {
         // Raycast against manual support proxy markers

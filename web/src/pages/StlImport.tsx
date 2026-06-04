@@ -49,10 +49,16 @@ interface SupportPoint {
   id: string
   x: number; y: number; z: number       // contact point on mesh surface (Y-up world space)
   nx: number; ny: number; nz: number    // surface normal at contact (Y-up world space)
+  faceIndex?: number                    // face-anchored: triangle index in baked geometry
+  baryU?: number; baryV?: number        // barycentric coords within triangle (u,v; w=1-u-v)
   tipDiameterMm: number
   shaftDiameterMm: number
   baseDiameterMm: number
   type: 'light' | 'medium' | 'heavy'
+  // Live engine result (from computeSingleSupport)
+  engineStatus?: string        // 'routed' | 'bundled' | 'collision' | 'uncoverable'
+  engineMeshBase64?: string    // real mesh STL from engine
+  engineMeshOffset?: { x: number; y: number; z: number }
 }
 
 /** Single boundary conversion: Three.js Y-up → backend Z-up. X stays, Y↔Z swap. */
@@ -477,16 +483,83 @@ export default function StlImport() {
 
   // ── Manual support editing ──────────────────────────────────────────────────
 
-  const addSupportPoint = (x: number, y: number, z: number, nx: number, ny: number, nz: number) => {
-    if (!selectedId) return
+  const addSupportPoint = async (x: number, y: number, z: number, nx: number, ny: number, nz: number, faceIndex?: number, baryU?: number, baryV?: number) => {
+    if (!selectedId || !selected) return
     const presets = { light: { tip: 0.3, shaft: 0.6, base: 1.2 }, medium: { tip: 0.5, shaft: 1.0, base: 2.0 }, heavy: { tip: 0.8, shaft: 1.5, base: 3.0 } }
-    const p = presets[supportTipType]
-    const point: SupportPoint = { id: mkId(), x, y, z, nx, ny, nz, tipDiameterMm: p.tip, shaftDiameterMm: p.shaft, baseDiameterMm: p.base, type: supportTipType }
-    const before = selected?.manualSupports?.points?.length ?? 0
+    const pr = presets[supportTipType]
+    const pointId = mkId()
+    const point: SupportPoint = { id: pointId, x, y, z, nx, ny, nz, faceIndex, baryU, baryV, tipDiameterMm: pr.tip, shaftDiameterMm: pr.shaft, baseDiameterMm: pr.base, type: supportTipType }
+
+    // Add immediately with placeholder (marker sphere shows right away)
     updateModels(prev => prev.map(m =>
       m.id === selectedId ? { ...m, manualSupports: { ...m.manualSupports, points: [...m.manualSupports.points, point] } } : m
     ))
-    console.log(`%c[TRACE] H state-write`, 'color:#f0a', JSON.stringify({ before, after: before + 1, id: point.id, pass: true }))
+
+    // Call backend for real engine geometry (same pipeline as auto)
+    try {
+      const meshData = (window as any).__stlViewerMeshMap?.get(selectedId)
+      if (!meshData?.mesh) return
+      const { STLExporter } = await import('three/examples/jsm/exporters/STLExporter.js')
+      const THREE_mod = await import('three')
+
+      // Export current baked geometry for the backend
+      const backendGeo = meshData.mesh.geometry.clone()
+      const pos = backendGeo.getAttribute('position')
+      for (let i = 0; i < pos.count; i++) {
+        const [bx, by, bz] = yUpToZUp(pos.getX(i), pos.getY(i), pos.getZ(i))
+        pos.setXYZ(i, bx, by, bz)
+      }
+      for (let i = 0; i < pos.count; i += 3) {
+        const x1=pos.getX(i+1),y1=pos.getY(i+1),z1=pos.getZ(i+1)
+        const x2=pos.getX(i+2),y2=pos.getY(i+2),z2=pos.getZ(i+2)
+        pos.setXYZ(i+1, x2, y2, z2)
+        pos.setXYZ(i+2, x1, y1, z1)
+      }
+      pos.needsUpdate = true
+      const tmpMesh = new THREE_mod.Mesh(backendGeo)
+      const tmpScene = new THREE_mod.Scene()
+      tmpScene.add(tmpMesh)
+      const exporter = new STLExporter()
+      const stlBinary = exporter.parse(tmpScene, { binary: true })
+      const stlBlob = new Blob([stlBinary as any], { type: 'application/octet-stream' })
+      tmpScene.remove(tmpMesh)
+      backendGeo.dispose()
+
+      // Convert tip to Z-up for backend
+      const [tx, ty, tz] = yUpToZUp(x, y, z)
+      const [tnx, tny, tnz] = yUpToZUp(nx, ny, nz)
+
+      const fd = new FormData()
+      fd.append('stlFile', stlBlob, selected.fileName)
+      fd.append('tipX', String(tx))
+      fd.append('tipY', String(ty))
+      fd.append('tipZ', String(tz))
+      fd.append('normalX', String(tnx))
+      fd.append('normalY', String(tny))
+      fd.append('normalZ', String(tnz))
+      fd.append('pillarRadius', String(pr.shaft))
+      fd.append('baseRadius', String(pr.base))
+
+      const result = await supportV2Api.computeSingle(fd)
+      console.log('[SingleSupport]', result.status, `${result.computeMs}ms`, result.mesh.faces, 'faces')
+
+      // Update the point with engine result
+      updateModels(prev => prev.map(m =>
+        m.id === selectedId ? {
+          ...m, manualSupports: {
+            ...m.manualSupports,
+            points: m.manualSupports.points.map(p => p.id === pointId ? {
+              ...p,
+              engineStatus: result.status,
+              engineMeshBase64: result.mesh.stlBase64 ?? undefined,
+              engineMeshOffset: result.meshOffset,
+            } : p),
+          }
+        } : m
+      ))
+    } catch (err) {
+      console.error('[SingleSupport] engine call failed:', err)
+    }
   }
 
   const deleteSupportPoint = (pointId: string) => {
@@ -1072,12 +1145,14 @@ export default function StlImport() {
                   manualMarkers={selectedSupportData.points.map(p => ({
                     id: p.id, x: p.x, y: p.y, z: p.z, shaftDiameter: p.shaftDiameterMm,
                     uncoverable: (selectedPrep.uncoverableManualIds ?? []).includes(p.id),
+                    engineStatus: p.engineStatus, engineMeshBase64: p.engineMeshBase64,
+                    engineMeshOffset: p.engineMeshOffset,
                   }))}
                   orientationCommitted={orientationCommitted}
                   paintedRegions={selectedSupportData.paintedRegions}
                   supportTipType={supportTipType}
                   supportBrushSize={supportBrushSize}
-                  onSupportPointAdd={(x, y, z, nx, ny, nz) => addSupportPoint(x, y, z, nx, ny, nz)}
+                  onSupportPointAdd={(x, y, z, nx, ny, nz, fi, bu, bv) => addSupportPoint(x, y, z, nx, ny, nz, fi, bu, bv)}
                   onSupportPointDelete={(id) => deleteSupportPoint(id)}
                   onPaintRegionAdd={(mode, cx, cy, cz) => addPaintedRegion(mode, cx, cy, cz)}
                   raftData={selectedPrep.raft}
