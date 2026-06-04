@@ -1059,63 +1059,44 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       const loader = new STLLoader()
       const geometry = loader.parse(supportMeshBuffer)
 
-      // V2 mesh is in backend Z-up space. Swap Y/Z to match frontend Y-up.
-      // Same swap + winding fix as model geometry loading.
+      // ── Return path: V2 mesh → display space ─────────────────────────
+      // The V2 mesh is in backend Z-up space (the baked mesh we sent was
+      // converted to Z-up at the boundary). The backend only XY-centered
+      // and dropped to plate (pure translation, no orientation change).
+      //
+      // To display correctly:
+      // 1. Z-up → Y-up basis change (swap Y↔Z, fix winding)
+      // 2. Inverse-apply the model group's matrixWorld so that when the
+      //    group's transform is applied on render, the supports end up
+      //    at the same world position as the baked geometry.
+
+      // Step 1: Z-up → Y-up
       const positions = geometry.getAttribute('position')
       for (let i = 0; i < positions.count; i++) {
-        const y = positions.getY(i)
-        const z = positions.getZ(i)
+        const y = positions.getY(i), z = positions.getZ(i)
         positions.setY(i, z)
         positions.setZ(i, y)
       }
-      // Fix winding after Y/Z swap (reflection reverses handedness)
-      const vIdx = geometry.getIndex()
-      if (vIdx) {
-        for (let i = 0; i < vIdx.count; i += 3) {
-          const a = vIdx.getX(i + 1), b = vIdx.getX(i + 2)
-          vIdx.setX(i + 1, b); vIdx.setX(i + 2, a)
-        }
-        vIdx.needsUpdate = true
-      } else {
-        for (let i = 0; i < positions.count; i += 3) {
-          const x1=positions.getX(i+1),y1=positions.getY(i+1),z1=positions.getZ(i+1)
-          const x2=positions.getX(i+2),y2=positions.getY(i+2),z2=positions.getZ(i+2)
-          positions.setXYZ(i+1, x2, y2, z2)
-          positions.setXYZ(i+2, x1, y1, z1)
-        }
+      // Winding fix (Y/Z swap = reflection)
+      for (let i = 0; i < positions.count; i += 3) {
+        const x1=positions.getX(i+1),y1=positions.getY(i+1),z1=positions.getZ(i+1)
+        const x2=positions.getX(i+2),y2=positions.getY(i+2),z2=positions.getZ(i+2)
+        positions.setXYZ(i+1, x2, y2, z2)
+        positions.setXYZ(i+2, x1, y1, z1)
       }
       positions.needsUpdate = true
       geometry.computeVertexNormals()
 
-      // The V2 mesh (after Y/Z swap) is in backend-centered space.
-      // The model geometry went through center() + translate(0, ns.y/2, 0).
-      //
-      // Backend centering (on raw STL, Z-up):
-      //   offX = -(minX+W/2), offY = -(minY+D/2), offZ = -minZ
-      // Frontend centering (after Y/Z swap):
-      //   center() subtracts centroid: -(minX+W/2), -(minZ+H/2), -(minY+D/2)
-      //   translate(0, H/2, 0) adds H/2 to Y
-      //
-      // After swap: backend X = frontend X ✓
-      //             backend Z → frontend Y: backend starts at 0, frontend at 0 after translate ✓
-      //             backend Y → frontend Z: backend centered, frontend centered ✓
-      //
-      // The offset between them:
-      //   Frontend Y = backend_Z + (H/2 - H/2) = backend_Z → no offset needed
-      //   BUT: frontend center() uses (minZ+maxZ)/2 as Y centroid before translate
-      //   while backend uses -minZ. These are NOT the same for Y!
-      //
-      // Frontend Y after center: vertex.Z_swapped - (minZ+maxZ)/2
-      // Frontend Y after translate: + (maxZ-minZ)/2
-      // Net: vertex.Z_swapped - (minZ+maxZ)/2 + (maxZ-minZ)/2 = vertex.Z_swapped - minZ
-      // Backend Z: vertex.Z + (-minZ) = vertex.Z - minZ
-      // After swap: backend_Z_swapped_to_Y = vertex.Z - minZ (same as raw STL Z offset)
-      //
-      // So Y = rawZ - minZ for both! They DO match.
-      // X and Z also match (both center at centroid).
-      //
-      // The mesh position should be (0, 0, 0) — no offset.
-      // If supports appear misaligned, the issue is elsewhere.
+      // Step 2: inverse-apply group matrixWorld
+      // The baked mesh was in world space. The backend XY-centered and dropped
+      // to plate. The V2 mesh (after Z→Y swap) is now in a space that
+      // corresponds to world space but with backend centering applied.
+      // To place it in the group: inverse-apply the group's world matrix.
+      // When the group's matrixWorld is applied on render, it undoes the
+      // inverse → supports land at the correct world position.
+      const inverseWorld = modelData.group.matrixWorld.clone().invert()
+      geometry.applyMatrix4(inverseWorld)
+      geometry.computeVertexNormals() // recompute after transform
 
       const material = new THREE.MeshPhongMaterial({
         color: 0x14b8a6,

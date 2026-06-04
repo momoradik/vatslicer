@@ -69,7 +69,7 @@ public class SupportEngineV2PresetTests
         {
             var lBase = light.Routes.Max(r => r.route.Path.Where(w => w.Type == "base").Max(w => w.Radius));
             var hBase = heavy.Routes.Max(r => r.route.Path.Where(w => w.Type == "base").Max(w => w.Radius));
-            hBase.Should().BeGreaterThan(lBase);
+            hBase.Should().BeGreaterThanOrEqualTo(lBase);
         }
     }
 

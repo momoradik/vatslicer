@@ -190,20 +190,16 @@ public static class SupportEngineV2
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        // ── Step 0: Apply transform and center mesh ────────────────────
-        // Apply user transform first (translation + uniform scale)
-        if (config.Scale != 1.0f || config.TranslateX != 0 || config.TranslateY != 0 || config.TranslateZ != 0)
-        {
-            mesh = mesh.Transform(
-                new Vector3(config.TranslateX, config.TranslateY, config.TranslateZ),
-                config.Scale);
-        }
-        // Center mesh: XY at origin, Z bottom at 0
+        // ── Step 0: Center mesh (pure translation only) ───────────────
+        // The frontend bakes the full world transform (rotation/scale/position)
+        // into the mesh vertices before sending. The backend receives an already-
+        // oriented Z-up mesh. We only XY-center and drop to plate (Z=0).
+        // This is pure translation — it never changes which faces are overhangs.
         float meshW = mesh.Max.X - mesh.Min.X;
         float meshD = mesh.Max.Y - mesh.Min.Y;
         float offX = -(mesh.Min.X + meshW / 2);
         float offY = -(mesh.Min.Y + meshD / 2);
-        float offZ = -mesh.Min.Z;
+        float offZ = -mesh.Min.Z; // drop to plate
         mesh = mesh.Transform(new Vector3(offX, offY, offZ), 1.0f);
 
         // Bottom-Up specific: reduce pin radius for better surface quality

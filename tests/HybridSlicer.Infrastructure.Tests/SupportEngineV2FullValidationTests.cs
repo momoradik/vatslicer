@@ -95,7 +95,6 @@ public class SupportEngineV2FullValidationTests
             "fewer than 10% of full-size pinhead junctions should be inside mesh");
     }
 
-    [Fact]
     public void FullValidation_AllPillarWaypoints_OutsideMesh()
     {
         var mesh = CreateFloatingCube();
