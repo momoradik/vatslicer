@@ -1327,7 +1327,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       // ── Step B: orientation gate ──
       const passB = !!orientationCommittedRef.current
       T('B orientation', { orientationCommitted: passB, pass: passB })
-      if (!passB) return
+      if (!passB) { console.error('[ManualSupport] GATE B FAILED — orientation not committed. Click dropped.'); return }
 
       // ── Step C: identity gate ──
       raycaster.setFromCamera(toNDC(e), camera)
@@ -1337,7 +1337,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
         const eq = d.group.matrixWorld.equals(identity4)
         if (!eq) { T('C identity', { modelId: id, matrixIsIdentity: false, pass: false }); passC = false }
       }
-      if (!passC) return
+      if (!passC) { console.error('[ManualSupport] GATE C FAILED — group not at identity. Click dropped.'); return }
       T('C identity', { matrixIsIdentity: true, pass: true })
 
       if (mode === 'add') {

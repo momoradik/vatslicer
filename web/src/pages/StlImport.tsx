@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
+import { useState, useCallback, useRef, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import StlViewer, {
   type BuildVolume,
@@ -536,7 +536,9 @@ export default function StlImport() {
   const hasSupportEdits = selectedSupportData.points.length > 0 || selectedSupportData.paintedRegions.length > 0
 
   // ── Orientation commit — freeze pose into geometry, group becomes identity ──
-  // Called BEFORE manual placement so clicks land in the same frame the backend uses.
+  // Called synchronously from enterSupportEditMode BEFORE the mode changes,
+  // so by the time React renders and StlViewer registers the click handler,
+  // the geometry is already baked and the group is at identity. No race.
 
   const commitOrientation = useCallback((modelId: string) => {
     const meshData = (window as any).__stlViewerMeshMap?.get(modelId)
@@ -608,12 +610,12 @@ export default function StlImport() {
     console.log('[CommitOrientation] frozen, minY was:', minY.toFixed(2))
   }, [updateModels])
 
-  // Commit orientation when entering any support edit mode
-  useEffect(() => {
-    if (supportEditMode !== 'none' && selectedId) {
-      commitOrientation(selectedId)
+  const enterSupportEditMode = useCallback((mode: SupportEditMode) => {
+    if (mode !== 'none' && selectedId) {
+      commitOrientation(selectedId) // synchronous — runs NOW, before mode changes
     }
-  }, [supportEditMode, selectedId, commitOrientation])
+    setSupportEditMode(mode)
+  }, [selectedId, commitOrientation])
 
   // ── Hollowing controls ────────────────────────────────────────────────────
 
@@ -1540,16 +1542,16 @@ export default function StlImport() {
                     <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Manual Edit</h3>
                     <div className="grid grid-cols-3 gap-1 mb-2">
                       {([['none', 'View'], ['add', '+ Add'], ['delete', '- Del']] as const).map(([mode, label]) => (
-                        <button key={mode} onClick={() => setSupportEditMode(mode as SupportEditMode)}
+                        <button key={mode} onClick={() => enterSupportEditMode(mode as SupportEditMode)}
                           className={`text-[10px] py-1 rounded border transition ${
                             supportEditMode === mode ? 'font-medium bg-indigo-600/20 text-indigo-300 border-indigo-600/30' : 'text-gray-500 bg-gray-800/50 border-transparent hover:bg-gray-800'
                           }`}>{label}</button>
                       ))}
                     </div>
                     <div className="grid grid-cols-2 gap-1 mb-2">
-                      <button onClick={() => setSupportEditMode(supportEditMode === 'paint-enforcer' ? 'none' : 'paint-enforcer')}
+                      <button onClick={() => enterSupportEditMode(supportEditMode === 'paint-enforcer' ? 'none' : 'paint-enforcer')}
                         className={`text-[10px] py-1 rounded border transition ${supportEditMode === 'paint-enforcer' ? 'text-blue-400 bg-blue-900/30 border-blue-700/30 font-medium' : 'text-gray-500 bg-gray-800/50 border-transparent hover:bg-gray-800'}`}>Enforcer</button>
-                      <button onClick={() => setSupportEditMode(supportEditMode === 'paint-blocker' ? 'none' : 'paint-blocker')}
+                      <button onClick={() => enterSupportEditMode(supportEditMode === 'paint-blocker' ? 'none' : 'paint-blocker')}
                         className={`text-[10px] py-1 rounded border transition ${supportEditMode === 'paint-blocker' ? 'text-orange-400 bg-orange-900/30 border-orange-700/30 font-medium' : 'text-gray-500 bg-gray-800/50 border-transparent hover:bg-gray-800'}`}>Blocker</button>
                     </div>
                     {supportEditMode !== 'none' && <p className={`text-[9px] px-2 py-1 rounded ${supportEditMode === 'add' ? 'bg-green-900/20 text-green-400' : supportEditMode === 'delete' ? 'bg-red-900/20 text-red-400' : supportEditMode === 'paint-enforcer' ? 'bg-blue-900/20 text-blue-400' : 'bg-orange-900/20 text-orange-400'}`}>
@@ -1863,18 +1865,18 @@ export default function StlImport() {
                       ['add', '+ Add', 'text-green-400 bg-green-900/30 border-green-700/30'],
                       ['delete', '- Del', 'text-red-400 bg-red-900/30 border-red-700/30'],
                     ] as const).map(([mode, label, cls]) => (
-                      <button key={mode} onClick={() => setSupportEditMode(mode as SupportEditMode)}
+                      <button key={mode} onClick={() => enterSupportEditMode(mode as SupportEditMode)}
                         className={`text-[10px] py-1 rounded border transition ${
                           supportEditMode === mode ? cls + ' border font-medium' : 'text-gray-500 bg-gray-800/50 border-transparent hover:bg-gray-800'
                         }`}>{label}</button>
                     ))}
                   </div>
                   <div className="grid grid-cols-2 gap-1 mb-3">
-                    <button onClick={() => setSupportEditMode(supportEditMode === 'paint-enforcer' ? 'none' : 'paint-enforcer')}
+                    <button onClick={() => enterSupportEditMode(supportEditMode === 'paint-enforcer' ? 'none' : 'paint-enforcer')}
                       className={`text-[10px] py-1 rounded border transition ${
                         supportEditMode === 'paint-enforcer' ? 'text-blue-400 bg-blue-900/30 border-blue-700/30 font-medium' : 'text-gray-500 bg-gray-800/50 border-transparent hover:bg-gray-800'
                       }`}>Enforcer</button>
-                    <button onClick={() => setSupportEditMode(supportEditMode === 'paint-blocker' ? 'none' : 'paint-blocker')}
+                    <button onClick={() => enterSupportEditMode(supportEditMode === 'paint-blocker' ? 'none' : 'paint-blocker')}
                       className={`text-[10px] py-1 rounded border transition ${
                         supportEditMode === 'paint-blocker' ? 'text-orange-400 bg-orange-900/30 border-orange-700/30 font-medium' : 'text-gray-500 bg-gray-800/50 border-transparent hover:bg-gray-800'
                       }`}>Blocker</button>
