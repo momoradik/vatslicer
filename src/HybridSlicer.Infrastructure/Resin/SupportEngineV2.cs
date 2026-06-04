@@ -112,9 +112,12 @@ public static class SupportEngineV2
         public float DrainHoleClearanceMm { get; init; } = 2.0f;
 
         /// <summary>
-        /// Random seed for deterministic output. Same seed = same supports.
-        /// Use 0 for non-deterministic (time-based seed).
+        /// Manual support contacts from user clicks. These bypass overhang detection
+        /// but still run through pinhead → route → recover → gate.
+        /// Each is a (position, normal) pair in the same coordinate space as the mesh.
         /// </summary>
+        public List<(Vector3 position, Vector3 normal)>? ManualContacts { get; init; }
+
         public int Seed { get; init; } = 42;
 
         // Model transform (from frontend viewport)
@@ -252,6 +255,27 @@ public static class SupportEngineV2
             };
         }
 
+        // Inject manual contacts from user clicks (bypass overhang detection)
+        if (config.ManualContacts is { Count: > 0 })
+        {
+            int manualId = 9000;
+            foreach (var (pos, normal) in config.ManualContacts)
+            {
+                pointResult.Points.Add(new SupportPointGenerator.SupportPoint
+                {
+                    Id = $"manual-{++manualId}",
+                    Position = pos,
+                    Normal = normal.LengthSquared() > 0.01f ? Vector3.Normalize(normal) : new Vector3(0, 0, -1),
+                    OverhangArea = 25f,
+                    OverhangType = OverhangAnalyzer.OverhangType.NewIsland,
+                    Priority = 1.0f, // manual = highest priority
+                    RecommendedWeight = ForceEstimator.SupportWeight.Medium,
+                    SafetyFactor = 2.0f,
+                });
+            }
+            Serilog.Log.Information("V2 Step 2b: Added {Count} manual contacts", config.ManualContacts.Count);
+        }
+
         Serilog.Log.Information("V2 Step 2 Points: {Ms}ms ({Count} points, {Regions} regions)", stepSw.ElapsedMilliseconds, pointResult.Points.Count, pointResult.OverhangRegionsAnalyzed);
         stepSw.Restart();
 
@@ -268,10 +292,21 @@ public static class SupportEngineV2
             CollisionRays = adaptiveRays,
         };
 
+        float normalZThreshold = -MathF.Cos(config.OverhangAngleDeg * MathF.PI / 180f);
+        float baseSpacing = config.MinSpacingMm + (config.MaxSpacingMm - config.MinSpacingMm) * (1f - config.DensityFactor);
+
+        // ── Retry-at-nearby-position: region-driven generation ─────────
+        // If a point fails pinhead or routing, retry at 3-4 nearby positions
+        // on the overhang surface. The region's coverage requirement is the
+        // unit of work, not the individual point.
+        const int MAX_RETRIES = 4;
+        float retryRadius = config.MinSpacingMm * 0.8f;
+
         var pinheads = new List<(string id, PinheadOptimizer.Pinhead pinhead)>();
+        int retrySuccesses = 0;
+
         foreach (var pt in pointResult.Points)
         {
-            // Auto-scale pinhead based on structural weight recommendation
             var phCfg = pinheadConfig;
             if (pt.RecommendedWeight == ForceEstimator.SupportWeight.Heavy)
             {
@@ -291,7 +326,38 @@ public static class SupportEngineV2
                 };
             }
 
+            // Try the primary position first
             var pinhead = PinheadOptimizer.Optimize(pt.Position, pt.Normal, bvh, phCfg);
+
+            // If pinhead failed, retry at nearby positions on the overhang surface
+            if (!pinhead.IsValid)
+            {
+                for (int retry = 0; retry < MAX_RETRIES && !pinhead.IsValid; retry++)
+                {
+                    // Spiral outward: increasing distance, rotating angle
+                    float angle = retry * MathF.PI * 0.7f; // golden angle spiral
+                    float dist = retryRadius * (retry + 1) / MAX_RETRIES;
+                    var offset = new Vector3(
+                        MathF.Cos(angle) * dist,
+                        MathF.Sin(angle) * dist,
+                        0); // offset in XY plane
+                    var retryPos = pt.Position + offset;
+
+                    // Snap to nearest mesh surface
+                    var cp = bvh.ClosestPoint(retryPos);
+                    if (cp.HasValue)
+                    {
+                        retryPos = cp.Value.Point;
+                        var retryNormal = cp.Value.Normal;
+                        if (retryNormal.Z < normalZThreshold) // still an overhang
+                        {
+                            pinhead = PinheadOptimizer.Optimize(retryPos, retryNormal, bvh, phCfg);
+                            if (pinhead.IsValid) retrySuccesses++;
+                        }
+                    }
+                }
+            }
+
             pinheads.Add((pt.Id, pinhead));
         }
 
@@ -431,7 +497,7 @@ public static class SupportEngineV2
             int routesBefore = routes.Count;
             routes = TreeSupportBuilder.MergeIntoTrees(routes, new TreeSupportBuilder.TreeConfig
             {
-                MaxMergeDistMm = config.TreeMergeDistMm,
+                MaxMergeDistMm = Math.Max(config.TreeMergeDistMm, baseSpacing * 2.5f),
                 MinMergeHeightRatio = config.TreeMergeHeightRatio,
                 TrunkRadiusScale = 1.5f,
                 BranchAngleMaxDeg = config.TreeBranchAngleDeg,

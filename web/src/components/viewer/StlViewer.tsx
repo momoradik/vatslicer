@@ -197,6 +197,8 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
   const boxHelperRef = useRef<{ helper: THREE.Box3Helper; box: THREE.Box3 } | null>(null)
 
   const meshMapRef    = useRef<Map<string, MeshData>>(new Map())
+  // Expose mesh map globally so the generate function can export transformed STL
+  ;(window as any).__stlViewerMeshMap = meshMapRef.current
   const loadingIdsRef = useRef<Set<string>>(new Set())
   const gizmoRef      = useRef<GizmoManager | null>(null)
 
@@ -1115,7 +1117,6 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       // The mesh position should be (0, 0, 0) — no offset.
       // If supports appear misaligned, the issue is elsewhere.
 
-      const ns = modelData.naturalSize
       const material = new THREE.MeshPhongMaterial({
         color: 0x14b8a6,
         specular: 0x444444,
@@ -1177,10 +1178,11 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
         const hits = raycaster.intersectObjects(meshes, false)
         if (hits.length > 0) {
           const hit = hits[0]
-          // Convert Three.js position back to print-space (x=x, y=z, z=y)
+          // With Fix 2 (baked transforms), the backend works in display/world space.
+          // Click coordinates are already in world space — no swap needed.
           const wp = hit.point
-          const wn = hit.face?.normal ?? new THREE.Vector3(0, 1, 0)
-          onSupportPointAddRef.current?.(wp.x, wp.z, wp.y, wn.x, wn.z, wn.y)
+          const wn = hit.face?.normal ?? new THREE.Vector3(0, -1, 0)
+          onSupportPointAddRef.current?.(wp.x, wp.y, wp.z, wn.x, wn.y, wn.z)
           e.stopPropagation()
         }
       } else if (mode === 'delete') {

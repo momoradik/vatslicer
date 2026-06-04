@@ -48,12 +48,28 @@ public sealed class SupportV2Controller : ControllerBase
         [FromForm] float raftMarginMm = 1.5f,
         [FromForm] float raftThicknessMm = 0.3f,
         [FromForm] string materialPreset = "standard",
+        [FromForm] string? manualContacts = null,
         CancellationToken ct = default)
     {
         if (stlFile is null || stlFile.Length == 0) return BadRequest("STL file required.");
 
         byte[] data;
         using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
+
+        // Parse manual contacts from JSON
+        List<(System.Numerics.Vector3 position, System.Numerics.Vector3 normal)>? manualContactList = null;
+        if (!string.IsNullOrEmpty(manualContacts))
+        {
+            try
+            {
+                var parsed = System.Text.Json.JsonSerializer.Deserialize<List<ManualContactDto>>(manualContacts);
+                if (parsed?.Count > 0)
+                    manualContactList = parsed.Select(c => (
+                        new System.Numerics.Vector3(c.x, c.y, c.z),
+                        new System.Numerics.Vector3(c.nx, c.ny, c.nz))).ToList();
+            }
+            catch { /* ignore parse errors */ }
+        }
 
         var orient = PrinterOrientation.BottomUp;
         if (!string.IsNullOrEmpty(printerId) && Guid.TryParse(printerId, out var pid))
@@ -91,6 +107,7 @@ public sealed class SupportV2Controller : ControllerBase
             EnableMiniRafts = enableMiniRafts,
             RaftMarginMm = raftMarginMm,
             RaftThicknessMm = raftThicknessMm,
+            ManualContacts = manualContactList,
         });
 
         return Ok(new
@@ -511,4 +528,6 @@ public sealed class SupportV2Controller : ControllerBase
         zipStream.Position = 0;
         return File(zipStream.ToArray(), "application/zip", "model_with_supports.zip");
     }
+
+    private record ManualContactDto(float x, float y, float z, float nx, float ny, float nz);
 }
