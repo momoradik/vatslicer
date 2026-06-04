@@ -134,13 +134,14 @@ interface PrepState {
   generatedAt: number | null
   v2Stats: V2Stats | null
   v2MeshBuffer: ArrayBuffer | null
+  v2MeshOffset: { x: number; y: number; z: number } | null
 }
 
 const EMPTY_PREP: PrepState = {
   autoSupports: [], advancedSupports: [], crossBraces: [],
   raft: null, skirt: null,
   locked: false, stale: false, generatedAt: null,
-  v2Stats: null, v2MeshBuffer: null,
+  v2Stats: null, v2MeshBuffer: null, v2MeshOffset: null,
 }
 
 interface ModelState extends ModelEntry {
@@ -571,19 +572,88 @@ export default function StlImport() {
     if (!selectedId || !selected) return
     setGenerating(true)
     try {
-      // Send raw STL file + user transform as separate parameters.
-      // The backend applies the rotation to the raw mesh before generating supports.
-      // This avoids double-transform issues from baking/unbaking matrixWorld.
-      const resp = await fetch(selected.url)
-      const blob = await resp.blob()
-      const fd = new FormData()
-      fd.append('stlFile', blob, selected.fileName)
+      // ── BAKE: freeze orientation into geometry, then generate in world space ──
+      // NON-NEGOTIABLE: rotation is frozen BEFORE supports exist.
+      // After bake, model group is at identity; supports are also at identity.
+      const meshData = (window as any).__stlViewerMeshMap?.get(selectedId)
+      let stlBlob: Blob
 
-      // Send the user's current transform so backend can orient the mesh
-      fd.append('userRotX', String(selected.transform.rotX))
-      fd.append('userRotY', String(selected.transform.rotY))
-      fd.append('userRotZ', String(selected.transform.rotZ))
-      fd.append('userScale', String(selected.transform.scaleX)) // uniform scale
+      if (meshData?.mesh && meshData?.group) {
+        const THREE_mod = await import('three')
+        const { STLExporter } = await import('three/examples/jsm/exporters/STLExporter.js')
+
+        // ── Step 1: Bake matrixWorld into Y-up world space ──────────
+        const displayGeo = meshData.mesh.geometry.clone()
+        displayGeo.applyMatrix4(meshData.group.matrixWorld)
+
+        // ── Step 2: Drop to bed (Y-up: lowest Y = 0) ───────────────
+        // Owned HERE and nowhere else. Model rests on bed after bake.
+        displayGeo.computeBoundingBox()
+        const minY = displayGeo.boundingBox!.min.y
+        {
+          const p = displayGeo.getAttribute('position')
+          for (let i = 0; i < p.count; i++) p.setY(i, p.getY(i) - minY)
+          p.needsUpdate = true
+        }
+        displayGeo.computeVertexNormals()
+        displayGeo.computeBoundingBox()
+
+        // ── Step 3: Freeze into display — model group becomes identity ──
+        const oldGeo = meshData.mesh.geometry
+        meshData.mesh.geometry = displayGeo
+        oldGeo.dispose()
+        meshData.group.position.set(0, 0, 0)
+        meshData.group.rotation.set(0, 0, 0)
+        meshData.group.scale.set(1, 1, 1)
+        meshData.group.updateMatrixWorld(true)
+        // Update naturalSize for bounds checking
+        const newSize = new THREE_mod.Vector3()
+        displayGeo.boundingBox!.getSize(newSize)
+        meshData.naturalSize.copy(newSize)
+        meshData.currentTransform = { ...DEFAULT_TRANSFORM }
+
+        // ── Step 4: Clone for backend — Y-up → Z-up basis conversion ──
+        const backendGeo = displayGeo.clone()
+        const pos = backendGeo.getAttribute('position')
+        for (let i = 0; i < pos.count; i++) {
+          const y = pos.getY(i), z = pos.getZ(i)
+          pos.setY(i, z)  // Z-up Y = Three.js Z (depth)
+          pos.setZ(i, y)  // Z-up Z = Three.js Y (height)
+        }
+        // Y↔Z swap is a reflection → always reverse winding once
+        for (let i = 0; i < pos.count; i += 3) {
+          const x1=pos.getX(i+1),y1=pos.getY(i+1),z1=pos.getZ(i+1)
+          const x2=pos.getX(i+2),y2=pos.getY(i+2),z2=pos.getZ(i+2)
+          pos.setXYZ(i+1, x2, y2, z2)
+          pos.setXYZ(i+2, x1, y1, z1)
+        }
+        pos.needsUpdate = true
+
+        // ── Step 5: Export to binary STL ────────────────────────────
+        const tempMesh = new THREE_mod.Mesh(backendGeo)
+        const tempScene = new THREE_mod.Scene()
+        tempScene.add(tempMesh)
+        const exporter = new STLExporter()
+        const stlBinary = exporter.parse(tempScene, { binary: true })
+        stlBlob = new Blob([stlBinary as any], { type: 'application/octet-stream' })
+        tempScene.remove(tempMesh)
+        backendGeo.dispose()
+
+        // Verification: lowest model vertex after drop must be Y=0
+        console.log('🔴🔴🔴 [BAKE v3] FREEZE POSE — group now identity')
+        console.log('[Bake] model minY after drop:', displayGeo.boundingBox!.min.y.toFixed(4),
+          '| size:', newSize.x.toFixed(1), newSize.y.toFixed(1), newSize.z.toFixed(1),
+          '| group pos:', meshData.group.position.toArray().map((v: number) => v.toFixed(2)),
+          '| group rot:', meshData.group.rotation.toArray().slice(0,3).map((v: number) => v.toFixed(2)))
+      } else {
+        // Fallback: raw file (no transforms)
+        const resp = await fetch(selected.url)
+        stlBlob = await resp.blob()
+      }
+
+      const fd = new FormData()
+      fd.append('stlFile', stlBlob, selected.fileName)
+      // NO rotation/scale params — the bake handles everything
       fd.append('orientation', activePrinter?.orientation ?? 'BottomUp')
       if (selectedPrinterId) fd.append('printerId', selectedPrinterId)
       fd.append('overhangAngleDeg', String(autoSupportConfig.overhangAngle))
@@ -669,7 +739,7 @@ export default function StlImport() {
       }
 
       updateModels(prev => prev.map(m => m.id === selectedId ? {
-        ...m, prep: {
+        ...m, transform: { ...DEFAULT_TRANSFORM }, prep: {
           autoSupports: v2Result.supports.map((s: any) => ({
             x: s.contactX, y: s.contactY, contactZ: s.contactZ, baseZ: s.baseZ,
             tipDiameter: s.preset?.tipDiameterMm ?? 0.4, columnDiameter: s.preset?.shaftDiameterMm ?? 0.8, baseDiameter: s.preset?.baseDiameterMm ?? 2.0,
@@ -683,6 +753,7 @@ export default function StlImport() {
           generatedAt: Date.now(),
           v2Stats,
           v2MeshBuffer: meshBuffer,
+          v2MeshOffset: v2Result.meshOffset ?? null,
         }
       } : m))
     } catch (err: any) {
@@ -919,6 +990,7 @@ export default function StlImport() {
                   ]}
                   crossBraces={selectedPrep.crossBraces}
                   supportMeshBuffer={selectedPrep.v2MeshBuffer}
+                  supportMeshOffset={selectedPrep.v2MeshOffset}
                   paintedRegions={selectedSupportData.paintedRegions}
                   supportTipType={supportTipType}
                   supportBrushSize={supportBrushSize}

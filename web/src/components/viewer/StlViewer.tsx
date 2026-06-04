@@ -86,6 +86,8 @@ interface Props {
   crossBraces?: CrossBraceDisplayData[]
   // V2 support mesh (binary STL ArrayBuffer) — renders as single mesh instead of individual cylinders
   supportMeshBuffer?: ArrayBuffer | null
+  // Backend centering offset — used to reverse XY/Z centering on the return path
+  supportMeshOffset?: { x: number; y: number; z: number } | null
   // Raft/Skirt visualization
   raftData?: { type: string; minX: number; minY: number; maxX: number; maxY: number; thicknessMm: number } | null
   skirtData?: { minX: number; minY: number; maxX: number; maxY: number; layers: number; distanceMm: number; widthMm: number } | null
@@ -180,6 +182,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     onPaintRegionAdd,
     crossBraces: _crossBraces,
     supportMeshBuffer,
+    supportMeshOffset,
     raftData,
     skirtData,
   },
@@ -1049,27 +1052,29 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     }
 
     if (!supportMeshBuffer || supportMeshBuffer.byteLength < 84) return
-
-    // Find the selected model's group and naturalSize for coordinate alignment
-    const selId = selectedIdRef.current
-    const modelData = selId ? meshMapRef.current.get(selId) : null
-    if (!modelData) return // no model to attach supports to
+    if (!sceneRef.current) return
 
     try {
       const loader = new STLLoader()
       const geometry = loader.parse(supportMeshBuffer)
 
-      // V2 mesh is in backend Z-up centered space (same centering as the
-      // raw STL the backend received, with user rotation applied).
-      // Apply Z-up → Y-up swap to match the model geometry in the group.
-      // Position at (0,0,0) in the group — no inverse matrix tricks.
+      // V2 mesh comes back in backend Z-up centered space.
+      // Step 1: Reverse the backend's XY+Z centering to get back to Z-up world space.
       const positions = geometry.getAttribute('position')
+      if (supportMeshOffset) {
+        for (let i = 0; i < positions.count; i++) {
+          positions.setX(i, positions.getX(i) - supportMeshOffset.x)
+          positions.setY(i, positions.getY(i) - supportMeshOffset.y)
+          positions.setZ(i, positions.getZ(i) - supportMeshOffset.z)
+        }
+      }
+      // Step 2: Z-up → Y-up basis conversion (reverse of send path).
       for (let i = 0; i < positions.count; i++) {
         const y = positions.getY(i), z = positions.getZ(i)
         positions.setY(i, z)
         positions.setZ(i, y)
       }
-      // Winding fix
+      // Winding fix for Y↔Z swap (reflection)
       for (let i = 0; i < positions.count; i += 3) {
         const x1=positions.getX(i+1),y1=positions.getY(i+1),z1=positions.getZ(i+1)
         const x2=positions.getX(i+2),y2=positions.getY(i+2),z2=positions.getZ(i+2)
@@ -1092,13 +1097,21 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       const mesh = new THREE.Mesh(geometry, material)
       mesh.renderOrder = 1 // render after model so transparency works correctly
 
-      // Add to model's group so supports follow model transforms
-      modelData.group.add(mesh)
+      // Add to SCENE at identity — NOT to model group.
+      // Both model and supports are in world space at identity.
+      sceneRef.current.add(mesh)
       v2MeshRef.current = mesh
+
+      // MANDATORY VERIFICATION: support bases must be at Y≈0 (bed level)
+      geometry.computeBoundingBox()
+      const bb = geometry.boundingBox!
+      console.log('[V2 Return] support AABB: Y=[' + bb.min.y.toFixed(3) + ', ' + bb.max.y.toFixed(3) + ']',
+        '| base at bed:', Math.abs(bb.min.y) < 0.5 ? 'YES' : 'NO (BROKEN)',
+        '| offset applied:', supportMeshOffset ? `(${supportMeshOffset.x.toFixed(2)}, ${supportMeshOffset.y.toFixed(2)}, ${supportMeshOffset.z.toFixed(2)})` : 'none')
     } catch (err) {
       console.error('Failed to load V2 support mesh:', err)
     }
-  }, [supportMeshBuffer, sceneReady, selectedId])
+  }, [supportMeshBuffer, supportMeshOffset, sceneReady, selectedId])
 
   // ── Support callback refs (avoid stale closures) ─────────────────────────
   const onSupportPointAddRef = useRef(onSupportPointAdd)

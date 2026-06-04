@@ -120,17 +120,7 @@ public static class SupportEngineV2
 
         public int Seed { get; init; } = 42;
 
-        // User transform from frontend viewport (applied to raw STL before centering)
-        public float UserRotXDeg { get; init; } = 0;
-        public float UserRotYDeg { get; init; } = 0;
-        public float UserRotZDeg { get; init; } = 0;
-        public float UserScale { get; init; } = 1.0f;
-
-        // Model transform (from frontend viewport)
-        public float TranslateX { get; init; } = 0;
-        public float TranslateY { get; init; } = 0;
-        public float TranslateZ { get; init; } = 0;
-        public float Scale { get; init; } = 1.0f;
+        // (User transforms are baked into vertices by the frontend — no rotation/scale params needed)
 
         // Auto-orientation
         /// <summary>Enable auto-orientation before support generation.</summary>
@@ -196,26 +186,10 @@ public static class SupportEngineV2
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        // ── Step 0: Apply user rotation, then center ─────────────────
-        // The frontend sends the raw STL file + user rotation angles.
-        // Apply rotation first (changes which faces are overhangs),
-        // then XY-center and drop to plate.
-
-        // Apply user rotation if any (rotX, rotY, rotZ in degrees)
-        if (config.UserRotXDeg != 0 || config.UserRotYDeg != 0 || config.UserRotZDeg != 0)
-        {
-            float rx = config.UserRotXDeg * MathF.PI / 180f;
-            float ry = config.UserRotYDeg * MathF.PI / 180f;
-            float rz = config.UserRotZDeg * MathF.PI / 180f;
-            var rotQuat = Quaternion.CreateFromYawPitchRoll(ry, rx, rz);
-            mesh = mesh.Rotate(rotQuat);
-        }
-
-        // Apply uniform scale if not 1.0
-        if (config.UserScale != 1.0f && config.UserScale > 0)
-        {
-            mesh = mesh.Transform(Vector3.Zero, config.UserScale);
-        }
+        // ── Step 0: Center mesh ────────────────────────────────────────
+        // The frontend bakes ALL user transforms (rotation, scale, position)
+        // into the STL vertices before sending. No rotation/scale applied here.
+        // We only XY-center and clamp Z-bottom to 0.
 
         // Center mesh: XY at origin, Z bottom at 0
         float meshW = mesh.Max.X - mesh.Min.X;

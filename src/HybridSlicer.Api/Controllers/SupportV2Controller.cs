@@ -49,11 +49,7 @@ public sealed class SupportV2Controller : ControllerBase
         [FromForm] float raftThicknessMm = 0.3f,
         [FromForm] string materialPreset = "standard",
         [FromForm] string? manualContacts = null,
-        // User transform from viewport
-        [FromForm] float userRotX = 0,
-        [FromForm] float userRotY = 0,
-        [FromForm] float userRotZ = 0,
-        [FromForm] float userScale = 1.0f,
+        // User transforms are baked into STL vertices by the frontend — no rotation/scale params
         CancellationToken ct = default)
     {
         if (stlFile is null || stlFile.Length == 0) return BadRequest("STL file required.");
@@ -113,10 +109,6 @@ public sealed class SupportV2Controller : ControllerBase
             RaftMarginMm = raftMarginMm,
             RaftThicknessMm = raftThicknessMm,
             ManualContacts = manualContactList,
-            UserRotXDeg = userRotX,
-            UserRotYDeg = userRotY,
-            UserRotZDeg = userRotZ,
-            UserScale = userScale,
         });
 
         return Ok(new
