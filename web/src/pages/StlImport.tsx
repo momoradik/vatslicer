@@ -482,11 +482,9 @@ export default function StlImport() {
     const presets = { light: { tip: 0.3, shaft: 0.6, base: 1.2 }, medium: { tip: 0.5, shaft: 1.0, base: 2.0 }, heavy: { tip: 0.8, shaft: 1.5, base: 3.0 } }
     const p = presets[supportTipType]
     const point: SupportPoint = { id: mkId(), x, y, z, nx, ny, nz, tipDiameterMm: p.tip, shaftDiameterMm: p.shaft, baseDiameterMm: p.base, type: supportTipType }
-    const before = selected?.manualSupports?.points?.length ?? 0
     updateModels(prev => prev.map(m =>
       m.id === selectedId ? { ...m, manualSupports: { ...m.manualSupports, points: [...m.manualSupports.points, point] } } : m
     ))
-    console.log(`[TRACE] H state-write`, JSON.stringify({ pointsLenBefore: before, pointsLenAfter: before + 1, pointId: point.id, pass: true }))
   }
 
   const deleteSupportPoint = (pointId: string) => {
@@ -596,18 +594,9 @@ export default function StlImport() {
 
     setOrientationCommitted(true)
 
-    // ── T1: Reference identity ──
-    const currentGeo = meshData.mesh.geometry
-    console.log('[CommitOrientation] T1 ref identity:', currentGeo === displayGeo ? 'PASS' : 'FAIL',
-      '| geoId:', (currentGeo as any).uuid, '=?', (displayGeo as any).uuid)
-    // ── T2: BVH/bounds freshness ──
-    const posAttr = displayGeo.getAttribute('position')
-    const bt = (displayGeo as any).boundsTree
-    console.log('[CommitOrientation] T2 bounds:',
-      'boundingSphere:', displayGeo.boundingSphere ? `r=${displayGeo.boundingSphere.radius.toFixed(2)}` : 'NULL',
-      '| boundsTree:', bt ? 'present' : 'none',
-      '| vertexCount:', posAttr?.count)
-    console.log('[CommitOrientation] frozen, minY was:', minY.toFixed(2))
+    // Permanent assertions
+    if (meshData.mesh.geometry !== displayGeo) console.error('[CommitOrientation] ASSERT FAIL: mesh.geometry !== bakedGeo')
+    if (!displayGeo.boundingSphere) console.error('[CommitOrientation] ASSERT FAIL: boundingSphere is null after rebuild')
   }, [updateModels])
 
   const enterSupportEditMode = useCallback((mode: SupportEditMode) => {
