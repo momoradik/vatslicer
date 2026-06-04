@@ -131,6 +131,8 @@ public sealed class SupportV2Controller : ControllerBase
             totalCrossSectionAreaMm2 = result.TotalSupportCrossSectionArea,
             elapsedMs = result.TotalElapsedMs,
             orientation = orient.ToString(),
+            // Manual tips that could not be routed (uncoverable)
+            uncoverableManualIds = result.UncoverableManualIds,
             // Centering offset — frontend must apply same offset to align supports with model
             meshOffset = new { x = result.MeshCenteringOffset.X, y = result.MeshCenteringOffset.Y, z = result.MeshCenteringOffset.Z },
 

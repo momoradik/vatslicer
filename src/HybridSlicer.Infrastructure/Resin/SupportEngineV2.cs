@@ -183,6 +183,9 @@ public static class SupportEngineV2
         /// </summary>
         public required Vector3 MeshCenteringOffset { get; init; }
 
+        /// <summary>Manual tip IDs that could not be routed (uncoverable).</summary>
+        public required List<string> UncoverableManualIds { get; init; }
+
         // Segment data for backward compatibility with the existing frontend
         public required List<AdvancedSupportEngine.AdvancedSupport> LegacySupports { get; init; }
         public required List<AdvancedSupportEngine.CrossBrace> LegacyCrossBraces { get; init; }
@@ -341,8 +344,11 @@ public static class SupportEngineV2
             // Try the primary position first
             var pinhead = PinheadOptimizer.Optimize(pt.Position, pt.Normal, bvh, phCfg);
 
-            // If pinhead failed, retry at nearby positions on the overhang surface
-            if (!pinhead.IsValid)
+            // Manual tips are FIXED anchors — never moved. Skip retry.
+            bool isManual = pt.Id.StartsWith("manual-");
+
+            // If pinhead failed and NOT manual, retry at nearby positions on the overhang surface
+            if (!pinhead.IsValid && !isManual)
             {
                 for (int retry = 0; retry < MAX_RETRIES && !pinhead.IsValid; retry++)
                 {
@@ -697,8 +703,13 @@ public static class SupportEngineV2
              || r.route.Path.Any(wp => wp.Type == "base")))
             .ToList();
 
-        Serilog.Log.Information("V2 Emission gate: {Before} routes → {After} with complete load path",
-            routes.Count, validRoutes.Count);
+        // Track manual tips that failed the emission gate (uncoverable)
+        var validIds = new HashSet<string>(validRoutes.Select(r => r.id));
+        var allManualIds = pointResult.Points.Where(p => p.Id.StartsWith("manual-")).Select(p => p.Id).ToList();
+        var uncoverableManualIds = allManualIds.Where(id => !validIds.Contains(id)).ToList();
+
+        Serilog.Log.Information("V2 Emission gate: {Before} routes → {After} with complete load path (uncoverable manual: {Uncov})",
+            routes.Count, validRoutes.Count, uncoverableManualIds.Count);
 
         foreach (var (id, route) in validRoutes)
         {
@@ -1043,6 +1054,7 @@ public static class SupportEngineV2
             SupportLayerCount = supportStats.supportLayers,
             TotalSupportCrossSectionArea = supportStats.totalSupportAreaMm2,
             MeshCenteringOffset = new Vector3(offX, offY, offZ),
+            UncoverableManualIds = uncoverableManualIds,
             LegacySupports = legacySupports,
             LegacyCrossBraces = legacyCrossBraces,
         };

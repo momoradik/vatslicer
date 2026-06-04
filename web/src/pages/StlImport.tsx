@@ -143,13 +143,14 @@ interface PrepState {
   v2Stats: V2Stats | null
   v2MeshBuffer: ArrayBuffer | null
   v2MeshOffset: { x: number; y: number; z: number } | null
+  uncoverableManualIds: string[]
 }
 
 const EMPTY_PREP: PrepState = {
   autoSupports: [], advancedSupports: [], crossBraces: [],
   raft: null, skirt: null,
   locked: false, stale: false, generatedAt: null,
-  v2Stats: null, v2MeshBuffer: null, v2MeshOffset: null,
+  v2Stats: null, v2MeshBuffer: null, v2MeshOffset: null, uncoverableManualIds: [],
 }
 
 interface ModelState extends ModelEntry {
@@ -780,6 +781,7 @@ export default function StlImport() {
           v2Stats,
           v2MeshBuffer: meshBuffer,
           v2MeshOffset: v2Result.meshOffset ?? null,
+          uncoverableManualIds: v2Result.uncoverableManualIds ?? [],
         }
       } : m))
     } catch (err: any) {
@@ -1019,6 +1021,7 @@ export default function StlImport() {
                   supportMeshOffset={selectedPrep.v2MeshOffset}
                   manualMarkers={selectedSupportData.points.map(p => ({
                     id: p.id, x: p.x, y: p.y, z: p.z, shaftDiameter: p.shaftDiameterMm,
+                    uncoverable: (selectedPrep.uncoverableManualIds ?? []).includes(p.id),
                   }))}
                   orientationCommitted={orientationCommitted}
                   paintedRegions={selectedSupportData.paintedRegions}

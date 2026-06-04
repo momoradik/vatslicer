@@ -89,7 +89,7 @@ interface Props {
   // Backend centering offset — used to reverse XY/Z centering on the return path
   supportMeshOffset?: { x: number; y: number; z: number } | null
   // Manual support markers — rendered as proxy spheres + preview pillars
-  manualMarkers?: { id: string; x: number; y: number; z: number; shaftDiameter: number }[]
+  manualMarkers?: { id: string; x: number; y: number; z: number; shaftDiameter: number; uncoverable: boolean }[]
   // True once commitOrientation has completed — clicks are blocked until this is true
   orientationCommitted?: boolean
   // Raft/Skirt visualization
@@ -1178,8 +1178,10 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     const pillarRaycaster = new THREE.Raycaster()
 
     markers.forEach(m => {
-      // ── Contact marker sphere ──
-      const markerMat = new THREE.MeshPhongMaterial({ color: 0xff6600, emissive: 0x331100 })
+      // ── Contact marker sphere (red if uncoverable) ──
+      const markerColor = m.uncoverable ? 0xff0000 : 0xff6600
+      const markerEmissive = m.uncoverable ? 0x440000 : 0x331100
+      const markerMat = new THREE.MeshPhongMaterial({ color: markerColor, emissive: markerEmissive })
       const sphere = new THREE.Mesh(sharedGeo, markerMat)
       sphere.position.set(m.x, m.y, m.z)
       sphere.userData = { supportPointId: m.id }
