@@ -249,6 +249,8 @@ public static class SupportEngineV2
         }
 
         // Inject manual contacts from user clicks (bypass overhang detection)
+        // Apply the SAME centering offset as the mesh so manual points are in the same frame.
+        var centeringOffset = new Vector3(offX, offY, offZ);
         if (config.ManualContacts is { Count: > 0 })
         {
             int manualId = 9000;
@@ -257,7 +259,7 @@ public static class SupportEngineV2
                 pointResult.Points.Add(new SupportPointGenerator.SupportPoint
                 {
                     Id = $"manual-{++manualId}",
-                    Position = pos,
+                    Position = pos + centeringOffset,
                     Normal = normal.LengthSquared() > 0.01f ? Vector3.Normalize(normal) : new Vector3(0, 0, -1),
                     OverhangArea = 25f,
                     OverhangType = OverhangAnalyzer.OverhangType.NewIsland,

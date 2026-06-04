@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useMemo } from 'react'
+import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import StlViewer, {
   type BuildVolume,
@@ -47,9 +47,15 @@ const DEFAULT_SETTINGS: ObjectSettings = {
 
 interface SupportPoint {
   id: string
-  x: number; y: number; z: number    // contact point on mesh surface (mm)
-  tipDiameterMm: number              // support tip size
+  x: number; y: number; z: number       // contact point on mesh surface (Y-up world space)
+  nx: number; ny: number; nz: number    // surface normal at contact (Y-up world space)
+  tipDiameterMm: number                 // support tip size
   type: 'light' | 'medium' | 'heavy'
+}
+
+/** Single boundary conversion: Three.js Y-up → backend Z-up. X stays, Y↔Z swap. */
+function yUpToZUp(x: number, y: number, z: number): [number, number, number] {
+  return [x, z, y]
 }
 
 interface PaintedRegion {
@@ -196,6 +202,7 @@ export default function StlImport() {
   // Support editing mode
   type SupportEditMode = 'none' | 'add' | 'delete' | 'paint-enforcer' | 'paint-blocker'
   const [supportEditMode, setSupportEditMode] = useState<SupportEditMode>('none')
+  const [orientationCommitted, setOrientationCommitted] = useState(true) // false while bake is in progress
   const [supportBrushSize, setSupportBrushSize] = useState(3) // mm
   const [supportTipType, setSupportTipType] = useState<'light' | 'medium' | 'heavy'>('medium')
 
@@ -467,10 +474,10 @@ export default function StlImport() {
 
   // ── Manual support editing ──────────────────────────────────────────────────
 
-  const addSupportPoint = (x: number, y: number, z: number) => {
+  const addSupportPoint = (x: number, y: number, z: number, nx: number, ny: number, nz: number) => {
     if (!selectedId) return
     const tipDiameter = supportTipType === 'light' ? 0.3 : supportTipType === 'medium' ? 0.5 : 0.8
-    const point: SupportPoint = { id: mkId(), x, y, z, tipDiameterMm: tipDiameter, type: supportTipType }
+    const point: SupportPoint = { id: mkId(), x, y, z, nx, ny, nz, tipDiameterMm: tipDiameter, type: supportTipType }
     updateModels(prev => prev.map(m =>
       m.id === selectedId ? { ...m, manualSupports: { ...m.manualSupports, points: [...m.manualSupports.points, point] } } : m
     ))
@@ -522,6 +529,57 @@ export default function StlImport() {
   const selectedSupportData = selected?.manualSupports ?? EMPTY_SUPPORT_DATA
   const hasSupportEdits = selectedSupportData.points.length > 0 || selectedSupportData.paintedRegions.length > 0
 
+  // ── Orientation commit — freeze pose into geometry, group becomes identity ──
+  // Called BEFORE manual placement so clicks land in the same frame the backend uses.
+
+  const commitOrientation = useCallback((modelId: string) => {
+    const meshData = (window as any).__stlViewerMeshMap?.get(modelId)
+    if (!meshData?.mesh || !meshData?.group) return
+
+    // Full 16-element identity check via Three.js Matrix4.equals (epsilon-exact)
+    const identityMatrix = new meshData.group.matrix.constructor() // THREE.Matrix4
+    if (meshData.group.matrixWorld.equals(identityMatrix)) {
+      // Already at identity — no bake needed, committed.
+      setOrientationCommitted(true)
+      return
+    }
+
+    setOrientationCommitted(false)
+
+    const displayGeo = meshData.mesh.geometry.clone()
+    displayGeo.applyMatrix4(meshData.group.matrixWorld)
+    // Drop to bed (Y-up: lowest Y = 0)
+    displayGeo.computeBoundingBox()
+    const minY = displayGeo.boundingBox!.min.y
+    const p = displayGeo.getAttribute('position')
+    for (let i = 0; i < p.count; i++) p.setY(i, p.getY(i) - minY)
+    p.needsUpdate = true
+    displayGeo.computeVertexNormals()
+    displayGeo.computeBoundingBox()
+    // Freeze display
+    const oldGeo = meshData.mesh.geometry
+    meshData.mesh.geometry = displayGeo
+    oldGeo.dispose()
+    meshData.group.position.set(0, 0, 0)
+    meshData.group.rotation.set(0, 0, 0)
+    meshData.group.scale.set(1, 1, 1)
+    meshData.group.updateMatrixWorld(true)
+    const newSize = displayGeo.boundingBox!.getSize(meshData.naturalSize.clone())
+    meshData.naturalSize.copy(newSize)
+    meshData.currentTransform = { ...DEFAULT_TRANSFORM }
+    updateModels(prev => prev.map(m => m.id === modelId ? { ...m, transform: { ...DEFAULT_TRANSFORM } } : m))
+
+    setOrientationCommitted(true)
+    console.log('[CommitOrientation] frozen, minY was:', minY.toFixed(2))
+  }, [updateModels])
+
+  // Commit orientation when entering any support edit mode
+  useEffect(() => {
+    if (supportEditMode !== 'none' && selectedId) {
+      commitOrientation(selectedId)
+    }
+  }, [supportEditMode, selectedId, commitOrientation])
+
   // ── Hollowing controls ────────────────────────────────────────────────────
 
   const setHollowEnabled = (id: string, enabled: boolean) => {
@@ -572,9 +630,8 @@ export default function StlImport() {
     if (!selectedId || !selected) return
     setGenerating(true)
     try {
-      // ── BAKE: freeze orientation into geometry, then generate in world space ──
-      // NON-NEGOTIABLE: rotation is frozen BEFORE supports exist.
-      // After bake, model group is at identity; supports are also at identity.
+      // ── Commit orientation (synchronous, idempotent — no-op if already frozen) ──
+      commitOrientation(selectedId)
       const meshData = (window as any).__stlViewerMeshMap?.get(selectedId)
       let stlBlob: Blob
 
@@ -582,43 +639,13 @@ export default function StlImport() {
         const THREE_mod = await import('three')
         const { STLExporter } = await import('three/examples/jsm/exporters/STLExporter.js')
 
-        // ── Step 1: Bake matrixWorld into Y-up world space ──────────
-        const displayGeo = meshData.mesh.geometry.clone()
-        displayGeo.applyMatrix4(meshData.group.matrixWorld)
-
-        // ── Step 2: Drop to bed (Y-up: lowest Y = 0) ───────────────
-        // Owned HERE and nowhere else. Model rests on bed after bake.
-        displayGeo.computeBoundingBox()
-        const minY = displayGeo.boundingBox!.min.y
-        {
-          const p = displayGeo.getAttribute('position')
-          for (let i = 0; i < p.count; i++) p.setY(i, p.getY(i) - minY)
-          p.needsUpdate = true
-        }
-        displayGeo.computeVertexNormals()
-        displayGeo.computeBoundingBox()
-
-        // ── Step 3: Freeze into display — model group becomes identity ──
-        const oldGeo = meshData.mesh.geometry
-        meshData.mesh.geometry = displayGeo
-        oldGeo.dispose()
-        meshData.group.position.set(0, 0, 0)
-        meshData.group.rotation.set(0, 0, 0)
-        meshData.group.scale.set(1, 1, 1)
-        meshData.group.updateMatrixWorld(true)
-        // Update naturalSize for bounds checking
-        const newSize = new THREE_mod.Vector3()
-        displayGeo.boundingBox!.getSize(newSize)
-        meshData.naturalSize.copy(newSize)
-        meshData.currentTransform = { ...DEFAULT_TRANSFORM }
-
-        // ── Step 4: Clone for backend — Y-up → Z-up basis conversion ──
-        const backendGeo = displayGeo.clone()
+        // Geometry is already baked (Y-up world, dropped to bed, group at identity).
+        // Clone for backend — apply the ONE boundary conversion via yUpToZUp.
+        const backendGeo = meshData.mesh.geometry.clone()
         const pos = backendGeo.getAttribute('position')
         for (let i = 0; i < pos.count; i++) {
-          const y = pos.getY(i), z = pos.getZ(i)
-          pos.setY(i, z)  // Z-up Y = Three.js Z (depth)
-          pos.setZ(i, y)  // Z-up Z = Three.js Y (height)
+          const [bx, by, bz] = yUpToZUp(pos.getX(i), pos.getY(i), pos.getZ(i))
+          pos.setXYZ(i, bx, by, bz)
         }
         // Y↔Z swap is a reflection → always reverse winding once
         for (let i = 0; i < pos.count; i += 3) {
@@ -629,7 +656,7 @@ export default function StlImport() {
         }
         pos.needsUpdate = true
 
-        // ── Step 5: Export to binary STL ────────────────────────────
+        // Export to binary STL
         const tempMesh = new THREE_mod.Mesh(backendGeo)
         const tempScene = new THREE_mod.Scene()
         tempScene.add(tempMesh)
@@ -638,13 +665,6 @@ export default function StlImport() {
         stlBlob = new Blob([stlBinary as any], { type: 'application/octet-stream' })
         tempScene.remove(tempMesh)
         backendGeo.dispose()
-
-        // Verification: lowest model vertex after drop must be Y=0
-        console.log('🔴🔴🔴 [BAKE v3] FREEZE POSE — group now identity')
-        console.log('[Bake] model minY after drop:', displayGeo.boundingBox!.min.y.toFixed(4),
-          '| size:', newSize.x.toFixed(1), newSize.y.toFixed(1), newSize.z.toFixed(1),
-          '| group pos:', meshData.group.position.toArray().map((v: number) => v.toFixed(2)),
-          '| group rot:', meshData.group.rotation.toArray().slice(0,3).map((v: number) => v.toFixed(2)))
       } else {
         // Fallback: raw file (no transforms)
         const resp = await fetch(selected.url)
@@ -695,12 +715,17 @@ export default function StlImport() {
       fd.append('raftThicknessMm', String(autoSupportConfig.raftThickness))
       fd.append('materialPreset', autoSupportConfig.materialPreset)
 
-      // Send manual support contacts (user-clicked positions)
+      // Send manual support contacts — same yUpToZUp conversion as the mesh
       const manualPts = selected.manualSupports?.points ?? []
       if (manualPts.length > 0) {
-        fd.append('manualContacts', JSON.stringify(manualPts.map(p => ({
-          x: p.x, y: p.y, z: p.z, nx: 0, ny: 0, nz: -1
-        }))))
+        fd.append('manualContacts', JSON.stringify(manualPts.map(p => {
+          const [px, py, pz] = yUpToZUp(p.x, p.y, p.z)
+          const [nx, ny, nz] = yUpToZUp(p.nx, p.ny, p.nz)
+          console.log('[ManualPt] Y-up:', p.x.toFixed(2), p.y.toFixed(2), p.z.toFixed(2),
+            '→ Z-up:', px.toFixed(2), py.toFixed(2), pz.toFixed(2),
+            '| normal:', nx.toFixed(2), ny.toFixed(2), nz.toFixed(2))
+          return { x: px, y: py, z: pz, nx, ny, nz }
+        })))
       }
 
       // V2 engine only — no legacy fallback
@@ -991,10 +1016,12 @@ export default function StlImport() {
                   crossBraces={selectedPrep.crossBraces}
                   supportMeshBuffer={selectedPrep.v2MeshBuffer}
                   supportMeshOffset={selectedPrep.v2MeshOffset}
+                  manualMarkers={selectedSupportData.points.map(p => ({ id: p.id, x: p.x, y: p.y, z: p.z }))}
+                  orientationCommitted={orientationCommitted}
                   paintedRegions={selectedSupportData.paintedRegions}
                   supportTipType={supportTipType}
                   supportBrushSize={supportBrushSize}
-                  onSupportPointAdd={(x, y, z) => addSupportPoint(x, y, z)}
+                  onSupportPointAdd={(x, y, z, nx, ny, nz) => addSupportPoint(x, y, z, nx, ny, nz)}
                   onSupportPointDelete={(id) => deleteSupportPoint(id)}
                   onPaintRegionAdd={(mode, cx, cy, cz) => addPaintedRegion(mode, cx, cy, cz)}
                   raftData={selectedPrep.raft}

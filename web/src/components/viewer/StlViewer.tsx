@@ -88,6 +88,10 @@ interface Props {
   supportMeshBuffer?: ArrayBuffer | null
   // Backend centering offset — used to reverse XY/Z centering on the return path
   supportMeshOffset?: { x: number; y: number; z: number } | null
+  // Manual support markers — rendered as proxy spheres for visual feedback + delete raycast
+  manualMarkers?: { id: string; x: number; y: number; z: number }[]
+  // True once commitOrientation has completed — clicks are blocked until this is true
+  orientationCommitted?: boolean
   // Raft/Skirt visualization
   raftData?: { type: string; minX: number; minY: number; maxX: number; maxY: number; thicknessMm: number } | null
   skirtData?: { minX: number; minY: number; maxX: number; maxY: number; layers: number; distanceMm: number; widthMm: number } | null
@@ -183,6 +187,8 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     crossBraces: _crossBraces,
     supportMeshBuffer,
     supportMeshOffset,
+    manualMarkers,
+    orientationCommitted,
     raftData,
     skirtData,
   },
@@ -204,6 +210,12 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
   ;(window as any).__stlViewerMeshMap = meshMapRef.current
   const loadingIdsRef = useRef<Set<string>>(new Set())
   const gizmoRef      = useRef<GizmoManager | null>(null)
+
+  // Support edit mode ref (avoids stale closure in mousedown/mouseup handler)
+  const supportEditModeRef = useRef(supportEditMode)
+  supportEditModeRef.current = supportEditMode
+  const orientationCommittedRef = useRef(orientationCommitted ?? true)
+  orientationCommittedRef.current = orientationCommitted ?? true
 
   // Drag state (model bed-plane drag)
   const draggingIdRef    = useRef<string | null>(null)
@@ -483,7 +495,10 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
         return
       }
 
-      // ── 2. Check model meshes ─────────────────────────────────────────────
+      // ── 2. In support edit mode, skip drag/face-select — let the click handler do its job
+      if (supportEditModeRef.current && supportEditModeRef.current !== 'none') return
+
+      // ── 3. Check model meshes ─────────────────────────────────────────────
       const allMeshes: THREE.Mesh[] = []
       for (const d of meshMapRef.current.values()) allMeshes.push(d.mesh)
 
@@ -1113,6 +1128,42 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     }
   }, [supportMeshBuffer, supportMeshOffset, sceneReady, selectedId])
 
+  // ── Manual support proxy markers (visual feedback + delete raycast target) ──
+
+  const manualMarkerGroupRef = useRef<THREE.Group | null>(null)
+
+  useEffect(() => {
+    if (!sceneReady || !sceneRef.current) return
+
+    // Remove old markers
+    if (manualMarkerGroupRef.current) {
+      sceneRef.current.remove(manualMarkerGroupRef.current)
+      manualMarkerGroupRef.current.traverse(c => {
+        if ((c as THREE.Mesh).geometry) (c as THREE.Mesh).geometry.dispose()
+        if ((c as THREE.Mesh).material) ((c as THREE.Mesh).material as THREE.Material).dispose()
+      })
+      manualMarkerGroupRef.current = null
+    }
+
+    const markers = manualMarkers ?? []
+    if (markers.length === 0) return
+
+    const group = new THREE.Group()
+    group.name = 'manual-support-markers'
+
+    const sharedGeo = new THREE.SphereGeometry(0.4, 10, 10)
+    markers.forEach(m => {
+      const mat = new THREE.MeshPhongMaterial({ color: 0xff6600, emissive: 0x331100 })
+      const sphere = new THREE.Mesh(sharedGeo, mat)
+      sphere.position.set(m.x, m.y, m.z)
+      sphere.userData = { supportPointId: m.id }
+      group.add(sphere)
+    })
+
+    sceneRef.current.add(group)
+    manualMarkerGroupRef.current = group
+  }, [manualMarkers, sceneReady])
+
   // ── Support callback refs (avoid stale closures) ─────────────────────────
   const onSupportPointAddRef = useRef(onSupportPointAdd)
   onSupportPointAddRef.current = onSupportPointAdd
@@ -1146,6 +1197,20 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
 
       raycaster.setFromCamera(toNDC(e), camera)
 
+      // ── GATE: block ALL support clicks until orientation is committed ──
+      if (!orientationCommittedRef.current) {
+        console.error('[ManualSupport] BLOCKED — orientationCommitted is false')
+        return
+      }
+      // Full identity check on every model group (hard reject, not warning)
+      const identity4 = new THREE.Matrix4()
+      for (const d of meshMapRef.current.values()) {
+        if (!d.group.matrixWorld.equals(identity4)) {
+          console.error('[ManualSupport] BLOCKED — group matrixWorld is NOT identity')
+          return
+        }
+      }
+
       if (mode === 'add') {
         // Raycast against model meshes to find surface point
         const meshes: THREE.Mesh[] = []
@@ -1153,24 +1218,24 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
         const hits = raycaster.intersectObjects(meshes, false)
         if (hits.length > 0) {
           const hit = hits[0]
-          // With Fix 2 (baked transforms), the backend works in display/world space.
-          // Click coordinates are already in world space — no swap needed.
+          // Group is at identity → local == world. hit.point and hit.face.normal are in world space.
           const wp = hit.point
           const wn = hit.face?.normal ?? new THREE.Vector3(0, -1, 0)
+          console.log('[ManualSupport] click Y-up:', wp.x.toFixed(2), wp.y.toFixed(2), wp.z.toFixed(2),
+            '| normal:', wn.x.toFixed(2), wn.y.toFixed(2), wn.z.toFixed(2))
           onSupportPointAddRef.current?.(wp.x, wp.y, wp.z, wn.x, wn.y, wn.z)
           e.stopPropagation()
         }
       } else if (mode === 'delete') {
-        // Raycast against support point spheres
-        if (supportGroupRef.current) {
-          const supportMeshes = supportGroupRef.current.children.filter(
-            c => (c as THREE.Mesh).userData?.supportPointId
-          )
-          const hits = raycaster.intersectObjects(supportMeshes, false)
+        // Raycast against manual support proxy markers
+        if (manualMarkerGroupRef.current) {
+          const hits = raycaster.intersectObjects(manualMarkerGroupRef.current.children, false)
           if (hits.length > 0) {
             const id = hits[0].object.userData.supportPointId
-            onSupportPointDeleteRef.current?.(id)
-            e.stopPropagation()
+            if (id) {
+              onSupportPointDeleteRef.current?.(id)
+              e.stopPropagation()
+            }
           }
         }
       } else if (mode === 'paint-enforcer' || mode === 'paint-blocker') {
