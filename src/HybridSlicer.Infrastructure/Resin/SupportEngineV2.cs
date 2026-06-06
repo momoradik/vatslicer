@@ -395,6 +395,27 @@ public static class SupportEngineV2
                 }
             }
 
+            // Force a pinhead for manual supports even when optimizer fails.
+            // The user placed it intentionally — we must honor it regardless of surface orientation.
+            if (!pinhead.IsValid && isManual)
+            {
+                var downDir = new Vector3(0, 0, -1); // straight down in Z-up
+                pinhead = new PinheadOptimizer.Pinhead
+                {
+                    IsValid = true,
+                    ContactPoint = pt.Position,
+                    PinCenter = pt.Position,
+                    BackCenter = pt.Position + downDir * phCfg.WidthMm * 0.5f,
+                    JunctionPoint = pt.Position + downDir * phCfg.WidthMm,
+                    Direction = downDir,
+                    PinRadius = phCfg.PinRadiusMm,
+                    BackRadius = phCfg.BackRadiusMm,
+                    Width = phCfg.WidthMm,
+                    Clearance = 0f,
+                    NeedsAnchor = false,
+                };
+            }
+
             pinheads.Add((pt.Id, pinhead));
         }
 
@@ -503,6 +524,17 @@ public static class SupportEngineV2
                         break;
                     }
                 }
+            }
+
+            // Last resort for manual supports: force a straight-down route to the bed.
+            // The user placed it — we produce geometry no matter what.
+            if (!route.ReachesGround && manualPointIds.Contains(id))
+            {
+                var forcedPath = new List<PillarRouter.Waypoint>();
+                forcedPath.Add(new PillarRouter.Waypoint { Position = routeStart, Radius = startRadius, Type = "junction" });
+                forcedPath.Add(new PillarRouter.Waypoint { Position = new Vector3(routeStart.X, routeStart.Y, rCfg.BaseHeightMm), Radius = rCfg.BaseRadiusMm, Type = "pillar" });
+                forcedPath.Add(new PillarRouter.Waypoint { Position = new Vector3(routeStart.X, routeStart.Y, 0), Radius = rCfg.BaseRadiusMm, Type = "base" });
+                route = new PillarRouter.PillarRoute { Path = forcedPath, ReachesGround = true, TotalLength = routeStart.Z };
             }
 
             routes.Add((id, route));
@@ -752,11 +784,12 @@ public static class SupportEngineV2
         // ── Emission gate: only supports with a valid load path ──────────
         // A support needs at least 2 waypoints (junction → something).
         // It must either reach the ground, have an anchor, or have a base waypoint.
-        // Single-waypoint (junction only) routes are floating pinheads → discard.
+        // Manual supports ALWAYS pass — the user placed them intentionally.
         var validRoutes = routes.Where(r =>
-            r.route.Path.Count >= 2 &&
+            manualPointIds.Contains(r.id) ||
+            (r.route.Path.Count >= 2 &&
             (r.route.ReachesGround || r.route.AnchorPoint.HasValue
-             || r.route.Path.Any(wp => wp.Type == "base")))
+             || r.route.Path.Any(wp => wp.Type == "base"))))
             .ToList();
 
         // Track manual tips that failed the emission gate OR collision filter (uncoverable)
