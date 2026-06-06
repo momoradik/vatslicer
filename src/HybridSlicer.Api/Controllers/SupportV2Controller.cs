@@ -67,6 +67,7 @@ public sealed class SupportV2Controller : ControllerBase
                 if (parsed?.Count > 0)
                     manualContactList = parsed.Select(c => new SupportEngineV2.EngineConfig.ManualContact
                     {
+                        FrontendId = c.id,
                         Position = new System.Numerics.Vector3(c.x, c.y, c.z),
                         Normal = new System.Numerics.Vector3(c.nx, c.ny, c.nz),
                         TipDiameterMm = c.tipDiameterMm,
@@ -133,8 +134,15 @@ public sealed class SupportV2Controller : ControllerBase
             orientation = orient.ToString(),
             // Manual tips that could not be routed (uncoverable)
             uncoverableManualIds = result.UncoverableManualIds,
+            // Overhang points dropped by the 500-point cap (0 = none dropped)
+            droppedByCapCount = result.DroppedByCapCount,
             // Centering offset — frontend must apply same offset to align supports with model
             meshOffset = new { x = result.MeshCenteringOffset.X, y = result.MeshCenteringOffset.Y, z = result.MeshCenteringOffset.Z },
+            // Per-manual-support meshes (real generated triangles) for ground-truth comparison.
+            // Every manual support with a valid pinhead + route produces faces. Supports that
+            // fail pinhead/emission are not in ManualSupportMeshes — they're in uncoverableManualIds.
+            manualSupportMeshes = result.ManualSupportMeshes
+                .ToDictionary(kv => kv.Key, kv => Convert.ToBase64String(kv.Value.ToStlBinary())),
 
             // Validation summary
             validation = new
@@ -200,7 +208,9 @@ public sealed class SupportV2Controller : ControllerBase
     }
 
     // ── BVH cache for interactive single-support calls ──
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (AabbBvh bvh, StlMesh mesh, SupportEngineV2.EngineConfig config, System.Numerics.Vector3 offset)> _bvhCache = new();
+    // Caches only geometry-derived data (BVH, centered mesh, centering offset).
+    // Config is NOT cached — it varies per call (preset tier, orientation).
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (AabbBvh bvh, StlMesh mesh, System.Numerics.Vector3 offset)> _bvhCache = new();
 
     /// <summary>
     /// Compute a single support in real time — same engine as auto, for ONE tip.
@@ -222,7 +232,7 @@ public sealed class SupportV2Controller : ControllerBase
         byte[] data;
         using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
 
-        // Cache key: hash of the STL data
+        // Cache key: hash of the STL data — caches BVH + centered mesh only, NOT config
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data))[..16];
 
         if (!_bvhCache.TryGetValue(hash, out var cached))
@@ -233,27 +243,29 @@ public sealed class SupportV2Controller : ControllerBase
             float offX = -(rawMesh.Min.X + meshW / 2), offY = -(rawMesh.Min.Y + meshD / 2), offZ = -rawMesh.Min.Z;
             rawMesh = rawMesh.Transform(new System.Numerics.Vector3(offX, offY, offZ), 1.0f);
             var bvh = AabbBvh.Build(rawMesh);
-
-            var orient = PrinterOrientation.BottomUp;
-            if (Enum.TryParse<PrinterOrientation>(orientation, true, out var o)) orient = o;
-
-            var cfg = new SupportEngineV2.EngineConfig
-            {
-                Orientation = orient,
-                PinRadiusMm = pinRadius, PillarRadiusMm = pillarRadius, BaseRadiusMm = baseRadius,
-            };
-            cached = (bvh, rawMesh, cfg, new System.Numerics.Vector3(offX, offY, offZ));
+            cached = (bvh, rawMesh, new System.Numerics.Vector3(offX, offY, offZ));
             _bvhCache[hash] = cached;
         }
+
+        // Build config fresh from THIS call's parameters (never stale from cache)
+        var orient2 = PrinterOrientation.BottomUp;
+        if (Enum.TryParse<PrinterOrientation>(orientation, true, out var o2)) orient2 = o2;
+        var config = new SupportEngineV2.EngineConfig
+        {
+            Orientation = orient2,
+            PinRadiusMm = pinRadius,
+            PillarRadiusMm = pillarRadius,
+            BaseRadiusMm = baseRadius,
+        };
 
         // Apply centering to the tip position (same offset as mesh centering)
         var tipPos = new System.Numerics.Vector3(tipX, tipY, tipZ) + cached.offset;
         var tipNormal = new System.Numerics.Vector3(normalX, normalY, normalZ);
 
         var result = SupportEngineV2.ComputeSingleSupport(
-            tipPos, tipNormal, cached.bvh, cached.mesh, cached.config,
-            overridePillarRadius: pillarRadius > 0 ? pillarRadius / 2f : null,
-            overrideBaseRadius: baseRadius > 0 ? baseRadius / 2f : null);
+            tipPos, tipNormal, cached.bvh, cached.mesh, config,
+            overridePillarRadius: pillarRadius > 0 ? pillarRadius : null,
+            overrideBaseRadius: baseRadius > 0 ? baseRadius : null);
 
         // Return mesh as base64 + status
         var stlBytes = result.Mesh.FaceCount > 0 ? result.Mesh.ToStlBinary() : Array.Empty<byte>();
@@ -613,5 +625,6 @@ public sealed class SupportV2Controller : ControllerBase
     }
 
     private record ManualContactDto(float x, float y, float z, float nx, float ny, float nz,
-        float? tipDiameterMm = null, float? shaftDiameterMm = null, float? baseDiameterMm = null);
+        float? tipDiameterMm = null, float? shaftDiameterMm = null, float? baseDiameterMm = null,
+        string? id = null);
 }

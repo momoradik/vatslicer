@@ -119,6 +119,9 @@ public static class SupportEngineV2
 
         public sealed class ManualContact
         {
+            /// <summary>Frontend-assigned point ID. Carried through unchanged so
+            /// uncoverableManualIds echoes back IDs the frontend already knows.</summary>
+            public string? FrontendId { get; init; }
             public required Vector3 Position { get; init; }
             public required Vector3 Normal { get; init; }
             public float? TipDiameterMm { get; init; }
@@ -186,6 +189,13 @@ public static class SupportEngineV2
         /// <summary>Manual tip IDs that could not be routed (uncoverable).</summary>
         public required List<string> UncoverableManualIds { get; init; }
 
+        /// <summary>Number of overhang points dropped by the 500-point cap (0 = no capping).</summary>
+        public required int DroppedByCapCount { get; init; }
+
+        /// <summary>Per-manual-support meshes from the real mesh generator (for ground-truth comparison).
+        /// Key = frontend point ID, Value = merged mesh parts for that support.</summary>
+        public required Dictionary<string, IndexedTriangleSet> ManualSupportMeshes { get; init; }
+
         // Segment data for backward compatibility with the existing frontend
         public required List<AdvancedSupportEngine.AdvancedSupport> LegacySupports { get; init; }
         public required List<AdvancedSupportEngine.CrossBrace> LegacyCrossBraces { get; init; }
@@ -244,9 +254,11 @@ public static class SupportEngineV2
 
         // Cap support count for large models to prevent timeout
         int maxSupports = 500;
+        int droppedByCapCount = 0;
         if (pointResult.Points.Count > maxSupports)
         {
-            Serilog.Log.Warning("V2 Step 2: Capping {Count} points to {Max}", pointResult.Points.Count, maxSupports);
+            droppedByCapCount = pointResult.Points.Count - maxSupports;
+            Serilog.Log.Warning("V2 Step 2: Capping {Count} points to {Max} (dropped {Dropped})", pointResult.Points.Count, maxSupports, droppedByCapCount);
             var sorted = pointResult.Points.OrderByDescending(p => p.Priority).ThenByDescending(p => p.OverhangArea).ToList();
             pointResult = new SupportPointGenerator.GenerationResult
             {
@@ -262,11 +274,18 @@ public static class SupportEngineV2
         // Inject manual contacts from user clicks (bypass overhang detection)
         // Apply the SAME centering offset as the mesh so manual points are in the same frame.
         var centeringOffset = new Vector3(offX, offY, offZ);
+        var manualPointIds = new HashSet<string>(); // track all manual IDs for uncoverable detection
+        int manualFallbackId = 9000;
         if (config.ManualContacts is { Count: > 0 })
         {
-            int manualId = 9000;
             foreach (var mc in config.ManualContacts)
             {
+                // Use frontend-assigned ID if provided, fall back to generated ID
+                var pointId = !string.IsNullOrEmpty(mc.FrontendId)
+                    ? mc.FrontendId
+                    : $"manual-{++manualFallbackId}";
+                manualPointIds.Add(pointId);
+
                 var n = mc.Normal.LengthSquared() > 0.01f ? Vector3.Normalize(mc.Normal) : new Vector3(0, 0, -1);
                 // Per-support diameter overrides from frontend
                 var weight = mc.ShaftDiameterMm >= 1.2f ? ForceEstimator.SupportWeight.Heavy
@@ -274,7 +293,7 @@ public static class SupportEngineV2
                     : ForceEstimator.SupportWeight.Light;
                 pointResult.Points.Add(new SupportPointGenerator.SupportPoint
                 {
-                    Id = $"manual-{++manualId}",
+                    Id = pointId,
                     Position = mc.Position + centeringOffset,
                     Normal = n,
                     OverhangArea = 25f,
@@ -345,7 +364,7 @@ public static class SupportEngineV2
             var pinhead = PinheadOptimizer.Optimize(pt.Position, pt.Normal, bvh, phCfg);
 
             // Manual tips are FIXED anchors — never moved. Skip retry.
-            bool isManual = pt.Id.StartsWith("manual-");
+            bool isManual = manualPointIds.Contains(pt.Id);
 
             // If pinhead failed and NOT manual, retry at nearby positions on the overhang surface
             if (!pinhead.IsValid && !isManual)
@@ -460,6 +479,32 @@ public static class SupportEngineV2
                 ? pinhead.JunctionPoint
                 : pinhead.ContactPoint; // near-bed: start from contact, skip pinhead
             var route = PillarRouter.Route(routeStart, startRadius, bvh, rCfg);
+
+            // For manual supports that failed to reach ground, try offset positions.
+            // The user placed this point — try harder to find a valid route.
+            if (!route.ReachesGround && manualPointIds.Contains(id))
+            {
+                float retryDist = rCfg.PillarRadiusMm * 3f;
+                foreach (var off in new[] {
+                    new Vector3(retryDist, 0, 0), new Vector3(-retryDist, 0, 0),
+                    new Vector3(0, retryDist, 0), new Vector3(0, -retryDist, 0),
+                    new Vector3(retryDist, retryDist, 0), new Vector3(-retryDist, -retryDist, 0),
+                })
+                {
+                    var retryRoute = PillarRouter.Route(routeStart + off, startRadius, bvh, rCfg);
+                    if (retryRoute.ReachesGround)
+                    {
+                        // Bridge from original position to the offset, then descend
+                        var bridgedPath = new List<PillarRouter.Waypoint>();
+                        bridgedPath.Add(new PillarRouter.Waypoint { Position = routeStart, Radius = startRadius, Type = "junction" });
+                        bridgedPath.Add(new PillarRouter.Waypoint { Position = routeStart + off, Radius = startRadius, Type = "bridge" });
+                        bridgedPath.AddRange(retryRoute.Path);
+                        route = new PillarRouter.PillarRoute { Path = bridgedPath, ReachesGround = true, TotalLength = 0 };
+                        break;
+                    }
+                }
+            }
+
             routes.Add((id, route));
         }
 
@@ -479,6 +524,11 @@ public static class SupportEngineV2
         int removedByCollision = 0;
         routes = routes.Where(r =>
         {
+            // Manual supports are NEVER rejected by collision — the user placed them intentionally.
+            // They'll still get collision STATUS in the single-support preview, but the full pipeline
+            // keeps them and lets the mesh generator produce geometry for them.
+            if (manualPointIds.Contains(r.id)) return true;
+
             var path = r.route.Path;
             for (int wi = 0; wi < path.Count; wi++)
             {
@@ -668,16 +718,21 @@ public static class SupportEngineV2
         bool useMiniRaft = config.EnableMiniRafts && totalRoutes < 200;
 
         var meshParts = new List<IndexedTriangleSet>();
+        // Track per-support mesh parts for manual supports (real generated triangles for ground-truth comparison)
+        var manualMeshParts = new Dictionary<string, List<IndexedTriangleSet>>();
 
         foreach (var (id, pinhead) in pinheads)
         {
             if (!pinhead.IsValid) continue;
             if (!sizingLookup.TryGetValue(id, out var sizing)) continue;
 
+            bool isManualSupport = manualPointIds.Contains(id);
+
             // Contact sphere — visible bead at the touch point (like ChiTuBox)
             var contactSphere = SupportMesher.OrientedSphere(
                 pinhead.ContactPoint, sizing.ContactSphereRadius, 4, meshSides);
             meshParts.Add(contactSphere);
+            if (isManualSupport) { if (!manualMeshParts.ContainsKey(id)) manualMeshParts[id] = new(); manualMeshParts[id].Add(contactSphere); }
 
             // Tapered frustum from contact sphere to junction/route start
             var routeStart = pinhead.JunctionPoint.Z > 0.1f
@@ -690,6 +745,7 @@ public static class SupportEngineV2
                     pinhead.ContactPoint, routeStart,
                     sizing.TipRadius, sizing.PillarRadius, meshSides);
                 meshParts.Add(phMesh);
+                if (isManualSupport) manualMeshParts[id].Add(phMesh);
             }
         }
 
@@ -703,16 +759,18 @@ public static class SupportEngineV2
              || r.route.Path.Any(wp => wp.Type == "base")))
             .ToList();
 
-        // Track manual tips that failed the emission gate (uncoverable)
+        // Track manual tips that failed the emission gate OR collision filter (uncoverable)
+        // Uses the explicit set of manual IDs collected during injection — no prefix matching.
         var validIds = new HashSet<string>(validRoutes.Select(r => r.id));
-        var allManualIds = pointResult.Points.Where(p => p.Id.StartsWith("manual-")).Select(p => p.Id).ToList();
-        var uncoverableManualIds = allManualIds.Where(id => !validIds.Contains(id)).ToList();
+        var uncoverableManualIds = manualPointIds.Where(id => !validIds.Contains(id)).ToList();
 
         Serilog.Log.Information("V2 Emission gate: {Before} routes → {After} with complete load path (uncoverable manual: {Uncov})",
             routes.Count, validRoutes.Count, uncoverableManualIds.Count);
 
         foreach (var (id, route) in validRoutes)
         {
+            bool isManualRoute = manualPointIds.Contains(id);
+            if (isManualRoute && !manualMeshParts.ContainsKey(id)) manualMeshParts[id] = new();
 
             float totalPillarHeight = route.Path[0].Position.Z - route.Path[^1].Position.Z;
 
@@ -721,17 +779,17 @@ public static class SupportEngineV2
                 var wp1 = route.Path[i];
                 var wp2 = route.Path[i + 1];
                 float segHeight = Vector3.Distance(wp1.Position, wp2.Position);
+                IndexedTriangleSet segMesh;
 
                 // Use lattice base instead of solid pedestal for base segments
                 if (wp2.Type == "base" && useLattice)
                 {
-                    var lattice = LatticeBase.Generate(
+                    segMesh = LatticeBase.Generate(
                         wp2.Position, wp1.Radius, wp2.Radius,
                         segHeight,
                         config.BaseLatticePattern,
                         config.LatticeStrutDiameterMm,
                         config.LatticeSpacingMm, 8);
-                    meshParts.Add(lattice);
                 }
                 // Use hollow frustum for pillar segments when total pillar is tall enough
                 else if (useHollow && totalPillarHeight > config.HollowMinHeightMm
@@ -739,24 +797,25 @@ public static class SupportEngineV2
                     && (wp2.Type == "pillar" || wp2.Type == "junction")
                     && segHeight > 2f)
                 {
-                    var hollow = HollowedSupport.OrientedHollowFrustum(
+                    segMesh = HollowedSupport.OrientedHollowFrustum(
                         wp1.Position, wp2.Position,
                         wp1.Radius, wp2.Radius,
                         config.HollowWallThicknessMm, 8);
-                    meshParts.Add(hollow);
                 }
                 else
                 {
                     // Standard solid frustum
-                    var seg = SupportMesher.OrientedFrustum(wp1.Position, wp2.Position, wp1.Radius, wp2.Radius, meshSides);
-                    meshParts.Add(seg);
+                    segMesh = SupportMesher.OrientedFrustum(wp1.Position, wp2.Position, wp1.Radius, wp2.Radius, meshSides);
                 }
+                meshParts.Add(segMesh);
+                if (isManualRoute) manualMeshParts[id].Add(segMesh);
 
                 // Junction sphere at each waypoint (full radius to avoid visual gaps)
                 if (i > 0)
                 {
                     var sphere = SupportMesher.OrientedSphere(wp1.Position, wp1.Radius, 4, meshSides);
                     meshParts.Add(sphere);
+                    if (isManualRoute) manualMeshParts[id].Add(sphere);
                 }
             }
 
@@ -770,6 +829,7 @@ public static class SupportEngineV2
                         baseWp.Position, baseWp.Radius,
                         config.RaftMarginMm, config.RaftThicknessMm, 12);
                     meshParts.Add(raft);
+                    if (isManualRoute) manualMeshParts[id].Add(raft);
                 }
             }
         }
@@ -1055,6 +1115,11 @@ public static class SupportEngineV2
             TotalSupportCrossSectionArea = supportStats.totalSupportAreaMm2,
             MeshCenteringOffset = new Vector3(offX, offY, offZ),
             UncoverableManualIds = uncoverableManualIds,
+            DroppedByCapCount = droppedByCapCount,
+            // Merge per-manual-support mesh parts into single meshes
+            ManualSupportMeshes = manualMeshParts.ToDictionary(
+                kv => kv.Key,
+                kv => { var m = new IndexedTriangleSet(); foreach (var p in kv.Value) m.Merge(p); return m; }),
             LegacySupports = legacySupports,
             LegacyCrossBraces = legacyCrossBraces,
         };
@@ -1087,6 +1152,13 @@ public static class SupportEngineV2
         float pinRadiusScale = config.Orientation == PrinterOrientation.BottomUp ? 0.8f : 1.0f;
 
         // ── Step 1: Pinhead optimization (same as auto Step 3) ──
+        // Apply the same weight-based pinhead scaling as the full pipeline (Step 3, lines 345-362).
+        // Weight is derived from overridePillarRadius (shaft radius) using the same thresholds
+        // as manual contact injection (ShaftDiameterMm = pillarRadius * 2).
+        float shaftDiameter = (overridePillarRadius ?? config.PillarRadiusMm) * 2f;
+        bool isHeavy = shaftDiameter >= 1.2f;
+        bool isMedium = !isHeavy && shaftDiameter >= 0.8f;
+
         var phCfg = new PinheadOptimizer.PinheadConfig
         {
             PinRadiusMm = config.PinRadiusMm * pinRadiusScale,
@@ -1095,6 +1167,23 @@ public static class SupportEngineV2
             PenetrationMm = config.PenetrationMm,
             CollisionRays = Math.Min(config.CollisionRays, 8),
         };
+        if (isHeavy)
+        {
+            phCfg = phCfg with
+            {
+                PinRadiusMm = Math.Max(phCfg.PinRadiusMm, 0.4f),
+                BackRadiusMm = Math.Max(phCfg.BackRadiusMm, 0.75f),
+                WidthMm = Math.Max(phCfg.WidthMm, 1.5f),
+            };
+        }
+        else if (isMedium)
+        {
+            phCfg = phCfg with
+            {
+                PinRadiusMm = Math.Max(phCfg.PinRadiusMm, 0.25f),
+                BackRadiusMm = Math.Max(phCfg.BackRadiusMm, 0.5f),
+            };
+        }
         var pinhead = PinheadOptimizer.Optimize(tipPosition, tipNormal, bvh, phCfg);
 
         if (!pinhead.IsValid)

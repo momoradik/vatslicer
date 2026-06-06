@@ -217,6 +217,8 @@ export const supportV2Api = {
       mesh: { vertices: number; faces: number; nonManifoldEdges: number; stlBase64: string | null }
       supportCount: number; braceCount: number
       uncoverableManualIds: string[]
+      droppedByCapCount: number
+      manualSupportMeshes: Record<string, string>  // ID → base64 STL of real generated mesh per manual support
       supports: AdvancedSupportData[]; crossBraces: CrossBraceData[]
     }>('/support-v2', fd, {
       headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120000,

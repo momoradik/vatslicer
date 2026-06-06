@@ -94,6 +94,7 @@ interface Props {
     id: string; x: number; y: number; z: number; shaftDiameter: number; uncoverable: boolean
     engineStatus?: string; engineMeshBase64?: string
     engineMeshOffset?: { x: number; y: number; z: number }
+    provisional?: boolean
   }[]
   // True once commitOrientation has completed — clicks are blocked until this is true
   orientationCommitted?: boolean
@@ -216,9 +217,14 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
   const loadingIdsRef = useRef<Set<string>>(new Set())
   const gizmoRef      = useRef<GizmoManager | null>(null)
 
-  // Support edit mode ref (avoids stale closure in mousedown/mouseup handler)
+  // Support edit mode — written synchronously to DOM data attribute during render.
+  // This guarantees any event handler firing after this render commit sees the correct value.
+  // (A useEffect would run after paint, creating a one-frame race window.)
   const supportEditModeRef = useRef(supportEditMode)
   supportEditModeRef.current = supportEditMode
+  if (rendererRef.current?.domElement) {
+    rendererRef.current.domElement.dataset.supportEditMode = supportEditMode ?? 'none'
+  }
   const orientationCommittedRef = useRef(orientationCommitted ?? true)
   orientationCommittedRef.current = orientationCommitted ?? true
 
@@ -425,6 +431,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     renderer.setPixelRatio(window.devicePixelRatio)
     renderer.shadowMap.enabled = true
     mount.appendChild(renderer.domElement)
+    renderer.domElement.dataset.supportEditMode = supportEditMode ?? 'none'
     rendererRef.current = renderer
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.55))
@@ -479,6 +486,9 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       paintMesh(id)
     }
 
+    // Read support edit mode from DOM data attribute — immune to closure staleness
+    const getSupportMode = () => renderer.domElement.dataset.supportEditMode ?? 'none'
+
     const onMouseDown = (e: MouseEvent) => {
       if (e.button !== 0) return
 
@@ -494,14 +504,18 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
           controls.enabled = false
           hasDraggedRef.current = false
           mouseDownPxRef.current = { x: e.clientX, y: e.clientY }
-          // Use draggingIdRef to track gizmo drags too (sentinel value)
           draggingIdRef.current = '__gizmo__'
         }
         return
       }
 
-      // ── 2. In support edit mode, skip drag/face-select — let the click handler do its job
-      if (supportEditModeRef.current && supportEditModeRef.current !== 'none') return
+      // ── 2. In support edit mode, block drag/face-select entirely.
+      const mode = getSupportMode()
+      if (mode !== 'none') {
+        mouseDownPxRef.current = { x: e.clientX, y: e.clientY }
+        draggingIdRef.current = '__support__'
+        return
+      }
 
       // ── 3. Check model meshes ─────────────────────────────────────────────
       const allMeshes: THREE.Mesh[] = []
@@ -621,6 +635,61 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     const onMouseUp = (e: MouseEvent) => {
       const id = draggingIdRef.current
       controls.enabled = true
+
+      // ── UNCONDITIONAL support-mode guard ──
+      // Read from DOM data attribute — immune to React ref/closure staleness.
+      const supportMode = getSupportMode()
+      if (supportMode !== 'none') {
+        draggingIdRef.current = null
+        hasDraggedRef.current = false
+        // Check if it was a click (not drag/orbit)
+        const sdx = e.clientX - (mouseDownPxRef.current?.x ?? e.clientX)
+        const sdy = e.clientY - (mouseDownPxRef.current?.y ?? e.clientY)
+        if (Math.sqrt(sdx * sdx + sdy * sdy) <= 4) {
+          if (!orientationCommittedRef.current) return
+          // Identity gate
+          const ident = new THREE.Matrix4()
+          for (const [, d] of meshMapRef.current) {
+            if (!d.group.matrixWorld.equals(ident)) return
+          }
+          raycaster.setFromCamera(toNDC(e), camera)
+          if (supportMode === 'add') {
+            const meshes: THREE.Mesh[] = []
+            meshMapRef.current.forEach(d => {
+              if (!d.mesh.geometry.boundingSphere) d.mesh.geometry.computeBoundingSphere()
+              meshes.push(d.mesh)
+            })
+            const hits = raycaster.intersectObjects(meshes, false)
+            if (hits.length > 0) {
+              const wp = hits[0].point
+              const wn = hits[0].face?.normal ?? new THREE.Vector3(0, -1, 0)
+              if (isFinite(wn.x) && isFinite(wn.y) && isFinite(wn.z) && wn.lengthSq() > 0.001) {
+                let baryU: number | undefined, baryV: number | undefined
+                if (hits[0].uv) { baryU = hits[0].uv.x; baryV = hits[0].uv.y }
+                onSupportPointAddRef.current?.(wp.x, wp.y, wp.z, wn.x, wn.y, wn.z, hits[0].faceIndex ?? undefined, baryU, baryV)
+              }
+            }
+          } else if (supportMode === 'delete') {
+            if (manualMarkerGroupRef.current) {
+              const hits = raycaster.intersectObjects(manualMarkerGroupRef.current.children, false)
+              if (hits.length > 0) {
+                const sid = hits[0].object.userData.supportPointId
+                if (sid) onSupportPointDeleteRef.current?.(sid)
+              }
+            }
+          } else if (supportMode === 'paint-enforcer' || supportMode === 'paint-blocker') {
+            const meshes: THREE.Mesh[] = []
+            meshMapRef.current.forEach(d => meshes.push(d.mesh))
+            const hits = raycaster.intersectObjects(meshes, false)
+            if (hits.length > 0) {
+              const wp = hits[0].point
+              const paintMode = supportMode === 'paint-enforcer' ? 'enforcer' : 'blocker'
+              onPaintRegionAddRef.current?.(paintMode, wp.x, wp.z, wp.y)
+            }
+          }
+        }
+        return // ALWAYS return here — never fall through to face-selection
+      }
 
       // Empty-area single click → deselect
       if (!id && emptyClickPxRef.current) {
@@ -1197,12 +1266,18 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
         bundled:     { marker: 0x44cc88, emissive: 0x113322, support: 0x44cc88 },
         collision:   { marker: 0xff3333, emissive: 0x441111, support: 0xff3333 },
         uncoverable: { marker: 0xff0000, emissive: 0x440000, support: 0xff0000 },
+        error:       { marker: 0xff00ff, emissive: 0x440044, support: 0xff00ff },
         pending:     { marker: 0xff6600, emissive: 0x331100, support: 0x44aaff },
       }
       const c = statusColors[engineStatus ?? 'pending']
 
-      // ── Contact marker sphere (always shown) ──
-      const markerMat = new THREE.MeshPhongMaterial({ color: c.marker, emissive: c.emissive })
+      // ── Contact marker sphere (always shown) — pulsing wireframe when provisional ──
+      const markerProvisional = m.provisional ?? false
+      const markerMat = new THREE.MeshPhongMaterial({
+        color: c.marker, emissive: c.emissive,
+        wireframe: markerProvisional,
+        transparent: markerProvisional, opacity: markerProvisional ? 0.6 : 1.0,
+      })
       const sphere = new THREE.Mesh(sharedGeo, markerMat)
       sphere.position.set(m.x, m.y, m.z)
       sphere.userData = { supportPointId: m.id }
@@ -1238,15 +1313,18 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
           positions.needsUpdate = true
           geo.computeVertexNormals()
 
-          // Same material style as V2 auto mesh — identical appearance
+          // Same material style as V2 auto mesh — reduced opacity when provisional
+          const isProvisional = m.provisional ?? false
+          const baseOpacity = engineStatus === 'routed' || engineStatus === 'bundled' ? 0.7 : 0.5
           const mat = new THREE.MeshPhongMaterial({
             color: c.support,
             specular: 0x444444,
             transparent: true,
-            opacity: engineStatus === 'routed' || engineStatus === 'bundled' ? 0.7 : 0.5,
+            opacity: isProvisional ? baseOpacity * 0.5 : baseOpacity,
             shininess: 50,
             side: THREE.DoubleSide,
             depthWrite: false,
+            wireframe: isProvisional, // provisional previews shown as wireframe
           })
 
           const supportMesh = new THREE.Mesh(geo, mat)
@@ -1282,153 +1360,8 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
   const onPaintRegionAddRef = useRef(onPaintRegionAdd)
   onPaintRegionAddRef.current = onPaintRegionAdd
 
-  // ── Support editing click handler ─────────────────────────────────────────
-
-  useEffect(() => {
-    if (!sceneReady) return
-    const mode = supportEditMode ?? 'none'
-    if (mode === 'none') return
-
-    const renderer = rendererRef.current!
-    const camera = cameraRef.current!
-    const raycaster = new THREE.Raycaster()
-
-    const toNDC = (e: MouseEvent) => {
-      const rect = renderer.domElement.getBoundingClientRect()
-      return new THREE.Vector2(
-        ((e.clientX - rect.left) / rect.width) * 2 - 1,
-        -((e.clientY - rect.top) / rect.height) * 2 + 1
-      )
-    }
-
-    // Track pointer down position to distinguish click from drag/orbit
-    let pointerDownPx = { x: 0, y: 0 }
-    const onPointerDown = (e: PointerEvent) => { pointerDownPx = { x: e.clientX, y: e.clientY } }
-
-    const onClick = (e: MouseEvent) => {
-      const traceId = Math.random().toString(36).slice(2, 10)
-      const M = (step: string, obj: Record<string, unknown>) => console.log('MSADD', { traceId, step, ...obj })
-
-      // ── STEP A: click fired ──
-      const dx = e.clientX - pointerDownPx.x, dy = e.clientY - pointerDownPx.y
-      const dragPx = +(Math.sqrt(dx * dx + dy * dy).toFixed(1))
-      const passA = e.button === 0 && dragPx <= 4
-      M('A', { button: e.button, dragPx, pass: passA })
-      if (!passA) return
-
-      // ── STEP B: edit-mode ref ──
-      const modeRef = supportEditModeRef.current
-      const passB = modeRef === 'add'
-      M('B', { supportEditModeRef: modeRef, pass: passB })
-      if (modeRef !== 'add' && modeRef !== 'delete' && modeRef !== 'paint-enforcer' && modeRef !== 'paint-blocker') return
-
-      // ── STEP C: orientation gate ──
-      const passC = !!orientationCommittedRef.current
-      M('C', { orientationCommitted: orientationCommittedRef.current, pass: passC })
-      if (!passC) return
-
-      // ── STEP D: identity gate (all 16 elements) ──
-      raycaster.setFromCamera(toNDC(e), camera)
-      const identity4 = new THREE.Matrix4()
-      let passD = true
-      for (const [id, d] of meshMapRef.current) {
-        if (!d.group.matrixWorld.equals(identity4)) {
-          M('D', { matrixIsIdentity: false, modelId: id, matrix: Array.from(d.group.matrixWorld.elements).map(v => +v.toFixed(4)), pass: false })
-          passD = false
-        }
-      }
-      if (!passD) return
-      M('D', { matrixIsIdentity: true, pass: true })
-
-      if (modeRef === 'add') {
-        // ── STEP E: raycast inputs ──
-        const meshes: THREE.Mesh[] = []
-        const perMesh: unknown[] = []
-        const accelPatched = (THREE.Mesh.prototype as any).raycast?.toString().includes('boundsTree') ?? false
-        meshMapRef.current.forEach((d, mid) => {
-          const geo = d.mesh.geometry
-          const pos = geo.getAttribute('position')
-          const bt = (geo as any).boundsTree
-          const vtxCount = pos?.count ?? 0
-          perMesh.push({
-            modelId: mid, geomId: geo.uuid,
-            vertexCount: vtxCount,
-            hasBoundingSphere: !!geo.boundingSphere,
-            bSphereR: geo.boundingSphere?.radius?.toFixed(2) ?? 'null',
-            hasBoundsTree: !!bt,
-            boundsTreeVertexCount: bt ? (bt._roots?.[0] ? 'exists' : 'empty') : 'none',
-            meshVisible: d.mesh.visible,
-            meshParent: d.mesh.parent?.type ?? 'null',
-          })
-          if (!geo.boundingSphere) geo.computeBoundingSphere()
-          meshes.push(d.mesh)
-        })
-        M('E', { meshCount: meshes.length, accelRaycastPatched: accelPatched, perMesh, pass: meshes.length > 0 })
-
-        // ── STEP F: raycast result ──
-        const hits = raycaster.intersectObjects(meshes, false)
-        const passF = hits.length > 0
-        M('F', {
-          hitCount: hits.length, pass: passF,
-          ...(passF ? {
-            hitGeomId: (hits[0].object as THREE.Mesh).geometry?.uuid,
-            hitFaceIndex: hits[0].faceIndex,
-            hitPointWorld: [+hits[0].point.x.toFixed(3), +hits[0].point.y.toFixed(3), +hits[0].point.z.toFixed(3)],
-            hitDistance: +hits[0].distance.toFixed(3),
-          } : {}),
-        })
-        if (!passF) return
-
-        const wp = hits[0].point
-        const wn = hits[0].face?.normal ?? new THREE.Vector3(0, -1, 0)
-
-        // ── STEP G: derived normal ──
-        const passG = isFinite(wn.x) && isFinite(wn.y) && isFinite(wn.z) && wn.lengthSq() > 0.001
-        M('G', { faceNormalWorld: [+wn.x.toFixed(4), +wn.y.toFixed(4), +wn.z.toFixed(4)], pass: passG })
-        if (!passG) return
-
-        // ── STEP H: callback invoked (with face anchor) ──
-        const cb = onSupportPointAddRef.current
-        const passH = !!cb
-        M('H', { argCount: passH ? 9 : 0, faceIndex: hits[0].faceIndex, pass: passH })
-        if (!passH) return
-        // Compute barycentric coords from hit
-        let baryU: number | undefined, baryV: number | undefined
-        if (hits[0].uv) { baryU = hits[0].uv.x; baryV = hits[0].uv.y }
-        cb!(wp.x, wp.y, wp.z, wn.x, wn.y, wn.z, hits[0].faceIndex ?? undefined, baryU, baryV)
-        e.stopPropagation()
-      } else if (mode === 'delete') {
-        // Raycast against manual support proxy markers
-        if (manualMarkerGroupRef.current) {
-          const hits = raycaster.intersectObjects(manualMarkerGroupRef.current.children, false)
-          if (hits.length > 0) {
-            const id = hits[0].object.userData.supportPointId
-            if (id) {
-              onSupportPointDeleteRef.current?.(id)
-              e.stopPropagation()
-            }
-          }
-        }
-      } else if (mode === 'paint-enforcer' || mode === 'paint-blocker') {
-        const meshes: THREE.Mesh[] = []
-        meshMapRef.current.forEach(d => meshes.push(d.mesh))
-        const hits = raycaster.intersectObjects(meshes, false)
-        if (hits.length > 0) {
-          const wp = hits[0].point
-          const paintMode = mode === 'paint-enforcer' ? 'enforcer' : 'blocker'
-          onPaintRegionAddRef.current?.(paintMode, wp.x, wp.z, wp.y)
-          e.stopPropagation()
-        }
-      }
-    }
-
-    renderer.domElement.addEventListener('pointerdown', onPointerDown)
-    renderer.domElement.addEventListener('click', onClick)
-    return () => {
-      renderer.domElement.removeEventListener('pointerdown', onPointerDown)
-      renderer.domElement.removeEventListener('click', onClick)
-    }
-  }, [supportEditMode, sceneReady])
+  // (Support editing is handled entirely by the main onMouseDown/onMouseUp handlers above.
+  //  No separate click handler needed — eliminates the race condition.)
 
   // (callback refs declared above the click handler useEffect)
 

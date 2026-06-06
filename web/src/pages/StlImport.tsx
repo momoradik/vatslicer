@@ -43,6 +43,187 @@ const DEFAULT_SETTINGS: ObjectSettings = {
   hollowingEnabled: null, hollowWallThicknessMm: null,
 }
 
+// ── Support presets (single source of truth for ALL placement methods) ────────
+// All values are RADII in mm. Both manual and auto support paths read from here.
+// The backend expects radii for pinRadius, backRadius, pillarRadius, baseRadius.
+
+const SUPPORT_PRESETS: Record<string, { pin: number; back: number; pillar: number; base: number }> = {
+  'light':          { pin: 0.1,  back: 0.3,  pillar: 0.3,  base: 1.2 },
+  'medium':         { pin: 0.2,  back: 0.5,  pillar: 0.5,  base: 2.0 },
+  'heavy':          { pin: 0.4,  back: 0.75, pillar: 0.75, base: 3.0 },
+  'point-tip':      { pin: 0.08, back: 0.3,  pillar: 0.35, base: 1.0 },
+  'needle-tip':     { pin: 0.05, back: 0.2,  pillar: 0.3,  base: 1.0 },
+  'mushroom-tip':   { pin: 0.3,  back: 0.5,  pillar: 0.5,  base: 2.0 },
+  'cross-tip':      { pin: 0.3,  back: 0.5,  pillar: 0.5,  base: 2.2 },
+}
+
+// ── Independent mesh-based ground truth (for reconciliation completeness test) ─
+// This code shares NOTHING with SupportFingerprint or computeGeometryDelta.
+// It reads raw mesh geometry (preview STL triangles / final segment endpoints)
+// and computes bbox + surface area + tri count. Used to verify that the fingerprint
+// catches every divergence the meshes exhibit.
+
+interface MeshEnvelope {
+  bboxW: number; bboxD: number; bboxH: number  // axis-aligned bounding box dimensions
+  surfaceArea: number                           // total surface area
+  triCount: number                              // number of triangles
+}
+
+/** Parse a binary STL from base64 and compute its MeshEnvelope. */
+function envelopeFromStlBase64(b64: string): MeshEnvelope {
+  const bin = atob(b64)
+  const buf = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
+  const dv = new DataView(buf.buffer)
+  const triCount = dv.getUint32(80, true)
+  let minX = Infinity, minY = Infinity, minZ = Infinity
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
+  let surfaceArea = 0
+  for (let t = 0; t < triCount; t++) {
+    const off = 84 + t * 50
+    // skip normal (12 bytes), read 3 vertices (36 bytes)
+    const verts: [number, number, number][] = []
+    for (let v = 0; v < 3; v++) {
+      const vOff = off + 12 + v * 12
+      const x = dv.getFloat32(vOff, true), y = dv.getFloat32(vOff + 4, true), z = dv.getFloat32(vOff + 8, true)
+      verts.push([x, y, z])
+      minX = Math.min(minX, x); minY = Math.min(minY, y); minZ = Math.min(minZ, z)
+      maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); maxZ = Math.max(maxZ, z)
+    }
+    // triangle area = 0.5 * |cross(AB, AC)|
+    const [ax, ay, az] = [verts[1][0] - verts[0][0], verts[1][1] - verts[0][1], verts[1][2] - verts[0][2]]
+    const [bx, by, bz] = [verts[2][0] - verts[0][0], verts[2][1] - verts[0][1], verts[2][2] - verts[0][2]]
+    const cx = ay * bz - az * by, cy = az * bx - ax * bz, cz = ax * by - ay * bx
+    surfaceArea += 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz)
+  }
+  return {
+    bboxW: triCount > 0 ? maxX - minX : 0,
+    bboxD: triCount > 0 ? maxY - minY : 0,
+    bboxH: triCount > 0 ? maxZ - minZ : 0,
+    surfaceArea, triCount,
+  }
+}
+
+/** Reconstruct a MeshEnvelope from a segment list (independent of SupportFingerprint).
+ *  Computes bbox from all segment endpoints, surface area from frustum lateral areas,
+ *  and triCount from frustum face estimates (2 * sides per segment). */
+function envelopeFromSegments(segments: { part: string; x1: number; y1: number; z1: number; r1: number; x2: number; y2: number; z2: number; r2: number }[]): MeshEnvelope {
+  let minX = Infinity, minY = Infinity, minZ = Infinity
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
+  let surfaceArea = 0
+  const sides = 8 // match engine's default tessellation
+  for (const s of segments) {
+    // Expand bbox by segment endpoints + radius (cylinder envelope)
+    minX = Math.min(minX, s.x1 - s.r1, s.x2 - s.r2); maxX = Math.max(maxX, s.x1 + s.r1, s.x2 + s.r2)
+    minY = Math.min(minY, s.y1 - s.r1, s.y2 - s.r2); maxY = Math.max(maxY, s.y1 + s.r1, s.y2 + s.r2)
+    minZ = Math.min(minZ, s.z1 - s.r1, s.z2 - s.r2); maxZ = Math.max(maxZ, s.z1 + s.r1, s.z2 + s.r2)
+    // Frustum lateral surface area = π(r1+r2) * slant_height
+    const dx = s.x2 - s.x1, dy = s.y2 - s.y1, dz = s.z2 - s.z1
+    const h = Math.sqrt(dx * dx + dy * dy + dz * dz)
+    const slant = Math.sqrt(h * h + (s.r1 - s.r2) * (s.r1 - s.r2))
+    surfaceArea += Math.PI * (s.r1 + s.r2) * slant
+    // Caps: π*r²
+    surfaceArea += Math.PI * s.r1 * s.r1 + Math.PI * s.r2 * s.r2
+  }
+  return {
+    bboxW: segments.length > 0 ? maxX - minX : 0,
+    bboxD: segments.length > 0 ? maxY - minY : 0,
+    bboxH: segments.length > 0 ? maxZ - minZ : 0,
+    surfaceArea,
+    triCount: segments.length * sides * 2, // approximate: 2 triangles per quad face per segment
+  }
+}
+
+/** Compute ground-truth diff between two MeshEnvelopes. Independent of SupportFingerprint. */
+function computeGroundTruthDiff(a: MeshEnvelope, b: MeshEnvelope): { diff: number; fields: Record<string, { a: number; b: number; rel: number }> } {
+  const rel = (x: number, y: number) => {
+    const d = Math.max(Math.abs(x), Math.abs(y), 0.01)
+    return Math.abs(x - y) / d
+  }
+  const fields: Record<string, { a: number; b: number; rel: number }> = {
+    bboxW: { a: a.bboxW, b: b.bboxW, rel: rel(a.bboxW, b.bboxW) },
+    bboxD: { a: a.bboxD, b: b.bboxD, rel: rel(a.bboxD, b.bboxD) },
+    bboxH: { a: a.bboxH, b: b.bboxH, rel: rel(a.bboxH, b.bboxH) },
+    surfaceArea: { a: a.surfaceArea, b: b.surfaceArea, rel: rel(a.surfaceArea, b.surfaceArea) },
+    triCount: { a: a.triCount, b: b.triCount, rel: rel(a.triCount, b.triCount) },
+  }
+  const diff = Math.max(...Object.values(fields).map(f => f.rel))
+  return { diff, fields }
+}
+
+// ── Mesh-measured equality test (T1/T2/T3 from prompt 2.1) ───────────────────
+// Extracts geometric properties directly from real STL triangle vertices.
+// Used to prove manual==auto equality and tier-switching correctness by measurement.
+
+interface SupportMeshMeasurement {
+  triCount: number
+  surfaceArea: number
+  bboxW: number; bboxD: number; bboxH: number
+  // Measured radii: max radial distance from the vertical axis (centroid XY)
+  // at the top 10% of Z range (tip region) and bottom 10% (base region)
+  tipRadius: number   // max radial extent near the contact point
+  baseRadius: number  // max radial extent near the build plate
+  maxRadius: number   // overall max radial extent from axis
+}
+
+/** Measure a support mesh from real STL bytes. Extracts radii at tip and base by
+ *  finding the centroid XY axis and measuring max radial distance at Z extremes. */
+function measureSupportMesh(b64: string): SupportMeshMeasurement {
+  const bin = atob(b64)
+  const buf = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
+  const dv = new DataView(buf.buffer)
+  const triCount = dv.getUint32(80, true)
+
+  // First pass: collect all vertices, compute bbox and centroid
+  const verts: { x: number; y: number; z: number }[] = []
+  let minX = Infinity, minY = Infinity, minZ = Infinity
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
+  let surfaceArea = 0
+  let sumX = 0, sumY = 0
+  for (let t = 0; t < triCount; t++) {
+    const off = 84 + t * 50
+    const tv: [number, number, number][] = []
+    for (let v = 0; v < 3; v++) {
+      const vOff = off + 12 + v * 12
+      const x = dv.getFloat32(vOff, true), y = dv.getFloat32(vOff + 4, true), z = dv.getFloat32(vOff + 8, true)
+      tv.push([x, y, z])
+      verts.push({ x, y, z })
+      minX = Math.min(minX, x); minY = Math.min(minY, y); minZ = Math.min(minZ, z)
+      maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); maxZ = Math.max(maxZ, z)
+      sumX += x; sumY += y
+    }
+    const [ax, ay, az] = [tv[1][0] - tv[0][0], tv[1][1] - tv[0][1], tv[1][2] - tv[0][2]]
+    const [bx, by, bz] = [tv[2][0] - tv[0][0], tv[2][1] - tv[0][1], tv[2][2] - tv[0][2]]
+    const cx = ay * bz - az * by, cy = az * bx - ax * bz, cz = ax * by - ay * bx
+    surfaceArea += 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz)
+  }
+
+  if (triCount === 0) return { triCount: 0, surfaceArea: 0, bboxW: 0, bboxD: 0, bboxH: 0, tipRadius: 0, baseRadius: 0, maxRadius: 0 }
+
+  // Centroid XY = axis of the support pillar
+  const n = verts.length
+  const cX = sumX / n, cY = sumY / n
+  const zRange = maxZ - minZ
+  const tipZThreshold = maxZ - zRange * 0.1  // top 10%
+  const baseZThreshold = minZ + zRange * 0.1 // bottom 10%
+
+  // Second pass: measure max radial distance from axis at tip, base, and overall
+  let tipRadius = 0, baseRadius = 0, maxRadius = 0
+  for (const v of verts) {
+    const r = Math.sqrt((v.x - cX) * (v.x - cX) + (v.y - cY) * (v.y - cY))
+    if (r > maxRadius) maxRadius = r
+    if (v.z >= tipZThreshold && r > tipRadius) tipRadius = r
+    if (v.z <= baseZThreshold && r > baseRadius) baseRadius = r
+  }
+
+  return {
+    triCount, surfaceArea,
+    bboxW: maxX - minX, bboxD: maxY - minY, bboxH: maxZ - minZ,
+    tipRadius, baseRadius, maxRadius,
+  }
+}
+
 // ── Manual support data (per-object) ──────────────────────────────────────────
 
 interface SupportPoint {
@@ -56,9 +237,73 @@ interface SupportPoint {
   baseDiameterMm: number
   type: 'light' | 'medium' | 'heavy'
   // Live engine result (from computeSingleSupport)
-  engineStatus?: string        // 'routed' | 'bundled' | 'collision' | 'uncoverable'
+  engineStatus?: string        // 'routed' | 'bundled' | 'collision' | 'uncoverable' | 'error'
   engineMeshBase64?: string    // real mesh STL from engine
   engineMeshOffset?: { x: number; y: number; z: number }
+  // Preview is provisional until full Generate confirms it.
+  // After Generate, finalStatus holds the authoritative result.
+  provisional: boolean
+  finalStatus?: string         // set by Generate reconciliation; matches engineStatus values
+  // Geometry fingerprint — captured from preview, compared against final
+  previewFingerprint?: SupportFingerprint
+  finalFingerprint?: SupportFingerprint
+  geometryDelta?: number       // scalar divergence measure; >0.1 = flagged
+  changeReasons?: string[]     // human-readable reasons for geometry divergence
+  // Independent mesh-based ground truth (for completeness verification)
+  previewEnvelope?: MeshEnvelope    // from actual preview STL triangles
+  finalEnvelope?: MeshEnvelope      // reconstructed from final segment list
+  groundTruthDiff?: number          // mesh-based diff, independent of fingerprint
+}
+
+/**
+ * Ground-truth geometry fingerprint derived from ALL segment/mesh data.
+ * Used as a quantitative divergence backstop — not a hand-picked field list.
+ */
+interface SupportFingerprint {
+  meshFaceCount: number        // triangle count from actual mesh (preview) or 0 (final; merged mesh)
+  totalSegmentCount: number    // ALL segments including pinhead, route, branch
+  routeSegmentCount: number    // route-only segments (shaft, lowerTaper, base, branch)
+  maxRadius: number            // widest radius across ALL segments (fixes G1: includes branch)
+  minShaftRadius: number       // narrowest shaft/lowerTaper/branch radius (fixes G3: detects shrinkage)
+  baseRadius: number           // base pedestal radius
+  hasBranch: boolean           // any segment with part === 'branch'
+  crossBraceCount: number      // number of cross-braces touching this support (fixes G2)
+  baseZ: number                // Z of the lowest waypoint
+  totalVolume: number          // summed frustum volume across all segments (ground-truth scalar)
+  // Bounding box extents — catches lateral repositioning (volume-neutral changes)
+  bboxW: number; bboxD: number; bboxH: number
+}
+
+/** Compute frustum volume for a segment: π/3 * h * (r1² + r1*r2 + r2²) */
+function segmentVolume(s: { r1: number; r2: number; x1: number; y1: number; z1: number; x2: number; y2: number; z2: number }): number {
+  const dx = s.x2 - s.x1, dy = s.y2 - s.y1, dz = s.z2 - s.z1
+  const h = Math.sqrt(dx * dx + dy * dy + dz * dz)
+  return Math.PI / 3 * h * (s.r1 * s.r1 + s.r1 * s.r2 + s.r2 * s.r2)
+}
+
+/**
+ * Compute a scalar geometryDelta between two fingerprints.
+ * Normalizes each field's relative change to [0,1] and takes the max.
+ * >0.1 = geometry meaningfully differs from preview.
+ */
+function computeGeometryDelta(prev: SupportFingerprint, final: SupportFingerprint): number {
+  const rel = (a: number, b: number) => {
+    const denom = Math.max(Math.abs(a), Math.abs(b), 0.01)
+    return Math.abs(a - b) / denom
+  }
+  return Math.max(
+    rel(prev.maxRadius, final.maxRadius),
+    rel(prev.minShaftRadius, final.minShaftRadius),
+    rel(prev.baseRadius, final.baseRadius),
+    rel(prev.baseZ, final.baseZ),
+    rel(prev.totalVolume, final.totalVolume),
+    rel(prev.routeSegmentCount, final.routeSegmentCount),
+    rel(prev.crossBraceCount, final.crossBraceCount),
+    rel(prev.bboxW, final.bboxW),
+    rel(prev.bboxD, final.bboxD),
+    rel(prev.bboxH, final.bboxH),
+    prev.hasBranch !== final.hasBranch ? 1.0 : 0.0,
+  )
 }
 
 /** Single boundary conversion: Three.js Y-up → backend Z-up. X stays, Y↔Z swap. */
@@ -485,10 +730,9 @@ export default function StlImport() {
 
   const addSupportPoint = async (x: number, y: number, z: number, nx: number, ny: number, nz: number, faceIndex?: number, baryU?: number, baryV?: number) => {
     if (!selectedId || !selected) return
-    const presets = { light: { tip: 0.3, shaft: 0.6, base: 1.2 }, medium: { tip: 0.5, shaft: 1.0, base: 2.0 }, heavy: { tip: 0.8, shaft: 1.5, base: 3.0 } }
-    const pr = presets[supportTipType]
+    const pr = SUPPORT_PRESETS[supportTipType] ?? SUPPORT_PRESETS['medium']
     const pointId = mkId()
-    const point: SupportPoint = { id: pointId, x, y, z, nx, ny, nz, faceIndex, baryU, baryV, tipDiameterMm: pr.tip, shaftDiameterMm: pr.shaft, baseDiameterMm: pr.base, type: supportTipType }
+    const point: SupportPoint = { id: pointId, x, y, z, nx, ny, nz, faceIndex, baryU, baryV, tipDiameterMm: pr.pin * 2, shaftDiameterMm: pr.pillar * 2, baseDiameterMm: pr.base * 2, type: supportTipType, provisional: true }
 
     // Add immediately with placeholder (marker sphere shows right away)
     updateModels(prev => prev.map(m =>
@@ -537,13 +781,49 @@ export default function StlImport() {
       fd.append('normalX', String(tnx))
       fd.append('normalY', String(tny))
       fd.append('normalZ', String(tnz))
-      fd.append('pillarRadius', String(pr.shaft))
+      fd.append('pinRadius', String(pr.pin))
+      fd.append('pillarRadius', String(pr.pillar))
       fd.append('baseRadius', String(pr.base))
 
       const result = await supportV2Api.computeSingle(fd)
       console.log('[SingleSupport]', result.status, `${result.computeMs}ms`, result.mesh.faces, 'faces')
 
-      // Update the point with engine result
+      // ── T3 tier-switching log: record what tier was sent and measure the result ──
+      if (result.mesh.stlBase64) {
+        const m = measureSupportMesh(result.mesh.stlBase64)
+        console.log(`[TierSwitch] placed ${supportTipType} support ${pointId}:`,
+          `sent pin=${pr.pin} pillar=${pr.pillar} base=${pr.base}`,
+          `| measured tipR=${m.tipRadius.toFixed(4)} maxR=${m.maxRadius.toFixed(3)} baseR=${m.baseRadius.toFixed(3)}`,
+          `| tri=${m.triCount} area=${m.surfaceArea.toFixed(1)}`)
+      }
+
+      // Capture preview fingerprint from single-support result.
+      // Single-support always produces: a straight pillar (no branches, no cross-braces),
+      // solid geometry (no hollow/lattice). Estimate volume from a simple frustum.
+      const pillarH = Math.abs(z - result.baseZ) // approximate height in Y-up
+      const previewVolume = Math.PI / 3 * pillarH * (pr.pillar * pr.pillar + pr.pillar * pr.base + pr.base * pr.base)
+      // Estimate preview bbox from a vertical pillar with base radius
+      const prevBboxLateral = pr.base * 2 // base is the widest part
+      const previewFingerprint: SupportFingerprint = {
+        meshFaceCount: result.mesh.faces,
+        totalSegmentCount: 5, // tip + neck + upperTaper + shaft/lowerTaper + base
+        routeSegmentCount: 2, // shaft/lowerTaper + base
+        maxRadius: Math.max(pr.pillar, pr.base),
+        minShaftRadius: pr.pillar,
+        baseRadius: pr.base,
+        hasBranch: false,
+        crossBraceCount: 0,
+        baseZ: result.baseZ,
+        totalVolume: previewVolume,
+        bboxW: prevBboxLateral, bboxD: prevBboxLateral, bboxH: pillarH,
+      }
+
+      // Compute independent preview envelope from actual STL mesh (if available)
+      const previewEnvelope = result.mesh.stlBase64
+        ? envelopeFromStlBase64(result.mesh.stlBase64)
+        : undefined
+
+      // Update the point with engine result + preview fingerprint + preview envelope
       updateModels(prev => prev.map(m =>
         m.id === selectedId ? {
           ...m, manualSupports: {
@@ -553,12 +833,26 @@ export default function StlImport() {
               engineStatus: result.status,
               engineMeshBase64: result.mesh.stlBase64 ?? undefined,
               engineMeshOffset: result.meshOffset,
+              previewFingerprint,
+              previewEnvelope,
             } : p),
           }
         } : m
       ))
-    } catch (err) {
+    } catch (err: any) {
       console.error('[SingleSupport] engine call failed:', err)
+      // Mark the point as 'error' so it never stays silently pending
+      updateModels(prev => prev.map(m =>
+        m.id === selectedId ? {
+          ...m, manualSupports: {
+            ...m.manualSupports,
+            points: m.manualSupports.points.map(p => p.id === pointId ? {
+              ...p,
+              engineStatus: 'error',
+            } : p),
+          }
+        } : m
+      ))
     }
   }
 
@@ -574,6 +868,63 @@ export default function StlImport() {
     updateModels(prev => prev.map(m =>
       m.id === selectedId ? { ...m, manualSupports: { ...m.manualSupports, points: m.manualSupports.points.map(p => p.id === pointId ? { ...p, ...updates } : p) } } : m
     ))
+  }
+
+  const retrySupportPoint = async (pointId: string) => {
+    if (!selectedId || !selected) return
+    const point = selected.manualSupports.points.find(p => p.id === pointId)
+    if (!point) return
+    // Reset to pending
+    updateSupportPoint(pointId, { engineStatus: undefined, engineMeshBase64: undefined, engineMeshOffset: undefined })
+
+    try {
+      const meshData = (window as any).__stlViewerMeshMap?.get(selectedId)
+      if (!meshData?.mesh) { updateSupportPoint(pointId, { engineStatus: 'error' }); return }
+      const { STLExporter } = await import('three/examples/jsm/exporters/STLExporter.js')
+      const THREE_mod = await import('three')
+      const backendGeo = meshData.mesh.geometry.clone()
+      const pos = backendGeo.getAttribute('position')
+      for (let i = 0; i < pos.count; i++) {
+        const [bx, by, bz] = yUpToZUp(pos.getX(i), pos.getY(i), pos.getZ(i))
+        pos.setXYZ(i, bx, by, bz)
+      }
+      for (let i = 0; i < pos.count; i += 3) {
+        const x1=pos.getX(i+1),y1=pos.getY(i+1),z1=pos.getZ(i+1)
+        const x2=pos.getX(i+2),y2=pos.getY(i+2),z2=pos.getZ(i+2)
+        pos.setXYZ(i+1, x2, y2, z2)
+        pos.setXYZ(i+2, x1, y1, z1)
+      }
+      pos.needsUpdate = true
+      const tmpMesh = new THREE_mod.Mesh(backendGeo)
+      const tmpScene = new THREE_mod.Scene()
+      tmpScene.add(tmpMesh)
+      const exporter = new STLExporter()
+      const stlBinary = exporter.parse(tmpScene, { binary: true })
+      const stlBlob = new Blob([stlBinary as any], { type: 'application/octet-stream' })
+      tmpScene.remove(tmpMesh)
+      backendGeo.dispose()
+
+      const [tx, ty, tz] = yUpToZUp(point.x, point.y, point.z)
+      const [tnx, tny, tnz] = yUpToZUp(point.nx, point.ny, point.nz)
+      const retryPreset = SUPPORT_PRESETS[point.type] ?? SUPPORT_PRESETS['medium']
+      const fd = new FormData()
+      fd.append('stlFile', stlBlob, selected.fileName)
+      fd.append('tipX', String(tx)); fd.append('tipY', String(ty)); fd.append('tipZ', String(tz))
+      fd.append('normalX', String(tnx)); fd.append('normalY', String(tny)); fd.append('normalZ', String(tnz))
+      fd.append('pinRadius', String(retryPreset.pin))
+      fd.append('pillarRadius', String(retryPreset.pillar))
+      fd.append('baseRadius', String(retryPreset.base))
+
+      const result = await supportV2Api.computeSingle(fd)
+      updateSupportPoint(pointId, {
+        engineStatus: result.status,
+        engineMeshBase64: result.mesh.stlBase64 ?? undefined,
+        engineMeshOffset: result.meshOffset,
+      })
+    } catch (err: any) {
+      console.error('[SingleSupport retry] failed:', err)
+      updateSupportPoint(pointId, { engineStatus: 'error' })
+    }
   }
 
   const addPaintedRegion = (mode: 'enforcer' | 'blocker', cx: number, cy: number, cz: number) => {
@@ -815,17 +1166,8 @@ export default function StlImport() {
       fd.append('skirtLayers', String(autoSupportConfig.skirtLayers))
       fd.append('skirtDistanceMm', String(autoSupportConfig.skirtDistance))
 
-      // Map preset selection to V2 engine parameters
-      const presetMap: Record<string, { pin: number; back: number; pillar: number; base: number }> = {
-        'light':          { pin: 0.1,  back: 0.3,  pillar: 0.3,  base: 1.2 },
-        'medium':         { pin: 0.2,  back: 0.5,  pillar: 0.5,  base: 2.0 },
-        'heavy':          { pin: 0.4,  back: 0.75, pillar: 0.75, base: 3.0 },
-        'point-tip':      { pin: 0.08, back: 0.3,  pillar: 0.35, base: 1.0 },
-        'needle-tip':     { pin: 0.05, back: 0.2,  pillar: 0.3,  base: 1.0 },
-        'mushroom-tip':   { pin: 0.3,  back: 0.5,  pillar: 0.5,  base: 2.0 },
-        'cross-tip':      { pin: 0.3,  back: 0.5,  pillar: 0.5,  base: 2.2 },
-      }
-      const preset = presetMap[autoSupportConfig.supportType] ?? presetMap['medium']
+      // Use unified preset table for V2 engine parameters
+      const preset = SUPPORT_PRESETS[autoSupportConfig.supportType] ?? SUPPORT_PRESETS['medium']
       fd.append('pinRadius', String(preset.pin))
       fd.append('backRadius', String(preset.back))
       fd.append('pillarRadius', String(preset.pillar))
@@ -848,7 +1190,7 @@ export default function StlImport() {
         fd.append('manualContacts', JSON.stringify(manualPts.map(p => {
           const [px, py, pz] = yUpToZUp(p.x, p.y, p.z)
           const [nx, ny, nz] = yUpToZUp(p.nx, p.ny, p.nz)
-          return { x: px, y: py, z: pz, nx, ny, nz,
+          return { id: p.id, x: px, y: py, z: pz, nx, ny, nz,
             tipDiameterMm: p.tipDiameterMm, shaftDiameterMm: p.shaftDiameterMm, baseDiameterMm: p.baseDiameterMm }
         })))
       }
@@ -873,6 +1215,16 @@ export default function StlImport() {
       }
       console.log(`[V2] ${v2Result.validSupports} supports, SF=${v2Result.validation.structural.minSafetyFactor.toFixed(1)}, ${v2Result.elapsedMs}ms`)
 
+      // Log stats to console (routine — not user-actionable)
+      if (v2Result.droppedByCapCount > 0)
+        console.log(`[V2] ${v2Result.droppedByCapCount} overhang points dropped (500-point cap)`)
+      if (v2Result.rejectedCollisions > 0)
+        console.log(`[V2] ${v2Result.rejectedCollisions} auto-support(s) removed due to collision (normal)`)
+      // Only alert for manual support failures — those are user-actionable
+      const manualFailed = (v2Result.uncoverableManualIds ?? []).length
+      if (manualFailed > 0)
+        alert(`${manualFailed} manual support(s) could not be routed to the build plate. Try placing them on downward-facing surfaces with a clear path to the bed.`)
+
       // Decode inline STL mesh from V2 response (no second HTTP request)
       // Get V2 mesh: inline base64 for small meshes, separate fetch for large
       let meshBuffer: ArrayBuffer | null = null
@@ -888,8 +1240,264 @@ export default function StlImport() {
         } catch { /* mesh fetch optional */ }
       }
 
+      // ── Reconcile manual support previews against full pipeline result ──
+      // Ground-truth comparison: build per-support fingerprint from ALL segment
+      // data + cross-braces, compute a scalar geometryDelta, then derive named
+      // reasons. The delta is the completeness backstop — any unmeasured divergence
+      // that exceeds tolerance triggers a catch-all flag.
+      const uncovSet = new Set(v2Result.uncoverableManualIds ?? [])
+      const DELTA_TOLERANCE = 0.10
+
+      // Build lookups
+      const finalSupportMap = new Map<string, typeof v2Result.supports[0]>()
+      for (const s of (v2Result.supports ?? [])) finalSupportMap.set(s.id, s)
+
+      // Count cross-braces per support ID (fixes G2)
+      const crossBraceCounts = new Map<string, number>()
+      for (const b of (v2Result.crossBraces ?? [])) {
+        crossBraceCounts.set(b.supportA, (crossBraceCounts.get(b.supportA) ?? 0) + 1)
+        crossBraceCounts.set(b.supportB, (crossBraceCounts.get(b.supportB) ?? 0) + 1)
+      }
+
+      const totalFinalSupports = v2Result.supports?.length ?? 0
+
+      const reconciledPoints = (selected.manualSupports?.points ?? []).map(p => {
+        const finalStatus = uncovSet.has(p.id) ? 'uncoverable' : 'routed'
+        const changeReasons: string[] = []
+
+        // Status divergence
+        if (p.engineStatus && p.engineStatus !== finalStatus
+            && p.engineStatus !== 'pending' && p.engineStatus !== 'error')
+          changeReasons.push(`status: ${p.engineStatus} → ${finalStatus}`)
+
+        // Build final fingerprint from ALL segment data + cross-braces
+        const finalSupport = finalSupportMap.get(p.id)
+        let finalFingerprint: SupportFingerprint | undefined
+        let delta = 0
+
+        if (finalSupport) {
+          const segs = finalSupport.segments ?? []
+          const routeSegs = segs.filter((s: any) => s.part !== 'tip' && s.part !== 'neck' && s.part !== 'upperTaper')
+          // maxRadius across ALL segments — not just shaft (fixes G1: includes branch)
+          const allRadii = segs.flatMap((s: any) => [s.r1 as number, s.r2 as number])
+          const maxR = allRadii.length > 0 ? Math.max(...allRadii) : 0
+          // minShaftRadius across shaft/lowerTaper/branch — detects shrinkage (fixes G3)
+          const loadSegs = segs.filter((s: any) => s.part === 'shaft' || s.part === 'lowerTaper' || s.part === 'branch')
+          const loadRadii = loadSegs.flatMap((s: any) => [s.r1 as number, s.r2 as number]).filter((r: number) => r > 0.01)
+          const minShaftR = loadRadii.length > 0 ? Math.min(...loadRadii) : 0
+          const baseSeg = segs.find((s: any) => s.part === 'base')
+          const hasBranch = segs.some((s: any) => s.part === 'branch')
+          const braceCount = crossBraceCounts.get(p.id) ?? 0
+          const totalVol = segs.reduce((sum: number, s: any) => sum + segmentVolume(s), 0)
+
+          // Compute bbox from segment endpoints + radii
+          let fMinX = Infinity, fMinY = Infinity, fMinZ = Infinity
+          let fMaxX = -Infinity, fMaxY = -Infinity, fMaxZ = -Infinity
+          for (const s of segs) {
+            fMinX = Math.min(fMinX, s.x1 - s.r1, s.x2 - s.r2); fMaxX = Math.max(fMaxX, s.x1 + s.r1, s.x2 + s.r2)
+            fMinY = Math.min(fMinY, s.y1 - s.r1, s.y2 - s.r2); fMaxY = Math.max(fMaxY, s.y1 + s.r1, s.y2 + s.r2)
+            fMinZ = Math.min(fMinZ, s.z1 - s.r1, s.z2 - s.r2); fMaxZ = Math.max(fMaxZ, s.z1 + s.r1, s.z2 + s.r2)
+          }
+          finalFingerprint = {
+            meshFaceCount: 0,
+            totalSegmentCount: segs.length,
+            routeSegmentCount: routeSegs.length,
+            maxRadius: maxR,
+            minShaftRadius: minShaftR,
+            baseRadius: baseSeg ? Math.max(baseSeg.r1, baseSeg.r2) : 0,
+            hasBranch,
+            crossBraceCount: braceCount,
+            baseZ: finalSupport.baseZ,
+            totalVolume: totalVol,
+            bboxW: segs.length > 0 ? fMaxX - fMinX : 0,
+            bboxD: segs.length > 0 ? fMaxY - fMinY : 0,
+            bboxH: segs.length > 0 ? fMaxZ - fMinZ : 0,
+          }
+
+          // ── Ground-truth geometryDelta ──
+          const prev = p.previewFingerprint
+          if (prev) {
+            delta = computeGeometryDelta(prev, finalFingerprint)
+
+            // ── Named reasons (human-readable labels for known divergence types) ──
+            if (finalFingerprint.hasBranch && !prev.hasBranch)
+              changeReasons.push('merged into trunk')
+            // Bidirectional radius checks (fixes G3) — both maxRadius and minShaftRadius
+            const maxRatio = prev.maxRadius > 0.01 ? finalFingerprint.maxRadius / prev.maxRadius : 1
+            if (maxRatio > 1.15)
+              changeReasons.push(`widened (${prev.maxRadius.toFixed(2)} → ${finalFingerprint.maxRadius.toFixed(2)}mm)`)
+            else if (maxRatio < 0.87)
+              changeReasons.push(`narrowed (${prev.maxRadius.toFixed(2)} → ${finalFingerprint.maxRadius.toFixed(2)}mm)`)
+            // Shaft-specific shrinkage (load-bearing radius decreased)
+            const shaftMinRatio = prev.minShaftRadius > 0.01 ? finalFingerprint.minShaftRadius / prev.minShaftRadius : 1
+            if (shaftMinRatio < 0.87 && maxRatio >= 0.87) // shaft shrank but max didn't flag it
+              changeReasons.push(`shaft narrowed (${prev.minShaftRadius.toFixed(2)} → ${finalFingerprint.minShaftRadius.toFixed(2)}mm)`)
+            else if (shaftMinRatio > 1.15 && maxRatio <= 1.15) // shaft grew but max didn't flag it
+              changeReasons.push(`shaft widened (${prev.minShaftRadius.toFixed(2)} → ${finalFingerprint.minShaftRadius.toFixed(2)}mm)`)
+            const baseRatio = prev.baseRadius > 0.01 ? finalFingerprint.baseRadius / prev.baseRadius : 1
+            if (baseRatio > 1.15)
+              changeReasons.push(`base enlarged (${prev.baseRadius.toFixed(1)} → ${finalFingerprint.baseRadius.toFixed(1)}mm)`)
+            else if (baseRatio < 0.87)
+              changeReasons.push(`base reduced (${prev.baseRadius.toFixed(1)} → ${finalFingerprint.baseRadius.toFixed(1)}mm)`)
+            if (Math.abs(finalFingerprint.baseZ - prev.baseZ) > 0.5)
+              changeReasons.push('rerouted')
+            else if (finalFingerprint.routeSegmentCount > prev.routeSegmentCount + 2)
+              changeReasons.push('rerouted')
+            // Bbox shift: catches lateral repositioning (base nudge, volume-neutral reroute)
+            const bboxWRatio = prev.bboxW > 0.01 ? finalFingerprint.bboxW / prev.bboxW : 1
+            const bboxDRatio = prev.bboxD > 0.01 ? finalFingerprint.bboxD / prev.bboxD : 1
+            if ((Math.abs(bboxWRatio - 1) > 0.15 || Math.abs(bboxDRatio - 1) > 0.15)
+                && !changeReasons.includes('rerouted'))
+              changeReasons.push('repositioned')
+            // Cross-braces added (fixes G2)
+            if (finalFingerprint.crossBraceCount > prev.crossBraceCount)
+              changeReasons.push(`cross-braced (${finalFingerprint.crossBraceCount} brace${finalFingerprint.crossBraceCount > 1 ? 's' : ''})`)
+            // Hollow/lattice (mesh-gen decisions not in segment data)
+            const pillarHeight = Math.abs(finalSupport.contactZ - finalSupport.baseZ)
+            if (autoSupportConfig.hollowSupports && totalFinalSupports < 150
+                && pillarHeight > autoSupportConfig.hollowMinHeight)
+              changeReasons.push('hollowed')
+            if (autoSupportConfig.latticePattern !== 'solid' && totalFinalSupports < 100)
+              changeReasons.push('lattice base')
+
+            // ── Completeness backstop: if delta exceeds tolerance but no named reason
+            // fired, flag with honest catch-all + log the raw diff for future labeling ──
+            if (delta > DELTA_TOLERANCE && changeReasons.length === 0) {
+              changeReasons.push('changed (geometry differs)')
+              console.warn(`[Reconcile] support ${p.id}: geometryDelta=${delta.toFixed(3)} but no named reason.`,
+                'prev:', JSON.stringify(prev), 'final:', JSON.stringify(finalFingerprint))
+            }
+          }
+        } else if (finalStatus === 'routed') {
+          changeReasons.push('geometry unavailable')
+        }
+
+        // ── Independent ground-truth diff (REAL MESH, not segments) ──
+        // Preview side: actual STL triangles from single-support result.
+        // Final side: actual generated mesh from ManualSupportMeshes (includes hollow, lattice, tessellation).
+        // These share NO data source with SupportFingerprint (which reads segment fields).
+        let gtDiff = 0
+        let finalEnvelope: MeshEnvelope | undefined
+        let gtSource: 'real-mesh' | 'segment-fallback' | 'none' = 'none'
+        const finalMeshB64 = (v2Result.manualSupportMeshes ?? {})[p.id]
+
+        if (p.previewEnvelope && finalMeshB64) {
+          // PRIMARY PATH: real generated mesh (independent of fingerprint)
+          gtSource = 'real-mesh'
+          finalEnvelope = envelopeFromStlBase64(finalMeshB64)
+          const gt = computeGroundTruthDiff(p.previewEnvelope, finalEnvelope)
+          gtDiff = gt.diff
+
+          // ── Fault-injection measurement log ──
+          console.log(`[FaultTest] support ${p.id}: source=real-mesh`,
+            `| preview: tri=${p.previewEnvelope.triCount} area=${p.previewEnvelope.surfaceArea.toFixed(1)}`,
+            `| final: tri=${finalEnvelope.triCount} area=${finalEnvelope.surfaceArea.toFixed(1)}`,
+            `| gtDiff=${gtDiff.toFixed(4)} delta=${delta.toFixed(4)}`,
+            `| ${gtDiff > DELTA_TOLERANCE && delta <= DELTA_TOLERANCE ? 'FAULT DETECTED (gt sees, fp blind)' :
+                gtDiff <= DELTA_TOLERANCE && delta <= DELTA_TOLERANCE ? 'MATCH (both agree: same)' :
+                gtDiff > DELTA_TOLERANCE && delta > DELTA_TOLERANCE ? 'BOTH SEE CHANGE' :
+                'fp sees, gt blind (unexpected)'}`)
+
+          // ── T1/T2/T3: Mesh-measured equality test (prompt 2.1) ──
+          // Measures actual radii off STL triangles to prove manual==auto equality.
+          if (p.engineMeshBase64 && finalMeshB64) {
+            const previewMeas = measureSupportMesh(p.engineMeshBase64)
+            const finalMeas = measureSupportMesh(finalMeshB64)
+            const eqTol = 0.05 // 5% relative tolerance for mesh equality
+            const relDiff = (a: number, b: number) => { const d = Math.max(Math.abs(a), Math.abs(b), 0.01); return Math.abs(a - b) / d }
+            const checks = {
+              triCount: { prev: previewMeas.triCount, final: finalMeas.triCount, rel: relDiff(previewMeas.triCount, finalMeas.triCount) },
+              surfaceArea: { prev: +previewMeas.surfaceArea.toFixed(2), final: +finalMeas.surfaceArea.toFixed(2), rel: relDiff(previewMeas.surfaceArea, finalMeas.surfaceArea) },
+              bboxW: { prev: +previewMeas.bboxW.toFixed(3), final: +finalMeas.bboxW.toFixed(3), rel: relDiff(previewMeas.bboxW, finalMeas.bboxW) },
+              bboxH: { prev: +previewMeas.bboxH.toFixed(3), final: +finalMeas.bboxH.toFixed(3), rel: relDiff(previewMeas.bboxH, finalMeas.bboxH) },
+              tipRadius: { prev: +previewMeas.tipRadius.toFixed(4), final: +finalMeas.tipRadius.toFixed(4), rel: relDiff(previewMeas.tipRadius, finalMeas.tipRadius) },
+              baseRadius: { prev: +previewMeas.baseRadius.toFixed(3), final: +finalMeas.baseRadius.toFixed(3), rel: relDiff(previewMeas.baseRadius, finalMeas.baseRadius) },
+              maxRadius: { prev: +previewMeas.maxRadius.toFixed(3), final: +finalMeas.maxRadius.toFixed(3), rel: relDiff(previewMeas.maxRadius, finalMeas.maxRadius) },
+            }
+            const failures = Object.entries(checks).filter(([, v]) => v.rel > eqTol)
+            const status = failures.length === 0 ? 'EQUAL' : `DIVERGED (${failures.map(([k, v]) => `${k}: ${v.prev}→${v.final} (${(v.rel * 100).toFixed(1)}%)`).join(', ')})`
+            console.log(`[MeshEquality] support ${p.id} tier=${p.type}: ${status}`,
+              `\n  triCount: ${previewMeas.triCount} vs ${finalMeas.triCount}`,
+              `| area: ${previewMeas.surfaceArea.toFixed(1)} vs ${finalMeas.surfaceArea.toFixed(1)}`,
+              `| tipR: ${previewMeas.tipRadius.toFixed(4)} vs ${finalMeas.tipRadius.toFixed(4)}`,
+              `| baseR: ${previewMeas.baseRadius.toFixed(3)} vs ${finalMeas.baseRadius.toFixed(3)}`,
+              `| maxR: ${previewMeas.maxRadius.toFixed(3)} vs ${finalMeas.maxRadius.toFixed(3)}`)
+          }
+
+          if (gtDiff > DELTA_TOLERANCE && changeReasons.length === 0 && delta <= DELTA_TOLERANCE) {
+            const diffFields = Object.entries(gt.fields).filter(([, v]) => v.rel > DELTA_TOLERANCE)
+              .map(([k, v]) => `${k}: ${v.a.toFixed(2)}→${v.b.toFixed(2)} (${(v.rel * 100).toFixed(0)}%)`)
+            changeReasons.push('changed (geometry differs)')
+            console.error(`[Reconcile] COMPLETENESS GAP: support ${p.id}: groundTruthDiff=${gtDiff.toFixed(3)} but fingerprint delta=${delta.toFixed(3)}.`,
+              'Mesh fields that differ:', diffFields.join(', '),
+              '| Add these to SupportFingerprint to close the gap.')
+          }
+        } else if (p.previewEnvelope && !finalMeshB64 && finalSupport && finalStatus !== 'uncoverable') {
+          // FALLBACK PATH: no per-support mesh from backend.
+          // This shares the segment list's blindness with the fingerprint (Reading B).
+          // It CANNOT see hollow/lattice/tessellation differences.
+          // The support is VISIBLY marked as reduced-confidence.
+          gtSource = 'segment-fallback'
+          finalEnvelope = envelopeFromSegments(finalSupport.segments ?? [])
+          const gt = computeGroundTruthDiff(p.previewEnvelope, finalEnvelope)
+          gtDiff = gt.diff
+          // Always flag the reduced confidence — never silently use the blind path
+          changeReasons.push('reconciliation: segment-estimate (mesh unavailable, blind to hollow/lattice/tessellation)')
+          console.warn(`[Reconcile] support ${p.id}: FALLBACK to segment-estimate — per-support mesh missing.`,
+            `gtDiff=${gtDiff.toFixed(3)} (REDUCED CONFIDENCE). This support's matrix entry is NOT independently verified.`)
+          if (gtDiff > DELTA_TOLERANCE && changeReasons.length === 1 && delta <= DELTA_TOLERANCE) {
+            changeReasons.push('changed (geometry differs)')
+          }
+        } else if (p.previewEnvelope && !finalMeshB64 && !finalSupport && finalStatus !== 'uncoverable') {
+          gtSource = 'none'
+          gtDiff = 1.0
+          changeReasons.push('geometry unavailable')
+        }
+
+        const uniqueReasons = [...new Set(changeReasons)]
+        if (uniqueReasons.length > 0) {
+          console.warn(`[Reconcile] support ${p.id}: delta=${delta.toFixed(3)} gtDiff=${gtDiff.toFixed(3)} src=${gtSource}, ${uniqueReasons.join(', ')}`)
+        } else if (p.previewFingerprint && finalFingerprint) {
+          console.log(`[Reconcile] support ${p.id}: MATCH delta=${delta.toFixed(4)} gtDiff=${gtDiff.toFixed(4)} src=${gtSource}`)
+        }
+
+        return { ...p, finalStatus, finalFingerprint, geometryDelta: delta, provisional: false,
+          changeReasons: uniqueReasons.length > 0 ? uniqueReasons : undefined,
+          finalEnvelope, groundTruthDiff: gtDiff }
+      })
+      const divergenceCount = reconciledPoints.filter(p => (p.changeReasons?.length ?? 0) > 0).length
+
+      // ── Confusion matrix (logged for empirical completeness verification) ──
+      // Rows: flagged (delta-based + named checks). Columns: actuallyDifferent (mesh-based gtDiff).
+      // SEPARATELY track real-mesh vs segment-fallback supports.
+      let realMeshCount = 0, fallbackCount = 0
+      const matrix = { flaggedAndDiff: 0, flaggedAndSame: 0, unflaggedAndDiff: 0, unflaggedAndSame: 0 }
+      for (const p of reconciledPoints) {
+        const src = (v2Result.manualSupportMeshes ?? {})[p.id] ? 'real-mesh' : 'fallback'
+        if (src === 'real-mesh') realMeshCount++; else fallbackCount++
+        const flagged = (p.changeReasons?.length ?? 0) > 0
+        const actuallyDiff = (p.groundTruthDiff ?? 0) > DELTA_TOLERANCE
+        if (flagged && actuallyDiff) matrix.flaggedAndDiff++
+        else if (flagged && !actuallyDiff) matrix.flaggedAndSame++
+        else if (!flagged && actuallyDiff) matrix.unflaggedAndDiff++
+        else matrix.unflaggedAndSame++
+      }
+      const qualifiedClaim = fallbackCount > 0
+        ? `${realMeshCount} verified by real mesh, ${fallbackCount} by segment-estimate (blind to hollow/lattice/tessellation)`
+        : `all ${realMeshCount} verified by real mesh`
+      console.log('[Reconcile] CONFUSION MATRIX (rows=flagged[fingerprint], cols=actuallyDifferent[mesh]):',
+        `\n  flagged+different=${matrix.flaggedAndDiff}`,
+        `flagged+same=${matrix.flaggedAndSame}`,
+        `\n  UNFLAGGED+different=${matrix.unflaggedAndDiff}`,
+        `unflagged+same=${matrix.unflaggedAndSame}`,
+        `\n  Coverage: ${qualifiedClaim}`,
+        matrix.unflaggedAndDiff > 0 ? '\n  ⚠ COMPLETENESS GAP: unflagged-and-different > 0' : '\n  ✓ No completeness gaps (for real-mesh subset)')
+
       updateModels(prev => prev.map(m => m.id === selectedId ? {
-        ...m, transform: { ...DEFAULT_TRANSFORM }, prep: {
+        ...m,
+        transform: { ...DEFAULT_TRANSFORM },
+        manualSupports: { ...m.manualSupports, points: reconciledPoints },
+        prep: {
           autoSupports: v2Result.supports.map((s: any) => ({
             x: s.contactX, y: s.contactY, contactZ: s.contactZ, baseZ: s.baseZ,
             tipDiameter: s.preset?.tipDiameterMm ?? 0.4, columnDiameter: s.preset?.shaftDiameterMm ?? 0.8, baseDiameter: s.preset?.baseDiameterMm ?? 2.0,
@@ -907,6 +1515,14 @@ export default function StlImport() {
           uncoverableManualIds: v2Result.uncoverableManualIds ?? [],
         }
       } : m))
+
+      // Surface preview→final divergences as a visible warning
+      if (divergenceCount > 0) {
+        const divergedList = reconciledPoints
+          .filter(p => (p.changeReasons?.length ?? 0) > 0)
+          .map(p => `  ${p.id}: ${p.changeReasons!.join(', ')}`)
+        alert(`${divergenceCount} manual support(s) changed after full pipeline:\n${divergedList.join('\n')}\n\nThe V2 mesh now shows the final geometry.`)
+      }
     } catch (err: any) {
       console.error('Auto-support failed:', err)
       alert('Support generation failed: ' + (err?.message || 'Unknown error'))
@@ -1145,8 +1761,10 @@ export default function StlImport() {
                   manualMarkers={selectedSupportData.points.map(p => ({
                     id: p.id, x: p.x, y: p.y, z: p.z, shaftDiameter: p.shaftDiameterMm,
                     uncoverable: (selectedPrep.uncoverableManualIds ?? []).includes(p.id),
-                    engineStatus: p.engineStatus, engineMeshBase64: p.engineMeshBase64,
+                    engineStatus: p.finalStatus ?? p.engineStatus,
+                    engineMeshBase64: p.engineMeshBase64,
                     engineMeshOffset: p.engineMeshOffset,
+                    provisional: p.provisional,
                   }))}
                   orientationCommitted={orientationCommitted}
                   paintedRegions={selectedSupportData.paintedRegions}
@@ -2030,11 +2648,27 @@ export default function StlImport() {
                           <li key={p.id} className="flex items-center justify-between text-[10px] px-1.5 py-0.5 rounded bg-gray-800/50">
                             <span className="text-gray-400 truncate">
                               <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1 ${
+                                p.engineStatus === 'error' ? 'bg-fuchsia-500' :
+                                p.engineStatus === 'collision' ? 'bg-red-400' :
+                                p.engineStatus === 'uncoverable' ? 'bg-red-600' :
+                                p.engineStatus === 'routed' ? 'bg-teal-400' :
+                                p.engineStatus === 'bundled' ? 'bg-green-400' :
                                 p.type === 'light' ? 'bg-green-400' : p.type === 'medium' ? 'bg-yellow-400' : 'bg-red-400'
                               }`} />
                               ({p.x.toFixed(1)}, {p.y.toFixed(1)}, {p.z.toFixed(1)})
+                              {p.provisional && <span className="text-gray-500 ml-1 italic">preview</span>}
+                              {!p.provisional && p.changeReasons && p.changeReasons.length > 0 && (
+                                <span className="text-amber-400 ml-1" title={`delta=${(p.geometryDelta ?? 0).toFixed(3)} | ${p.changeReasons.join(', ')}`}>{p.changeReasons[0]}</span>
+                              )}
+                              {p.engineStatus === 'error' && <span className="text-fuchsia-400 ml-1">failed</span>}
+                              {p.engineStatus === 'collision' && <span className="text-red-400 ml-1">collision</span>}
+                              {(p.finalStatus === 'uncoverable' || p.engineStatus === 'uncoverable') && <span className="text-red-400 ml-1">no path</span>}
                             </span>
                             <div className="flex gap-1">
+                              {p.engineStatus === 'error' && (
+                                <button onClick={() => retrySupportPoint(p.id)}
+                                  className="text-fuchsia-400 hover:text-fuchsia-300 transition text-[9px]">retry</button>
+                              )}
                               <select value={p.type} onChange={e => updateSupportPoint(p.id, { type: e.target.value as any })}
                                 className="bg-gray-800 border-none text-[9px] text-gray-400 px-1 py-0 rounded">
                                 <option value="light">Light</option>
