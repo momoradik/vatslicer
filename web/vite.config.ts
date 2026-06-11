@@ -8,11 +8,11 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:4444',
+        target: 'http://localhost:5555',
         changeOrigin: true,
       },
       '/hubs': {
-        target: 'http://localhost:4444',
+        target: 'http://localhost:5555',
         ws: true,
         changeOrigin: true,
       },
@@ -23,6 +23,8 @@ export default defineConfig({
       'three',
       'three/examples/jsm/exporters/STLExporter.js',
       'three/examples/jsm/loaders/STLLoader.js',
+      'three/examples/jsm/utils/BufferGeometryUtils.js',
+      'three-mesh-bvh',
     ],
   },
   build: {

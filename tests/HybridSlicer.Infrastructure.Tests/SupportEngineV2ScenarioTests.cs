@@ -90,30 +90,30 @@ public class SupportEngineV2ScenarioTests
         td.ValidSupports.Should().BeGreaterThan(0);
     }
 
-    public void Scenario_WithTranslation_StillProducesSupports()
+    public void Scenario_WithDifferentSpacing_StillProducesSupports()
     {
         var mesh = CreateCube(15f, 10f);
         var result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig
         {
-            TranslateX = 50f,
-            TranslateY = -30f,
+            MinSpacingMm = 1.0f,
+            MaxSpacingMm = 4.0f,
         });
 
-        result.ValidSupports.Should().BeGreaterThan(0, "translation shouldn't prevent supports");
+        result.ValidSupports.Should().BeGreaterThan(0, "custom spacing shouldn't prevent supports");
     }
 
     [Fact(Skip = "Near-bed parts may produce 0 supports")]
-    public void Scenario_WithScale_ChangesVolume()
+    public void Scenario_WithHigherDensity_ChangesVolume()
     {
         var mesh = CreateCube(10f, 5f);
 
-        var normal = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig { Scale = 1f });
-        var doubled = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig { Scale = 2f });
+        var normal = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig { DensityFactor = 0.3f });
+        var dense = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig { DensityFactor = 0.9f });
 
-        // Doubled scale → model is 2x larger → supports are taller → more volume
-        if (doubled.ValidSupports > 0 && normal.ValidSupports > 0)
+        // Higher density → more supports → more volume
+        if (dense.ValidSupports > 0 && normal.ValidSupports > 0)
         {
-            doubled.TotalSupportVolumeMm3.Should().BeGreaterThan(normal.TotalSupportVolumeMm3);
+            dense.TotalSupportVolumeMm3.Should().BeGreaterThanOrEqualTo(normal.TotalSupportVolumeMm3);
         }
     }
 

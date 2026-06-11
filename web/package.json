@@ -17,6 +17,7 @@
     "react-dom": "^18.2.0",
     "react-router-dom": "^6.21.1",
     "three": "^0.160.0",
+    "three-mesh-bvh": "^0.9.10",
     "zustand": "^4.4.7"
   },
   "devDependencies": {

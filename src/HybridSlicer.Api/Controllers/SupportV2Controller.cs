@@ -38,6 +38,7 @@ public sealed class SupportV2Controller : ControllerBase
         [FromForm] float baseRadius = 2.0f,
         [FromForm] float wideningFactor = 0.01f,
         [FromForm] bool enableInterconnections = true,
+        [FromForm] float interconnectDistMm = 50f,
         // V2 advanced features
         [FromForm] bool enableTreeSupports = true,
         [FromForm] bool enableHollowSupports = true,
@@ -106,6 +107,7 @@ public sealed class SupportV2Controller : ControllerBase
             BaseRadiusMm = baseRadius,
             WideningFactor = wideningFactor,
             EnableInterconnections = enableInterconnections,
+            InterconnectDistMm = interconnectDistMm,
             EnableTreeSupports = enableTreeSupports,
             EnableHollowSupports = enableHollowSupports,
             HollowMinHeightMm = hollowMinHeightMm,

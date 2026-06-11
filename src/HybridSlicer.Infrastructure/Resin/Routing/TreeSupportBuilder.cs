@@ -67,7 +67,8 @@ public static class TreeSupportBuilder
     /// <returns>Modified route list with merged tree structures.</returns>
     public static List<(string id, PillarRouter.PillarRoute route)> MergeIntoTrees(
         List<(string id, PillarRouter.PillarRoute route)> routes,
-        TreeConfig config)
+        TreeConfig config,
+        Dictionary<string, float>? contactZById = null)
     {
         if (routes.Count < 2) return routes;
 
@@ -81,7 +82,11 @@ public static class TreeSupportBuilder
         {
             var path = routes[i].route.Path;
             basePositions[i] = path[^1].Position;  // last waypoint = base
-            topZ[i] = path[0].Position.Z;          // first waypoint = junction (top)
+            float routeMaxZ = path.Max(wp => wp.Position.Z);
+            // Use the actual contact point Z if available (above junction)
+            if (contactZById != null && contactZById.TryGetValue(routes[i].id, out var cz))
+                routeMaxZ = Math.Max(routeMaxZ, cz);
+            topZ[i] = routeMaxZ;
             baseZ[i] = path[^1].Position.Z;
 
             // Find the representative pillar radius (first pillar-type waypoint)
@@ -104,13 +109,19 @@ public static class TreeSupportBuilder
         float maxDist2 = config.MaxMergeDistMm * config.MaxMergeDistMm;
         float maxBranchAngleRad = config.BranchAngleMaxDeg * MathF.PI / 180f;
 
+        // Minimum pillar height for tree merging — very short supports don't benefit
+        // and they drag down the merge point for the whole group
+        const float MIN_TREE_HEIGHT_MM = 5f;
+
         for (int i = 0; i < routes.Count; i++)
         {
             if (!routes[i].route.ReachesGround) continue; // skip anchored supports
+            if (topZ[i] - baseZ[i] < MIN_TREE_HEIGHT_MM) continue; // skip short supports
 
             for (int j = i + 1; j < routes.Count; j++)
             {
                 if (!routes[j].route.ReachesGround) continue;
+                if (topZ[j] - baseZ[j] < MIN_TREE_HEIGHT_MM) continue;
 
                 // XY distance between bases
                 float dx = basePositions[i].X - basePositions[j].X;
@@ -138,8 +149,14 @@ public static class TreeSupportBuilder
         }
 
         // Step 4: Process each group
+        int multiGroupCount = groups.Values.Count(g => g.Count >= 2);
+        var groupSizes = groups.Values.Where(g => g.Count >= 2).Select(g => g.Count).OrderByDescending(x => x).ToList();
+        Serilog.Log.Information("DIAG-TREE: {Total} groups, {Multi} with 2+ members, sizes=[{Sizes}]",
+            groups.Count, multiGroupCount, string.Join(",", groupSizes.Take(10)));
+
         var result = new List<(string id, PillarRouter.PillarRoute route)>(routes.Count);
         var processed = new HashSet<int>();
+        int _groupNum = 0;
 
         foreach (var (_, groupIndices) in groups)
         {
@@ -154,9 +171,9 @@ public static class TreeSupportBuilder
                 continue;
             }
 
-            // Filter: only merge pillars that reach the ground
+            // Filter: only merge pillars that reach the ground AND are tall enough
             var mergeableIndices = groupIndices
-                .Where(i => routes[i].route.ReachesGround)
+                .Where(i => routes[i].route.ReachesGround && (topZ[i] - baseZ[i]) >= MIN_TREE_HEIGHT_MM)
                 .ToList();
 
             var nonMergeableIndices = groupIndices
@@ -235,10 +252,9 @@ public static class TreeSupportBuilder
                     continue;
                 }
 
-                float branchAngle = MathF.Atan2(branchXYDist, 0.1f); // near-horizontal check
-                // More meaningful: check angle from the pillar's XY at mergeZ to centroid
-                // relative to the vertical trunk below
-                float angleFromVertical = MathF.Atan2(branchXYDist, mergeZ - minBaseZ);
+                // Branch angle: the branch goes from the pillar's top DOWN to the merge point.
+                // angleFromVertical = atan2(XY_distance, branchHeight)
+                float angleFromVertical = MathF.Atan2(branchXYDist, branchHeight);
                 if (angleFromVertical > maxBranchAngleRad && branchXYDist > 1.0f)
                 {
                     // Branch too steep — don't merge this pillar
@@ -249,6 +265,11 @@ public static class TreeSupportBuilder
 
                 validForMerge.Add(idx);
             }
+
+            _groupNum++;
+            int rejected = mergeableIndices.Count - validForMerge.Count;
+            Serilog.Log.Information("DIAG-TREE-GRP{Num}: mergeable={Merg} valid={Valid} rejected={Rej} mergeZ={MZ:F1} centroid=({CX:F1},{CY:F1}) minHeight={MH:F1}",
+                _groupNum, mergeableIndices.Count, validForMerge.Count, rejected, mergeZ, centroidX, centroidY, minHeight);
 
             if (validForMerge.Count < 2)
             {
@@ -392,6 +413,23 @@ public static class TreeSupportBuilder
             if (!processed.Contains(i))
                 result.Add(routes[i]);
         }
+
+        // Measure branching depth: count junction waypoints in merged routes
+        int maxDepth = 0;
+        int mergedRouteCount = 0;
+        foreach (var (_, route) in result)
+        {
+            int junctions = route.Path.Count(wp => wp.Type == "junction");
+            int bridges = route.Path.Count(wp => wp.Type == "bridge");
+            if (bridges > 0)
+            {
+                mergedRouteCount++;
+                int depth = junctions; // each junction = one merge level
+                if (depth > maxDepth) maxDepth = depth;
+            }
+        }
+        Serilog.Log.Information("DIAG-TREE-DEPTH: mergedRoutes={Merged} maxBranchingDepth={Depth} (1=star, 2+=tree)",
+            mergedRouteCount, maxDepth);
 
         return result;
     }

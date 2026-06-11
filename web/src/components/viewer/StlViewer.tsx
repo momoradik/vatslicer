@@ -3,7 +3,15 @@ import * as THREE from 'three'
 ;(window as any).__THREE = THREE // expose for headless raycast tests in commitOrientation
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh'
 import { GizmoManager } from './GizmoManager'
+
+// Wire three-mesh-bvh into Three.js globally — accelerates ALL raycasts from O(n) to O(log n).
+// This is the single highest-impact change for viewport responsiveness on large meshes.
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree
+THREE.Mesh.prototype.raycast = acceleratedRaycast
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -89,6 +97,8 @@ interface Props {
   supportMeshBuffer?: ArrayBuffer | null
   // Backend centering offset — used to reverse XY/Z centering on the return path
   supportMeshOffset?: { x: number; y: number; z: number } | null
+  // ALL models' support meshes — rendered simultaneously (each in its own space)
+  allSupportMeshes?: { modelId: string; buffer: ArrayBuffer; offset: { x: number; y: number; z: number } | null }[]
   // Manual support markers — rendered as real engine geometry when available, proxy sphere otherwise
   manualMarkers?: {
     id: string; x: number; y: number; z: number; shaftDiameter: number; uncoverable: boolean
@@ -134,9 +144,13 @@ function extractTransform(group: THREE.Group, _prev: ModelTransform): ModelTrans
 
 function modelIsOOB(group: THREE.Group, bv: BuildVolume): boolean {
   // Check only the first child mesh (the model), not attached support meshes
-  const modelMesh = group.children[0]
+  const modelMesh = group.children[0] as THREE.Mesh | undefined
   if (!modelMesh) return false
-  const wb = new THREE.Box3().setFromObject(modelMesh, true)
+  // Use precomputed geometry.boundingBox + matrixWorld transform (8 corners)
+  // instead of setFromObject which walks ALL vertices (~5-15ms for 695K tris).
+  const geo = modelMesh.geometry
+  if (!geo.boundingBox) geo.computeBoundingBox()
+  const wb = geo.boundingBox!.clone().applyMatrix4(modelMesh.matrixWorld)
   return (
     wb.min.x < -bv.width / 2 || wb.max.x > bv.width / 2 ||
     wb.min.z < -bv.depth / 2 || wb.max.z > bv.depth / 2 ||
@@ -193,6 +207,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     crossBraces: _crossBraces,
     supportMeshBuffer,
     supportMeshOffset,
+    allSupportMeshes,
     manualMarkers,
     orientationCommitted,
     raftData,
@@ -428,8 +443,8 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
 
     const renderer = new THREE.WebGLRenderer({ antialias: true })
     renderer.setSize(mount.clientWidth, mount.clientHeight)
-    renderer.setPixelRatio(window.devicePixelRatio)
-    renderer.shadowMap.enabled = true
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)) // cap at 2× to prevent 4K overdraw
+    renderer.shadowMap.enabled = false // shadows re-render the scene — disable for performance
     mount.appendChild(renderer.domElement)
     renderer.domElement.dataset.supportEditMode = supportEditMode ?? 'none'
     rendererRef.current = renderer
@@ -526,7 +541,10 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
         return
       }
 
+      const _rcT0 = performance.now()
       const hits = raycaster.intersectObjects(allMeshes, false)
+      const _rcMs = performance.now() - _rcT0
+      if (_rcMs > 5) console.warn(`[Raycast] ${_rcMs.toFixed(1)}ms for ${allMeshes.reduce((s,m) => s + (m.geometry.getAttribute('position')?.count ?? 0)/3, 0)} tris`)
       if (hits.length === 0) {
         // Clicked on empty area — track for potential deselect
         emptyClickPxRef.current = { x: e.clientX, y: e.clientY }
@@ -588,9 +606,11 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
           const data = meshMapRef.current.get(selId)
           if (data) {
             data.group.updateMatrixWorld(true)
-            // Re-seat on bed after rotation
+            // Re-seat on bed after rotation — use precomputed AABB + matrix
             if (result.rotationChanged) {
-              const wb = new THREE.Box3().setFromObject(data.group, true)
+              const geo = data.mesh.geometry
+              if (!geo.boundingBox) geo.computeBoundingBox()
+              const wb = geo.boundingBox!.clone().applyMatrix4(data.mesh.matrixWorld)
               if (wb.min.y < 0) data.group.position.y -= wb.min.y
             }
             data.currentTransform = extractTransform(data.group, data.currentTransform)
@@ -598,7 +618,9 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
             const now = Date.now()
             if (now - lastCbMs >= 40) {
               lastCbMs = now
-              const wb = new THREE.Box3().setFromObject(data.group)
+              const geo = data.mesh.geometry
+              if (!geo.boundingBox) geo.computeBoundingBox()
+              const wb = geo.boundingBox!.clone().applyMatrix4(data.mesh.matrixWorld)
               const ws = wb.getSize(new THREE.Vector3())
               onSizeChangeRef.current?.(selId, { x: ws.x, y: ws.z, z: ws.y })
               onTransformChangeRef.current?.(selId, { ...data.currentTransform })
@@ -772,14 +794,19 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     const animate = () => {
       animIdRef.current = requestAnimationFrame(animate)
       controls.update()
+      // Box helper: transform precomputed AABB instead of recomputing from 2M vertices.
+      // geometry.boundingBox is computed ONCE on load; applyMatrix4 transforms 8 corners (~0ms)
+      // vs setFromObject(group,true) which walks ALL vertices every frame (~15ms for 695K tris).
       if (boxHelperRef.current) {
         const selId = selectedIdRef.current
         if (selId) {
           const d = meshMapRef.current.get(selId)
-          if (d) boxHelperRef.current.box.setFromObject(d.group, true)
+          if (d && d.mesh.geometry.boundingBox) {
+            boxHelperRef.current.box.copy(d.mesh.geometry.boundingBox).applyMatrix4(d.mesh.matrixWorld)
+          }
         }
       }
-      gizmo.update()   // reposition + rescale gizmo every frame
+      gizmo.update()
       renderer.render(scene, camera)
     }
     animate()
@@ -934,19 +961,30 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
               }
             }
             pos.needsUpdate = true
-            geometry.computeVertexNormals()
-            geometry.center()
-            geometry.computeBoundingBox()
-            const bb   = geometry.boundingBox!
+
+            // Index the geometry: STL is fully de-indexed (~2M verts for 695K tris).
+            // mergeVertices recovers shared vertices (~6× reduction → ~350K unique).
+            // CRITICAL: strip normals before merge (differing normals prevent vertex sharing),
+            // then use flatShading which derives face normals in the shader — exact same
+            // faceted STL appearance, ~6× fewer vertices for the GPU to process.
+            geometry.deleteAttribute('normal') // strip normals before merge
+            let indexed = mergeVertices(geometry, 1e-4)
+
+            indexed.center()
+            indexed.computeBoundingBox()
+            const bb   = indexed.boundingBox!
             const size = new THREE.Vector3()
             bb.getSize(size)
-            geometry.translate(0, size.y / 2, 0) // base at Y=0 (Y is now height)
-            geometry.computeBoundingBox()
-            geometry.computeBoundingSphere()
+            indexed.translate(0, size.y / 2, 0) // base at Y=0 (Y is now height)
+            indexed.computeBoundingBox()
+            indexed.computeBoundingSphere()
+
+            ;(indexed as any).computeBoundsTree()
+            geometry.dispose()
 
             const mesh = new THREE.Mesh(
-              geometry,
-              new THREE.MeshPhongMaterial({ color: C_NORMAL, specular: 0x222222, shininess: 40, side: THREE.DoubleSide }),
+              indexed,
+              new THREE.MeshPhongMaterial({ color: C_NORMAL, specular: 0x222222, shininess: 40, side: THREE.DoubleSide, flatShading: true }),
             )
             const group = new THREE.Group()
             group.add(mesh)
@@ -1172,23 +1210,21 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
         positions.setXYZ(i+2, x1, y1, z1)
       }
       positions.needsUpdate = true
-      geometry.computeVertexNormals()
+
+      // Index the support mesh for GPU efficiency
+      geometry.deleteAttribute('normal')
+      const indexedV2 = mergeVertices(geometry, 1e-4)
+      geometry.dispose()
 
       const material = new THREE.MeshPhongMaterial({
-        color: 0x14b8a6,
-        specular: 0x444444,
-        transparent: true,
-        opacity: 0.7,
-        shininess: 50,
-        side: THREE.DoubleSide,
-        depthWrite: false,
+        color: 0x14b8a6, specular: 0x444444, transparent: true, opacity: 0.7,
+        shininess: 50, side: THREE.DoubleSide, depthWrite: false, flatShading: true,
       })
 
-      const mesh = new THREE.Mesh(geometry, material)
-      mesh.renderOrder = 1 // render after model so transparency works correctly
+      const mesh = new THREE.Mesh(indexedV2, material)
+      mesh.renderOrder = 1
 
       // Add to SCENE at identity — NOT to model group.
-      // Both model and supports are in world space at identity.
       sceneRef.current.add(mesh)
       v2MeshRef.current = mesh
 
@@ -1214,6 +1250,86 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       console.error('Failed to load V2 support mesh:', err)
     }
   }, [supportMeshBuffer, supportMeshOffset, sceneReady, selectedId])
+
+  // ── ALL models' support meshes (rendered simultaneously) ────────────────
+  const allV2MeshesRef = useRef<Map<string, THREE.Mesh>>(new Map())
+
+  useEffect(() => {
+    if (!sceneReady || !sceneRef.current) return
+    const scene = sceneRef.current
+    const currentMeshes = allV2MeshesRef.current
+    const incoming = allSupportMeshes ?? []
+    const incomingIds = new Set(incoming.map(s => s.modelId))
+
+    // Remove meshes for models no longer in the list
+    for (const [id, mesh] of currentMeshes) {
+      if (!incomingIds.has(id)) {
+        scene.remove(mesh)
+        mesh.geometry.dispose()
+        ;(mesh.material as THREE.Material).dispose()
+        currentMeshes.delete(id)
+      }
+    }
+
+    // Add/update meshes for each model
+    for (const entry of incoming) {
+      if (!entry.buffer || entry.buffer.byteLength < 84) continue
+      // Skip if already rendered with same buffer (check by byteLength as quick identity)
+      const existing = currentMeshes.get(entry.modelId)
+      if (existing && (existing.userData as any)._bufLen === entry.buffer.byteLength) continue
+
+      // Remove old mesh for this model if exists
+      if (existing) {
+        scene.remove(existing)
+        existing.geometry.dispose()
+        ;(existing.material as THREE.Material).dispose()
+        currentMeshes.delete(entry.modelId)
+      }
+
+      try {
+        const loader = new STLLoader()
+        const geometry = loader.parse(entry.buffer)
+        const positions = geometry.getAttribute('position')
+        // Reverse centering offset
+        if (entry.offset) {
+          for (let i = 0; i < positions.count; i++) {
+            positions.setX(i, positions.getX(i) - entry.offset.x)
+            positions.setY(i, positions.getY(i) - entry.offset.y)
+            positions.setZ(i, positions.getZ(i) - entry.offset.z)
+          }
+        }
+        // Z-up → Y-up
+        for (let i = 0; i < positions.count; i++) {
+          const y = positions.getY(i), z = positions.getZ(i)
+          positions.setY(i, z); positions.setZ(i, y)
+        }
+        // Winding fix
+        for (let i = 0; i < positions.count; i += 3) {
+          const x1=positions.getX(i+1),y1=positions.getY(i+1),z1=positions.getZ(i+1)
+          const x2=positions.getX(i+2),y2=positions.getY(i+2),z2=positions.getZ(i+2)
+          positions.setXYZ(i+1, x2, y2, z2)
+          positions.setXYZ(i+2, x1, y1, z1)
+        }
+        positions.needsUpdate = true
+        // Index the support mesh (same win as model: de-indexed STL → shared vertices)
+        geometry.deleteAttribute('normal')
+        const indexedSupport = mergeVertices(geometry, 1e-4)
+        geometry.dispose()
+
+        const material = new THREE.MeshPhongMaterial({
+          color: 0x14b8a6, specular: 0x444444, transparent: true, opacity: 0.7,
+          shininess: 50, side: THREE.DoubleSide, depthWrite: false, flatShading: true,
+        })
+        const mesh = new THREE.Mesh(indexedSupport, material)
+        mesh.renderOrder = 1
+        ;(mesh.userData as any)._bufLen = entry.buffer.byteLength
+        scene.add(mesh)
+        currentMeshes.set(entry.modelId, mesh)
+      } catch (err) {
+        console.error(`Failed to load V2 support mesh for ${entry.modelId}:`, err)
+      }
+    }
+  }, [allSupportMeshes, sceneReady])
 
   // ── Manual support proxy markers (visual feedback + delete raycast target) ──
 

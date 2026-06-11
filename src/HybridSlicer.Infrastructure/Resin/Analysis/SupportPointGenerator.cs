@@ -67,62 +67,104 @@ public sealed class SupportPointGenerator
             + (config.MaxSpacingMm - config.MinSpacingMm) * (1f - config.DensityFactor);
         float normalZThreshold = -MathF.Cos(config.OverhangAngleDeg * MathF.PI / 180f);
 
-        // ── Step 1: Build half-edge mesh ──────────────────────────────────
-        var heMesh = HalfEdgeMesh.Build(mesh);
-
-        // No centroid computation needed — pure angle test for overhang detection
-
-        // ── Step 3: Identify overhang triangles — pure angle test ─────────
-        // A triangle needs support if and only if its outward normal points
-        // sufficiently downward (beyond the overhang angle threshold).
-        // No centroid convexity filter — that was removing valid overhangs on
-        // curved parts because it confused curvature with interior surfaces.
-        // For watertight meshes with consistent outward normals, a downward
-        // normal IS an exterior overhang by definition.
+        // ── Step 1: Identify overhang triangles ────────────────────────────
+        // For large meshes (>50K tris), skip the expensive HalfEdgeMesh build and
+        // use STL file normals directly. For small meshes, still use HalfEdgeMesh
+        // for topologically correct normals.
         var overhangTris = new List<(Vector3 v0, Vector3 v1, Vector3 v2,
             Vector3 normal, float area, Vector3 centroid)>();
         float totalOverhangArea = 0;
 
-        for (int t = 0; t < heMesh.TriangleCount; t++)
+        if (mesh.TriangleCount > 50_000)
         {
-            var normal = heMesh.GetOutwardNormal(t);
-            if (normal.Z >= normalZThreshold) continue;
+            // Fast path: use STL file normals directly (O(n), no half-edge build)
+            for (int t = 0; t < mesh.TriangleCount; t++)
+            {
+                var normal = mesh.FileNormals[t];
+                // Normalize if needed (STL normals can be zero or non-unit)
+                float len = normal.Length();
+                if (len < 0.001f)
+                {
+                    // Compute from vertices
+                    var va = mesh.Vertices[t * 3];
+                    var vb = mesh.Vertices[t * 3 + 1];
+                    var vc = mesh.Vertices[t * 3 + 2];
+                    normal = Vector3.Cross(vb - va, vc - va);
+                    len = normal.Length();
+                    if (len < 0.001f) continue;
+                }
+                normal /= len;
 
-            var (v0, v1, v2) = heMesh.GetTriangleVertices(t);
-            float area = Vector3.Cross(v1 - v0, v2 - v0).Length() * 0.5f;
-            if (area < 0.01f) continue;
+                if (normal.Z >= normalZThreshold) continue;
 
-            var triCenter = (v0 + v1 + v2) / 3f;
-            totalOverhangArea += area;
-            overhangTris.Add((v0, v1, v2, normal, area, triCenter));
+                var v0 = mesh.Vertices[t * 3];
+                var v1 = mesh.Vertices[t * 3 + 1];
+                var v2 = mesh.Vertices[t * 3 + 2];
+                float area = Vector3.Cross(v1 - v0, v2 - v0).Length() * 0.5f;
+                if (area < 0.01f) continue;
+
+                var triCenter = (v0 + v1 + v2) / 3f;
+                totalOverhangArea += area;
+                overhangTris.Add((v0, v1, v2, normal, area, triCenter));
+            }
+        }
+        else
+        {
+            // Standard path: use HalfEdgeMesh for topologically correct normals
+            var heMesh = HalfEdgeMesh.Build(mesh);
+            for (int t = 0; t < heMesh.TriangleCount; t++)
+            {
+                var normal = heMesh.GetOutwardNormal(t);
+                if (normal.Z >= normalZThreshold) continue;
+
+                var (v0, v1, v2) = heMesh.GetTriangleVertices(t);
+                float area = Vector3.Cross(v1 - v0, v2 - v0).Length() * 0.5f;
+                if (area < 0.01f) continue;
+
+                var triCenter = (v0 + v1 + v2) / 3f;
+                totalOverhangArea += area;
+                overhangTris.Add((v0, v1, v2, normal, area, triCenter));
+            }
         }
 
-        // Sort by Z (lowest first = most critical for printing)
-        overhangTris.Sort((a, b) => a.centroid.Z.CompareTo(b.centroid.Z));
+        // Diagnostic: spatial distribution of detected overhang triangles
+        {
+            float minZ = overhangTris.Count > 0 ? overhangTris.Min(t => t.centroid.Z) : 0;
+            float maxZ = overhangTris.Count > 0 ? overhangTris.Max(t => t.centroid.Z) : 0;
+            float midZ = (minZ + maxZ) / 2;
+            int lowerHalf = overhangTris.Count(t => t.centroid.Z < midZ);
+            int upperHalf = overhangTris.Count - lowerHalf;
+            Serilog.Log.Information("Overhang DETECTION: {Count} tris, {Area:F0}mm², Z=[{MinZ:F1},{MaxZ:F1}], lower={Lower} upper={Upper}",
+                overhangTris.Count, totalOverhangArea, minZ, maxZ, lowerHalf, upperHalf);
+        }
+
+        // DO NOT sort by Z — Z-sort + candidate cap = only bottom half gets sampled.
+        // Instead, shuffle for spatial uniformity so the candidate cap doesn't bias by Z.
+        // Use a deterministic shuffle (Fisher-Yates with fixed seed) for reproducibility.
+        var rng = new Random(42);
+        for (int i = overhangTris.Count - 1; i > 0; i--)
+        {
+            int j = rng.Next(i + 1);
+            (overhangTris[i], overhangTris[j]) = (overhangTris[j], overhangTris[i]);
+        }
 
         Serilog.Log.Information("Overhang: {Count} exterior tris, {Area:F0}mm² total",
             overhangTris.Count, totalOverhangArea);
 
         // ── Step 4: Poisson-disk-like sampling across ALL overhang triangles ─
-        // Instead of sampling each triangle independently (which creates grid artifacts
-        // and misses cross-triangle spacing), we use the global spacing grid as the
-        // single authority. Each candidate is tested against ALL previously placed points.
-        //
-        // Process: weighted random candidates from triangles proportional to their area,
-        // then accept/reject via spacing grid. This gives uniform distribution without
-        // per-triangle boundary artifacts.
-
         var grid = new SpatialGrid<string>(baseSpacing);
         var points = new List<SupportPoint>();
         int idCounter = 0;
         float meshHeight = mesh.Max.Z - mesh.Min.Z;
 
-        // Build weighted candidate list: more candidates from larger triangles
-        // Total candidates = sum of (area / spacing²) per triangle, uncapped
+        // Build weighted candidate list: one centroid per triangle, up to cap.
+        // Cap is scaled by mesh triangle count to handle large meshes without explosion.
+        int maxCandidates = Math.Max(overhangTris.Count, 100_000);
         var candidates = new List<(Vector3 point, Vector3 normal, float area, float steepness, float z)>();
 
         foreach (var tri in overhangTris)
         {
+            if (candidates.Count >= maxCandidates) break;
             float steepness = MathF.Abs(tri.normal.Z);
             float spacing = baseSpacing * (1.5f - steepness * 0.5f);
             spacing = Math.Clamp(spacing, config.MinSpacingMm, config.MaxSpacingMm);

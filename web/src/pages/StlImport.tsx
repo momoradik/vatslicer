@@ -988,13 +988,13 @@ export default function StlImport() {
       displayGeo.computeVertexNormals()
       displayGeo.computeBoundingBox()
       displayGeo.computeBoundingSphere()
-      // three-mesh-bvh (conditional)
-      if (typeof (displayGeo as any).disposeBoundsTree === 'function') (displayGeo as any).disposeBoundsTree()
-      if (typeof (displayGeo as any).computeBoundsTree === 'function') (displayGeo as any).computeBoundsTree()
+      // Build BVH for accelerated raycasting (three-mesh-bvh is a required dependency).
+      // Without this, every raycast is O(n) brute-force over all triangles.
+      ;(displayGeo as any).computeBoundsTree()
 
       // Assign baked geometry to the SAME mesh object the raycaster collects
       const oldGeo = meshData.mesh.geometry
-      if (typeof (oldGeo as any).disposeBoundsTree === 'function') (oldGeo as any).disposeBoundsTree()
+      ;(oldGeo as any).disposeBoundsTree?.()
       meshData.mesh.geometry = displayGeo
       oldGeo.dispose()
 
@@ -1082,12 +1082,48 @@ export default function StlImport() {
   const selectedHollow = selected?.hollow ?? DEFAULT_HOLLOW
   const selectedPrep = selected?.prep ?? EMPTY_PREP
 
+  // Memoize arrays passed to StlViewer to prevent new references every render
+  const memoSupportPoints = useMemo(() => [
+    ...selectedSupportData.points,
+    ...(selectedPrep.advancedSupports.length > 0
+      ? selectedPrep.advancedSupports.map(s => ({
+          id: s.id, x: s.contactX, y: s.contactY, z: s.contactZ,
+          type: (s.preset.name === 'Light' ? 'light' : s.preset.name === 'Heavy' ? 'heavy' : 'medium') as 'light' | 'medium' | 'heavy',
+          segments: s.segments,
+        }))
+      : selectedPrep.autoSupports.map((s, i) => ({
+          id: `auto-${i}`, x: s.x, y: s.y, z: s.contactZ,
+          type: 'medium' as const,
+        }))
+    ),
+  ], [selectedSupportData.points, selectedPrep.advancedSupports, selectedPrep.autoSupports])
+
+  const memoAllSupportMeshes = useMemo(() =>
+    models.filter(m => m.prep.v2MeshBuffer).map(m => ({
+      modelId: m.id,
+      buffer: m.prep.v2MeshBuffer!,
+      offset: m.prep.v2MeshOffset,
+    })),
+  [models])
+
+  const memoManualMarkers = useMemo(() =>
+    selectedSupportData.points.map(p => ({
+      id: p.id, x: p.x, y: p.y, z: p.z, shaftDiameter: p.shaftDiameterMm,
+      uncoverable: (selectedPrep.uncoverableManualIds ?? []).includes(p.id),
+      engineStatus: p.finalStatus ?? p.engineStatus,
+      engineMeshBase64: p.engineMeshBase64,
+      engineMeshOffset: p.engineMeshOffset,
+      provisional: p.provisional,
+    })),
+  [selectedSupportData.points, selectedPrep.uncoverableManualIds])
+
   // ── Auto-support generation ───────────────────────────────────────────────
 
   const [autoSupportConfig, setAutoSupportConfig] = useState({
     overhangAngle: 45, density: 0.5, tipDiameter: 0.4,
     supportType: 'medium' as string,
     crossBracing: true,
+    crossBraceDistMm: 50,
     raftEnabled: false, raftType: 'grid' as string,
     skirtEnabled: false, skirtLayers: 3, skirtDistance: 2.0,
     supportExposurePct: 100,
@@ -1103,16 +1139,17 @@ export default function StlImport() {
     materialPreset: 'standard' as string, // standard | tough | flexible | castable | dental
   })
   const [generating, setGenerating] = useState(false)
+  const [generatingProgress, setGeneratingProgress] = useState('')
 
-  const generateAutoSupports = async () => {
-    if (!selectedId || !selected) return
-    setGenerating(true)
+  /** Generate supports for a SPECIFIC model by ID. Core logic — used by both single and batch. */
+  const generateSupportsForModel = async (modelId: string) => {
+    const targetModel = models.find(m => m.id === modelId)
+    if (!targetModel) throw new Error(`Model ${modelId} not found`)
+    commitOrientation(modelId)
+    const meshData = (window as any).__stlViewerMeshMap?.get(modelId)
+    let stlBlob: Blob
+
     try {
-      // ── Commit orientation (synchronous, idempotent — no-op if already frozen) ──
-      commitOrientation(selectedId)
-      const meshData = (window as any).__stlViewerMeshMap?.get(selectedId)
-      let stlBlob: Blob
-
       if (meshData?.mesh && meshData?.group) {
         const THREE_mod = await import('three')
         const { STLExporter } = await import('three/examples/jsm/exporters/STLExporter.js')
@@ -1145,12 +1182,12 @@ export default function StlImport() {
         backendGeo.dispose()
       } else {
         // Fallback: raw file (no transforms)
-        const resp = await fetch(selected.url)
+        const resp = await fetch(targetModel.url)
         stlBlob = await resp.blob()
       }
 
       const fd = new FormData()
-      fd.append('stlFile', stlBlob, selected.fileName)
+      fd.append('stlFile', stlBlob, targetModel.fileName)
       // NO rotation/scale params — the bake handles everything
       fd.append('orientation', activePrinter?.orientation ?? 'BottomUp')
       if (selectedPrinterId) fd.append('printerId', selectedPrinterId)
@@ -1159,7 +1196,8 @@ export default function StlImport() {
       fd.append('tipDiameterMm', String(autoSupportConfig.tipDiameter))
       fd.append('supportType', autoSupportConfig.supportType)
       fd.append('placement', jobSupportPlacement)
-      fd.append('crossBracingEnabled', String(autoSupportConfig.crossBracing))
+      fd.append('enableInterconnections', String(autoSupportConfig.crossBracing))
+      fd.append('interconnectDistMm', String(autoSupportConfig.crossBraceDistMm))
       fd.append('raftEnabled', String(autoSupportConfig.raftEnabled))
       fd.append('raftType', autoSupportConfig.raftType)
       fd.append('skirtEnabled', String(autoSupportConfig.skirtEnabled))
@@ -1185,7 +1223,7 @@ export default function StlImport() {
       fd.append('materialPreset', autoSupportConfig.materialPreset)
 
       // Send manual support contacts — same yUpToZUp conversion as the mesh
-      const manualPts = selected.manualSupports?.points ?? []
+      const manualPts = targetModel.manualSupports?.points ?? []
       if (manualPts.length > 0) {
         fd.append('manualContacts', JSON.stringify(manualPts.map(p => {
           const [px, py, pz] = yUpToZUp(p.x, p.y, p.z)
@@ -1261,7 +1299,7 @@ export default function StlImport() {
 
       const totalFinalSupports = v2Result.supports?.length ?? 0
 
-      const reconciledPoints = (selected.manualSupports?.points ?? []).map(p => {
+      const reconciledPoints = (targetModel.manualSupports?.points ?? []).map(p => {
         const finalStatus = uncovSet.has(p.id) ? 'uncoverable' : 'routed'
         const changeReasons: string[] = []
 
@@ -1493,7 +1531,7 @@ export default function StlImport() {
         `\n  Coverage: ${qualifiedClaim}`,
         matrix.unflaggedAndDiff > 0 ? '\n  ⚠ COMPLETENESS GAP: unflagged-and-different > 0' : '\n  ✓ No completeness gaps (for real-mesh subset)')
 
-      updateModels(prev => prev.map(m => m.id === selectedId ? {
+      updateModels(prev => prev.map(m => m.id === modelId ? {
         ...m,
         transform: { ...DEFAULT_TRANSFORM },
         manualSupports: { ...m.manualSupports, points: reconciledPoints },
@@ -1504,8 +1542,28 @@ export default function StlImport() {
           })),
           advancedSupports: v2Result.supports,
           crossBraces: v2Result.crossBraces,
-          raft: null,
-          skirt: null,
+          raft: autoSupportConfig.raftEnabled && v2Result.supports.length > 0 ? (() => {
+            const xs = v2Result.supports.map((s: any) => s.baseX)
+            const ys = v2Result.supports.map((s: any) => s.baseY)
+            const margin = autoSupportConfig.raftMargin ?? 1.5
+            return {
+              type: autoSupportConfig.raftType ?? 'grid',
+              minX: Math.min(...xs) - margin, minY: Math.min(...ys) - margin,
+              maxX: Math.max(...xs) + margin, maxY: Math.max(...ys) + margin,
+              thicknessMm: autoSupportConfig.raftThickness ?? 0.3,
+            }
+          })() : null,
+          skirt: autoSupportConfig.skirtEnabled && v2Result.supports.length > 0 ? (() => {
+            const xs = v2Result.supports.map((s: any) => s.baseX)
+            const ys = v2Result.supports.map((s: any) => s.baseY)
+            const dist = autoSupportConfig.skirtDistance ?? 2.0
+            return {
+              minX: Math.min(...xs) - dist, minY: Math.min(...ys) - dist,
+              maxX: Math.max(...xs) + dist, maxY: Math.max(...ys) + dist,
+              layers: autoSupportConfig.skirtLayers ?? 3,
+              distanceMm: dist, widthMm: 0.4,
+            }
+          })() : null,
           locked: true,
           stale: false,
           generatedAt: Date.now(),
@@ -1524,10 +1582,48 @@ export default function StlImport() {
         alert(`${divergenceCount} manual support(s) changed after full pipeline:\n${divergedList.join('\n')}\n\nThe V2 mesh now shows the final geometry.`)
       }
     } catch (err: any) {
-      console.error('Auto-support failed:', err)
+      console.error(`Auto-support failed for ${modelId}:`, err)
+      throw err // re-throw so callers (batch or single) can handle
+    }
+  }
+
+  /** Generate supports for the currently selected model. */
+  const generateAutoSupports = async () => {
+    if (!selectedId || !selected) return
+    setGenerating(true)
+    setGeneratingProgress('')
+    try {
+      await generateSupportsForModel(selectedId)
+    } catch (err: any) {
       alert('Support generation failed: ' + (err?.message || 'Unknown error'))
     } finally {
       setGenerating(false)
+      setGeneratingProgress('')
+    }
+  }
+
+  /** Generate supports for ALL loaded models sequentially. */
+  const generateAllSupports = async () => {
+    if (models.length === 0) return
+    setGenerating(true)
+    const results: { id: string; name: string; ok: boolean; error?: string }[] = []
+    for (let i = 0; i < models.length; i++) {
+      const m = models[i]
+      setGeneratingProgress(`Generating ${i + 1} of ${models.length}: ${m.fileName}...`)
+      try {
+        commitOrientation(m.id)
+        await generateSupportsForModel(m.id)
+        results.push({ id: m.id, name: m.fileName, ok: true })
+      } catch (err: any) {
+        results.push({ id: m.id, name: m.fileName, ok: false, error: err?.message || 'Unknown error' })
+      }
+    }
+    setGenerating(false)
+    setGeneratingProgress('')
+    const succeeded = results.filter(r => r.ok).length
+    const failed = results.filter(r => !r.ok)
+    if (failed.length > 0) {
+      alert(`Support generation: ${succeeded} succeeded, ${failed.length} failed:\n${failed.map(f => `  ${f.name}: ${f.error}`).join('\n')}`)
     }
   }
 
@@ -1734,38 +1830,27 @@ export default function StlImport() {
                   onModelSelect={(id: string | null) => { setSelectedId(id); _savedSelectedId = id }}
                   onTransformChange={handleTransformChange}
                   onSizeChange={(id, size) => {
-                    updateModels(prev => prev.map(m => m.id === id ? { ...m, size } : m))
+                    updateModels(prev => {
+                      const m = prev.find(x => x.id === id)
+                      if (m?.size && m.size.x === size.x && m.size.y === size.y && m.size.z === size.z) return prev
+                      return prev.map(x => x.id === id ? { ...x, size } : x)
+                    })
                   }}
                   onBoundsChange={(id, out) => {
-                    updateModels(prev => prev.map(m => m.id === id ? { ...m, isOutOfBounds: out } : m))
+                    updateModels(prev => {
+                      const m = prev.find(x => x.id === id)
+                      if (!m || m.isOutOfBounds === out) return prev // no change → same reference → no re-render
+                      return prev.map(x => x.id === id ? { ...x, isOutOfBounds: out } : x)
+                    })
                   }}
                   buildVolume={buildVolume}
                   supportEditMode={supportEditMode}
-                  supportPoints={[
-                    ...selectedSupportData.points,
-                    ...(selectedPrep.advancedSupports.length > 0
-                      ? selectedPrep.advancedSupports.map(s => ({
-                          id: s.id, x: s.contactX, y: s.contactY, z: s.contactZ,
-                          type: (s.preset.name === 'Light' ? 'light' : s.preset.name === 'Heavy' ? 'heavy' : 'medium') as 'light' | 'medium' | 'heavy',
-                          segments: s.segments,
-                        }))
-                      : selectedPrep.autoSupports.map((s, i) => ({
-                          id: `auto-${i}`, x: s.x, y: s.y, z: s.contactZ,
-                          type: 'medium' as const,
-                        }))
-                    ),
-                  ]}
+                  supportPoints={memoSupportPoints}
                   crossBraces={selectedPrep.crossBraces}
                   supportMeshBuffer={selectedPrep.v2MeshBuffer}
                   supportMeshOffset={selectedPrep.v2MeshOffset}
-                  manualMarkers={selectedSupportData.points.map(p => ({
-                    id: p.id, x: p.x, y: p.y, z: p.z, shaftDiameter: p.shaftDiameterMm,
-                    uncoverable: (selectedPrep.uncoverableManualIds ?? []).includes(p.id),
-                    engineStatus: p.finalStatus ?? p.engineStatus,
-                    engineMeshBase64: p.engineMeshBase64,
-                    engineMeshOffset: p.engineMeshOffset,
-                    provisional: p.provisional,
-                  }))}
+                  allSupportMeshes={memoAllSupportMeshes}
+                  manualMarkers={memoManualMarkers}
                   orientationCommitted={orientationCommitted}
                   paintedRegions={selectedSupportData.paintedRegions}
                   supportTipType={supportTipType}
@@ -2019,6 +2104,24 @@ export default function StlImport() {
                           <span className="text-gray-600 text-[8px] ml-auto">merge nearby pillars</span>
                         </label>
                         <label className="flex items-center gap-2 text-[10px] cursor-pointer">
+                          <input type="checkbox" checked={autoSupportConfig.crossBracing}
+                            onChange={e => setAutoSupportConfig(p => ({ ...p, crossBracing: e.target.checked }))}
+                            className="rounded border-gray-600 bg-gray-800 w-3 h-3 text-teal-500" />
+                          <span className="text-gray-400">Cross-Braces</span>
+                          <span className="text-gray-600 text-[8px] ml-auto">connect pillars</span>
+                        </label>
+                        {autoSupportConfig.crossBracing && (
+                          <label className="flex items-center justify-between text-[10px] pl-5">
+                            <span className="text-gray-500">Max Distance</span>
+                            <div className="flex items-center gap-1">
+                              <input type="range" min={10} max={100} step={5} value={autoSupportConfig.crossBraceDistMm}
+                                onChange={e => setAutoSupportConfig(p => ({ ...p, crossBraceDistMm: +e.target.value }))}
+                                className="w-14 h-1 accent-teal-500" />
+                              <span className="text-gray-400 w-10 text-right text-[9px]">{autoSupportConfig.crossBraceDistMm}mm</span>
+                            </div>
+                          </label>
+                        )}
+                        <label className="flex items-center gap-2 text-[10px] cursor-pointer">
                           <input type="checkbox" checked={autoSupportConfig.hollowSupports}
                             onChange={e => setAutoSupportConfig(p => ({ ...p, hollowSupports: e.target.checked }))}
                             className="rounded border-gray-600 bg-gray-800 w-3 h-3 text-teal-500" />
@@ -2149,8 +2252,16 @@ export default function StlImport() {
                       className={`w-full mt-2 text-xs py-2 rounded-lg font-medium transition ${
                         generating ? 'bg-green-800 text-green-200 animate-pulse' : 'bg-green-600 hover:bg-green-500 text-white'
                       }`}>
-                      {generating ? 'Generating (V2 Engine)...' : selectedPrep.generatedAt ? 'Regenerate (V2)' : 'Generate Supports (V2)'}
+                      {generating && generatingProgress ? generatingProgress : generating ? 'Generating...' : selectedPrep.generatedAt ? 'Regenerate Selected' : 'Generate Supports'}
                     </button>
+                    {models.length > 1 && (
+                      <button onClick={generateAllSupports} disabled={generating}
+                        className={`w-full mt-1 text-xs py-1.5 rounded-lg font-medium transition ${
+                          generating ? 'bg-teal-900 text-teal-300 animate-pulse' : 'bg-teal-700 hover:bg-teal-600 text-white'
+                        }`}>
+                        {generating && generatingProgress ? generatingProgress : 'Generate All Parts'}
+                      </button>
+                    )}
                     <p className="text-[8px] text-gray-600 mt-0.5 text-center">BVH-accelerated | Tree supports | Structural validation | Watertight mesh</p>
 
                     {/* Generated status */}

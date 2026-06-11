@@ -72,15 +72,15 @@ public class SupportEngineV2ConfigTests
         }
     }
 
-    public void WithScale_ChangesSupports()
+    public void WithDensity_ChangesSupports()
     {
         var mesh = CreateFloatingCube();
         var normal = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig());
-        var scaled = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig { Scale = 2.0f });
+        var dense = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig { DensityFactor = 1.0f });
 
-        // Scaled model should generally produce different support count
-        (normal.ValidSupports != scaled.ValidSupports || normal.TotalSupportVolumeMm3 != scaled.TotalSupportVolumeMm3)
-            .Should().BeTrue("scaling should change support generation");
+        // Higher density should generally produce different support count
+        (normal.ValidSupports != dense.ValidSupports || normal.TotalSupportVolumeMm3 != dense.TotalSupportVolumeMm3)
+            .Should().BeTrue("density change should affect support generation");
     }
 
     [Fact]

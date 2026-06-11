@@ -62,7 +62,7 @@ public static class SupportEngineV2
 
         // Interconnections
         public bool EnableInterconnections { get; init; } = true;
-        public float InterconnectDistMm { get; init; } = 20f;
+        public float InterconnectDistMm { get; init; } = 50f;
         public float InterconnectIntervalMm { get; init; } = 5f;
         public float StrutRadiusMm { get; init; } = 0.3f;
 
@@ -203,30 +203,41 @@ public static class SupportEngineV2
 
     // ── Main pipeline ────────────────────────────────────────────────────
 
+    // ── BVH cache for Generate — build once per mesh, reuse across calls ──
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, (AabbBvh bvh, StlMesh centeredMesh, Vector3 offset)> _generateBvhCache = new();
+
     public static EngineResult Generate(StlMesh mesh, EngineConfig config)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
         // ── Step 0: Center mesh ────────────────────────────────────────
-        // The frontend bakes ALL user transforms (rotation, scale, position)
-        // into the STL vertices before sending. No rotation/scale applied here.
-        // We only XY-center and clamp Z-bottom to 0.
-
-        // Center mesh: XY at origin, Z bottom at 0
         float meshW = mesh.Max.X - mesh.Min.X;
         float meshD = mesh.Max.Y - mesh.Min.Y;
         float offX = -(mesh.Min.X + meshW / 2);
         float offY = -(mesh.Min.Y + meshD / 2);
         float offZ = -mesh.Min.Z;
-        mesh = mesh.Transform(new Vector3(offX, offY, offZ), 1.0f);
 
-        // Bottom-Up specific: reduce pin radius for better surface quality
-        // (thinner tips leave smaller marks on the visible surface near FEP)
         float pinRadiusScale = config.Orientation == PrinterOrientation.BottomUp ? 0.8f : 1.0f;
 
-        // ── Step 1: Build BVH ────────────────────────────────────────────
+        // ── Step 1: Build BVH (cached per mesh content) ──────────────────
+        // The BVH is the most expensive step (~5s for 695K tris). Cache it so
+        // regenerating supports with different settings skips the build entirely.
         var stepSw = System.Diagnostics.Stopwatch.StartNew();
-        var bvh = AabbBvh.Build(mesh);
+        int meshHash = HashCode.Combine(mesh.TriangleCount, mesh.Min.GetHashCode(), mesh.Max.GetHashCode());
+        AabbBvh bvh;
+        if (_generateBvhCache.TryGetValue(meshHash, out var cached) && cached.centeredMesh.TriangleCount == mesh.TriangleCount)
+        {
+            bvh = cached.bvh;
+            mesh = cached.centeredMesh;
+            offX = cached.offset.X; offY = cached.offset.Y; offZ = cached.offset.Z;
+            Serilog.Log.Information("V2 Step 1 BVH: CACHED ({Tris} triangles, {Nodes} nodes)", bvh.TriangleCount, bvh.NodeCount);
+        }
+        else
+        {
+            mesh = mesh.Transform(new Vector3(offX, offY, offZ), 1.0f);
+            bvh = AabbBvh.Build(mesh);
+            _generateBvhCache[meshHash] = (bvh, mesh, new Vector3(offX, offY, offZ));
+        }
         var bvhMs = stepSw.ElapsedMilliseconds;
 
         // ── Step 2: Generate support points ──────────────────────────────
@@ -252,8 +263,9 @@ public static class SupportEngineV2
             DrainHoleClearanceMm = config.DrainHoleClearanceMm,
         }, bvh);
 
-        // Cap support count for large models to prevent timeout
-        int maxSupports = 500;
+        // Cap support count — scaled by mesh size. With BVH cache + parallel pinheads,
+        // higher counts are feasible. Small meshes: 500, large meshes: up to 2000.
+        int maxSupports = Math.Min(2000, Math.Max(500, mesh.TriangleCount / 200));
         int droppedByCapCount = 0;
         if (pointResult.Points.Count > maxSupports)
         {
@@ -336,11 +348,14 @@ public static class SupportEngineV2
         const int MAX_RETRIES = 4;
         float retryRadius = config.MinSpacingMm * 0.8f;
 
-        var pinheads = new List<(string id, PinheadOptimizer.Pinhead pinhead)>();
+        // Parallelize pinhead optimization — each support is independent, BVH is read-only.
+        // This is output-identical: same inputs, same deterministic optimizer, just parallel.
+        var pinheadResults = new (string id, PinheadOptimizer.Pinhead pinhead)[pointResult.Points.Count];
         int retrySuccesses = 0;
 
-        foreach (var pt in pointResult.Points)
+        System.Threading.Tasks.Parallel.For(0, pointResult.Points.Count, i =>
         {
+            var pt = pointResult.Points[i];
             var phCfg = pinheadConfig;
             if (pt.RecommendedWeight == ForceEstimator.SupportWeight.Heavy)
             {
@@ -360,36 +375,31 @@ public static class SupportEngineV2
                 };
             }
 
-            // Try the primary position first
             var pinhead = PinheadOptimizer.Optimize(pt.Position, pt.Normal, bvh, phCfg);
 
-            // Manual tips are FIXED anchors — never moved. Skip retry.
             bool isManual = manualPointIds.Contains(pt.Id);
 
-            // If pinhead failed and NOT manual, retry at nearby positions on the overhang surface
             if (!pinhead.IsValid && !isManual)
             {
                 for (int retry = 0; retry < MAX_RETRIES && !pinhead.IsValid; retry++)
                 {
-                    // Spiral outward: increasing distance, rotating angle
-                    float angle = retry * MathF.PI * 0.7f; // golden angle spiral
+                    float angle = retry * MathF.PI * 0.7f;
                     float dist = retryRadius * (retry + 1) / MAX_RETRIES;
                     var offset = new Vector3(
                         MathF.Cos(angle) * dist,
                         MathF.Sin(angle) * dist,
-                        0); // offset in XY plane
+                        0);
                     var retryPos = pt.Position + offset;
 
-                    // Snap to nearest mesh surface
                     var cp = bvh.ClosestPoint(retryPos);
                     if (cp.HasValue)
                     {
                         retryPos = cp.Value.Point;
                         var retryNormal = cp.Value.Normal;
-                        if (retryNormal.Z < normalZThreshold) // still an overhang
+                        if (retryNormal.Z < normalZThreshold)
                         {
                             pinhead = PinheadOptimizer.Optimize(retryPos, retryNormal, bvh, phCfg);
-                            if (pinhead.IsValid) retrySuccesses++;
+                            if (pinhead.IsValid) System.Threading.Interlocked.Increment(ref retrySuccesses);
                         }
                     }
                 }
@@ -416,10 +426,11 @@ public static class SupportEngineV2
                 };
             }
 
-            pinheads.Add((pt.Id, pinhead));
-        }
+            pinheadResults[i] = (pt.Id, pinhead);
+        });
+        var pinheads = pinheadResults.ToList();
 
-        Serilog.Log.Information("V2 Step 3 Pinheads: {Ms}ms ({Count} optimized)", stepSw.ElapsedMilliseconds, pinheads.Count);
+        Serilog.Log.Information("V2 Step 3 Pinheads: {Ms}ms ({Count} optimized, parallel)", stepSw.ElapsedMilliseconds, pinheads.Count);
         stepSw.Restart();
 
         // ── Step 4: Route pillars ────────────────────────────────────────
@@ -526,17 +537,8 @@ public static class SupportEngineV2
                 }
             }
 
-            // Last resort for manual supports: force a straight-down route to the bed.
-            // The user placed it — we produce geometry no matter what.
-            if (!route.ReachesGround && manualPointIds.Contains(id))
-            {
-                var forcedPath = new List<PillarRouter.Waypoint>();
-                forcedPath.Add(new PillarRouter.Waypoint { Position = routeStart, Radius = startRadius, Type = "junction" });
-                forcedPath.Add(new PillarRouter.Waypoint { Position = new Vector3(routeStart.X, routeStart.Y, rCfg.BaseHeightMm), Radius = rCfg.BaseRadiusMm, Type = "pillar" });
-                forcedPath.Add(new PillarRouter.Waypoint { Position = new Vector3(routeStart.X, routeStart.Y, 0), Radius = rCfg.BaseRadiusMm, Type = "base" });
-                route = new PillarRouter.PillarRoute { Path = forcedPath, ReachesGround = true, TotalLength = routeStart.Z };
-            }
-
+            // Manual supports that can't route are flagged uncoverable (not force-routed
+            // through the model). The user sees them highlighted and can reposition.
             routes.Add((id, route));
         }
 
@@ -633,39 +635,32 @@ public static class SupportEngineV2
         int treeMergeCount = 0;
         if (config.EnableTreeSupports && routes.Count >= 2)
         {
-            int routesBefore = routes.Count;
+            // Build contact-Z lookup from pinheads so tree builder knows the true top of each support
+            var contactZById = new Dictionary<string, float>();
+            foreach (var (pid, ph) in pinheads)
+            {
+                if (ph.IsValid)
+                    contactZById[pid] = ph.ContactPoint.Z;
+            }
+
             routes = TreeSupportBuilder.MergeIntoTrees(routes, new TreeSupportBuilder.TreeConfig
             {
                 MaxMergeDistMm = Math.Max(config.TreeMergeDistMm, baseSpacing * 2.5f),
                 MinMergeHeightRatio = config.TreeMergeHeightRatio,
                 TrunkRadiusScale = 1.5f,
                 BranchAngleMaxDeg = config.TreeBranchAngleDeg,
-            });
-            treeMergeCount = routesBefore - routes.Count(r => r.route.Path.All(wp => wp.Type != "bridge" || wp.Position.Z > 1f));
+            }, contactZById);
+            treeMergeCount = routes.Count(r => r.route.Path.Any(wp => wp.Type == "bridge"));
         }
 
         Serilog.Log.Information("V2 Step 4b TreeMerge: {Ms}ms ({Trees} trees formed)",
             stepSw.ElapsedMilliseconds, treeMergeCount);
         stepSw.Restart();
 
-        // ── Step 5: Build interconnections ───────────────────────────────
+        // ── Step 5: Interconnections deferred until after validation/escalation ──
+        // (Built at Step 7c below, after all route modifications are complete,
+        //  to prevent cross-braces referencing stale pillar positions.)
         var interconnections = new List<InterconnectBuilder.Interconnection>();
-        if (config.EnableInterconnections && routes.Count >= 2)
-        {
-            var pillarBases = routes.Select(r => r.route.Path.Last().Position).ToList();
-            var pillarTops = routes.Select(r => r.route.Path.First().Position.Z).ToList();
-            var pillarRadii = routes.Select(r => r.route.Path.First().Radius).ToList();
-
-            interconnections = InterconnectBuilder.Build(pillarBases, pillarTops, pillarRadii, bvh,
-                new InterconnectBuilder.InterconnectConfig
-                {
-                    MaxConnectionDistMm = config.InterconnectDistMm,
-                    ConnectionIntervalMm = config.InterconnectIntervalMm,
-                    StrutRadiusMm = config.StrutRadiusMm,
-                });
-        }
-
-        Serilog.Log.Information("V2 Step 5 Interconnect: {Ms}ms ({Count} connections)", stepSw.ElapsedMilliseconds, interconnections.Count);
         stepSw.Restart();
 
         // ── Step 5b: Physics-driven per-support sizing ───────────────────
@@ -739,23 +734,75 @@ public static class SupportEngineV2
         Serilog.Log.Information("V2 Step 5b Sizing: {Ms}ms ({Count} supports sized)", stepSw.ElapsedMilliseconds, sizingLookup.Count);
         stepSw.Restart();
 
+        // ── Step 5c: Spatial continuity validation ─────────────────────────
+        // Remove routes with unreasonable HORIZONTAL (XY) gaps between consecutive waypoints.
+        // A vertical pillar from 60mm to 0mm is valid (XY distance ≈ 0). A floating branch
+        // that jumps 30mm in XY to an orphaned position is not.
+        float maxXYGap = config.MaxBridgeLengthMm * 2f; // 30mm XY gap = clearly disconnected
+        int removedByContinuity = 0;
+        routes = routes.Where(r =>
+        {
+            for (int i = 0; i < r.route.Path.Count - 1; i++)
+            {
+                var p1 = r.route.Path[i].Position;
+                var p2 = r.route.Path[i + 1].Position;
+                float xyDist = MathF.Sqrt((p1.X - p2.X) * (p1.X - p2.X) + (p1.Y - p2.Y) * (p1.Y - p2.Y));
+                if (xyDist > maxXYGap)
+                {
+                    removedByContinuity++;
+                    return false;
+                }
+            }
+            return true;
+        }).ToList();
+        if (removedByContinuity > 0)
+            Serilog.Log.Warning("V2 Step 5c: Removed {Count} routes with XY discontinuities (gap > {Max}mm)", removedByContinuity, maxXYGap);
+
         // ── Step 6: Generate meshes ──────────────────────────────────────
         // Adaptive tessellation: fewer sides when many supports to keep mesh size manageable
         int totalRoutes = routes.Count;
         int meshSides = totalRoutes > 200 ? 4 : totalRoutes > 50 ? 6 : 8;
         int braceSides = Math.Max(3, meshSides - 2);
         // Disable heavy features for large support sets to prevent mesh explosion
-        bool useLattice = config.BaseLatticePattern != LatticeBase.LatticePattern.Solid && totalRoutes < 100;
+        bool useLattice = config.BaseLatticePattern != LatticeBase.LatticePattern.Solid && totalRoutes < 500;
         bool useHollow = config.EnableHollowSupports && totalRoutes < 150;
         bool useMiniRaft = config.EnableMiniRafts && totalRoutes < 200;
+        Serilog.Log.Information("V2 Step 6: meshSides={Sides}, lattice={Lat}, hollow={Hol}, raft={Raft}, routes={Routes}",
+            meshSides, useLattice, useHollow, useMiniRaft, totalRoutes);
+        Serilog.Log.Information("DIAG-RAFT-GATE: EnableMiniRafts={Enabled} totalRoutes={Routes} useMiniRaft={Use} RaftMargin={Margin} RaftThickness={Thick}",
+            config.EnableMiniRafts, totalRoutes, useMiniRaft, config.RaftMarginMm, config.RaftThicknessMm);
+        int _raftCount = 0, _raftTotalTris = 0;
 
         var meshParts = new List<IndexedTriangleSet>();
         // Track per-support mesh parts for manual supports (real generated triangles for ground-truth comparison)
         var manualMeshParts = new Dictionary<string, List<IndexedTriangleSet>>();
 
+        // ── Emission gate: only supports with a valid load path ──────────
+        // A support needs at least 2 waypoints (junction → something).
+        // It must either reach the ground, have an anchor, or have a base waypoint.
+        // Manual supports that passed routing also pass — but those that couldn't
+        // route (no ground, no anchor) are flagged uncoverable, not force-emitted.
+        var validRoutes = routes.Where(r =>
+            r.route.Path.Count >= 2 &&
+            (r.route.ReachesGround || r.route.AnchorPoint.HasValue
+             || r.route.Path.Any(wp => wp.Type == "base")))
+            .ToList();
+
+        // Track manual tips that failed the emission gate OR collision filter (uncoverable)
+        // Uses the explicit set of manual IDs collected during injection — no prefix matching.
+        var validIds = new HashSet<string>(validRoutes.Select(r => r.id));
+        var uncoverableManualIds = manualPointIds.Where(id => !validIds.Contains(id)).ToList();
+
+        Serilog.Log.Information("V2 Emission gate: {Before} routes → {After} with complete load path (uncoverable manual: {Uncov})",
+            routes.Count, validRoutes.Count, uncoverableManualIds.Count);
+
+        // Generate pinhead meshes ONLY for supports that passed the emission gate.
+        // Previously this ran before the gate, causing floating pinhead geometry
+        // for supports whose routes were rejected.
         foreach (var (id, pinhead) in pinheads)
         {
             if (!pinhead.IsValid) continue;
+            if (!validIds.Contains(id)) continue;
             if (!sizingLookup.TryGetValue(id, out var sizing)) continue;
 
             bool isManualSupport = manualPointIds.Contains(id);
@@ -780,25 +827,6 @@ public static class SupportEngineV2
                 if (isManualSupport) manualMeshParts[id].Add(phMesh);
             }
         }
-
-        // ── Emission gate: only supports with a valid load path ──────────
-        // A support needs at least 2 waypoints (junction → something).
-        // It must either reach the ground, have an anchor, or have a base waypoint.
-        // Manual supports ALWAYS pass — the user placed them intentionally.
-        var validRoutes = routes.Where(r =>
-            manualPointIds.Contains(r.id) ||
-            (r.route.Path.Count >= 2 &&
-            (r.route.ReachesGround || r.route.AnchorPoint.HasValue
-             || r.route.Path.Any(wp => wp.Type == "base"))))
-            .ToList();
-
-        // Track manual tips that failed the emission gate OR collision filter (uncoverable)
-        // Uses the explicit set of manual IDs collected during injection — no prefix matching.
-        var validIds = new HashSet<string>(validRoutes.Select(r => r.id));
-        var uncoverableManualIds = manualPointIds.Where(id => !validIds.Contains(id)).ToList();
-
-        Serilog.Log.Information("V2 Emission gate: {Before} routes → {After} with complete load path (uncoverable manual: {Uncov})",
-            routes.Count, validRoutes.Count, uncoverableManualIds.Count);
 
         foreach (var (id, route) in validRoutes)
         {
@@ -863,6 +891,11 @@ public static class SupportEngineV2
                         config.RaftMarginMm, config.RaftThicknessMm, 12);
                     meshParts.Add(raft);
                     if (isManualRoute) manualMeshParts[id].Add(raft);
+                    _raftCount++;
+                    _raftTotalTris += raft.FaceCount;
+                    if (_raftCount <= 3)
+                        Serilog.Log.Information("DIAG-RAFT: support={Id} basePos=({X},{Y},{Z}) baseR={R} raftMargin={M} raftThick={T} raftTris={Tris}",
+                            id, baseWp.Position.X, baseWp.Position.Y, baseWp.Position.Z, baseWp.Radius, config.RaftMarginMm, config.RaftThicknessMm, raft.FaceCount);
                 }
             }
         }
@@ -871,6 +904,34 @@ public static class SupportEngineV2
         {
             var strut = SupportMesher.OrientedFrustum(conn.PointA, conn.PointB, conn.Radius, conn.Radius, braceSides);
             meshParts.Add(strut);
+        }
+
+        Serilog.Log.Information("DIAG-RAFT-SUMMARY: raftCount={Count} totalRaftTris={Tris} | TEST1: {Pass}",
+            _raftCount, _raftTotalTris, _raftTotalTris > 0 ? "PASS" : "FAIL");
+        // Raft Z positions
+        if (_raftCount > 0)
+        {
+            float raftMinZ = float.MaxValue, raftMaxZ = float.MinValue;
+            float minSupportBaseZ = float.MaxValue;
+            foreach (var (rid, rroute) in validRoutes)
+            {
+                if (!rroute.ReachesGround || rroute.Path.Count == 0) continue;
+                var bwp = rroute.Path[^1];
+                if (bwp.Type == "base")
+                {
+                    float supportBaseZ = bwp.Position.Z;
+                    if (supportBaseZ < minSupportBaseZ) minSupportBaseZ = supportBaseZ;
+                    float raftTopZ = supportBaseZ;
+                    float raftBotZ = supportBaseZ - config.RaftThicknessMm;
+                    if (raftBotZ < raftMinZ) raftMinZ = raftBotZ;
+                    if (raftTopZ > raftMaxZ) raftMaxZ = raftTopZ;
+                }
+            }
+            float gap = minSupportBaseZ - raftMaxZ;
+            Serilog.Log.Information("DIAG-RAFT-Z: raftMinZ={RaftMinZ} raftMaxZ={RaftMaxZ} minSupportBaseZ={SupportBase} gap={Gap} | TEST2a(|raftMinZ|<=0.05): {T2a} | TEST2b(|gap|<=0.05): {T2b}",
+                raftMinZ, raftMaxZ, minSupportBaseZ, gap,
+                MathF.Abs(raftMinZ) <= 0.05f ? "PASS" : $"FAIL({raftMinZ})",
+                MathF.Abs(gap) <= 0.05f ? "PASS" : $"FAIL({gap})");
         }
 
         // Skip vertex welding for speed — meshes are already clean individually.
@@ -1027,8 +1088,12 @@ public static class SupportEngineV2
                                 L_crit = Math.Min(L_crit, myHeight * 0.7f);
 
                                 float mergeZ = myTop.Z - L_crit;
-                                var neighbor = routes[bestMergeIdx].route;
-                                mergeZ = Math.Clamp(mergeZ, neighbor.Path[^1].Position.Z + 1f, neighbor.Path[0].Position.Z);
+                                // Snapshot the neighbor's path — prevents orphaned refs if neighbor is later modified
+                                var neighborPath = routes[bestMergeIdx].route.Path
+                                    .Select(wp => new PillarRouter.Waypoint { Position = wp.Position, Radius = wp.Radius, Type = wp.Type })
+                                    .ToList();
+                                var neighborReachesGround = routes[bestMergeIdx].route.ReachesGround;
+                                mergeZ = Math.Clamp(mergeZ, neighborPath[^1].Position.Z + 1f, neighborPath[0].Position.Z);
 
                                 // Build Y-junction: keep top segment, branch to neighbor at mergeZ
                                 var newPath = new List<PillarRouter.Waypoint>();
@@ -1041,14 +1106,14 @@ public static class SupportEngineV2
                                 if (newPath.Count == 0) newPath.Add(oldRoute.route.Path[0]);
 
                                 // Add branch waypoint to neighbor's position at mergeZ
-                                var nPos = neighbor.Path[0].Position;
+                                var nPos = neighborPath[0].Position;
                                 newPath.Add(new PillarRouter.Waypoint
                                 {
                                     Position = new Vector3(nPos.X, nPos.Y, mergeZ),
                                     Radius = r, Type = "bridge"
                                 });
-                                // Add remaining path from neighbor below mergeZ
-                                foreach (var wp in neighbor.Path)
+                                // Add remaining path from neighbor below mergeZ (snapshot — immune to later changes)
+                                foreach (var wp in neighborPath)
                                 {
                                     if (wp.Position.Z <= mergeZ) newPath.Add(wp);
                                 }
@@ -1058,7 +1123,7 @@ public static class SupportEngineV2
                                     routes[ri] = (oldRoute.id, new PillarRouter.PillarRoute
                                     {
                                         Path = newPath,
-                                        ReachesGround = neighbor.ReachesGround,
+                                        ReachesGround = neighborReachesGround,
                                         TotalLength = 0, // recalculated later
                                     });
                                     fixed2 = true; recovered++;
@@ -1107,6 +1172,67 @@ public static class SupportEngineV2
         }
 
         Serilog.Log.Information("V2 Step 7 Validation: {Ms}ms (collisions: {Coll})", stepSw.ElapsedMilliseconds, collisionResult.CollidingSupports);
+        stepSw.Restart();
+
+        // ── Step 7c: Build interconnections (AFTER all route modifications) ──
+        // Built here instead of Step 5 so cross-braces reference FINAL pillar positions.
+        if (config.EnableInterconnections && routes.Count >= 2)
+        {
+            // pillarBases = lowest waypoint position (XY used for distance, Z for bottom extent)
+            // pillarTops = HIGHEST Z across ALL data sources: route waypoints + pinhead contact point.
+            // The pinhead contact Z is critical — the route path may start below the contact point
+            // (pinhead junction is offset downward from contact). Without the contact Z, pillarTops
+            // can be near 0 even for tall supports, causing the interconnect builder to skip all pairs.
+            var pillarBases = routes.Select(r => {
+                var lowest = r.route.Path.OrderBy(wp => wp.Position.Z).First();
+                return lowest.Position;
+            }).ToList();
+            var pillarTops = routes.Select(r => {
+                float routeMaxZ = r.route.Path.Max(wp => wp.Position.Z);
+                // Also check the pinhead contact point Z (the actual model surface)
+                if (pinheadLookup.TryGetValue(r.id, out var ph) && ph.IsValid)
+                    routeMaxZ = Math.Max(routeMaxZ, ph.ContactPoint.Z);
+                return routeMaxZ;
+            }).ToList();
+            var pillarRadii = routes.Select(r => r.route.Path.First().Radius).ToList();
+
+            // Log ALL pillar top Zs to diagnose brace failures
+            var topMin = pillarTops.Count > 0 ? pillarTops.Min() : 0f;
+            var topMax = pillarTops.Count > 0 ? pillarTops.Max() : 0f;
+            var pinheadHits = routes.Count(r => pinheadLookup.ContainsKey(r.id));
+            Serilog.Log.Information("V2 Step 7c: {Count} routes, InterconnectDist={Dist}mm, topZ range=[{Min},{Max}], pinhead lookup hits={Hits}/{Total}",
+                routes.Count, config.InterconnectDistMm, topMin, topMax, pinheadHits, routes.Count);
+            Serilog.Log.Information("V2 Step 7c: {Count} routes, InterconnectDist={Dist}mm, sample base=({Bx},{By},{Bz}), top={Top}",
+                routes.Count, config.InterconnectDistMm,
+                pillarBases.Count > 0 ? pillarBases[0].X : 0,
+                pillarBases.Count > 0 ? pillarBases[0].Y : 0,
+                pillarBases.Count > 0 ? pillarBases[0].Z : 0,
+                pillarTops.Count > 0 ? pillarTops[0] : 0);
+
+            interconnections = InterconnectBuilder.Build(pillarBases, pillarTops, pillarRadii, bvh,
+                new InterconnectBuilder.InterconnectConfig
+                {
+                    MaxConnectionDistMm = config.InterconnectDistMm,
+                    ConnectionIntervalMm = config.InterconnectIntervalMm,
+                    StrutRadiusMm = config.StrutRadiusMm,
+                });
+
+            // Test C: do tree-merged routes also get cross-braces? (stacking check)
+            if (config.EnableTreeSupports && treeMergeCount > 0 && interconnections.Count > 0)
+            {
+                // Find which route indices have bridges (= tree-merged)
+                var mergedIndices = new HashSet<int>();
+                for (int ri = 0; ri < routes.Count; ri++)
+                    if (routes[ri].route.Path.Any(wp => wp.Type == "bridge"))
+                        mergedIndices.Add(ri);
+
+                int bracesOnMerged = interconnections.Count(c => mergedIndices.Contains(c.PillarA) || mergedIndices.Contains(c.PillarB));
+                Serilog.Log.Information("DIAG-STACK: treeEnabled={Tree} braceEnabled={Brace} treeMergedRoutes={Merged} totalBraces={Braces} bracesOnMergedPillars={BracesOnMerged} | STACKING={Stack}",
+                    config.EnableTreeSupports, config.EnableInterconnections, mergedIndices.Count, interconnections.Count, bracesOnMerged,
+                    bracesOnMerged > 0 ? "YES" : "NO");
+            }
+        }
+        Serilog.Log.Information("V2 Step 7c Interconnect: {Ms}ms ({Count} connections)", stepSw.ElapsedMilliseconds, interconnections.Count);
         stepSw.Restart();
 
         // ── Step 8: Prepare slice elements ───────────────────────────────

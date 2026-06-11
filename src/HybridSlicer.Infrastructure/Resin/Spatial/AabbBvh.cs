@@ -40,6 +40,9 @@ public sealed class AabbBvh
     // Mesh reference
     private readonly int _totalTriangles;
 
+    // Thread-safe node allocation for parallel build
+    private int AllocNode() => System.Threading.Interlocked.Increment(ref _nodeCount) - 1;
+
     private const int MAX_LEAF_TRIS = 4;
     private const int SAH_BINS = 12;
 
@@ -87,7 +90,7 @@ public sealed class AabbBvh
 
     private int BuildNode(int start, int end, Vector3[] centroids)
     {
-        int nodeIdx = _nodeCount++;
+        int nodeIdx = AllocNode();
         int count = end - start;
 
         // Compute AABB for this range

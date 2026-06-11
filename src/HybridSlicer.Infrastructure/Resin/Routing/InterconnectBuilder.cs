@@ -87,9 +87,33 @@ public static class InterconnectBuilder
             if (connections.Count >= maxTotalBraces) break;
 
             // Z range where both pillars overlap
-            float minZ = Math.Max(pillarBases[a].Z, pillarBases[b].Z) + 1f;
+            float minZ = Math.Max(pillarBases[a].Z, pillarBases[b].Z) + 0.5f;
             float maxZ = Math.Min(pillarTops[a], pillarTops[b]) - 0.5f;
-            if (maxZ <= minZ + config.ConnectionIntervalMm) continue;
+
+            // If overlap is too small for interval-based placement, still place ONE brace at midpoint
+            if (maxZ <= minZ)
+            {
+                // Try placing a single brace at the average of the two tops
+                float midZ = (pillarTops[a] + pillarTops[b]) / 2f;
+                if (midZ > 1f && connections.Count < maxTotalBraces)
+                {
+                    var ptA2 = new Vector3(pillarBases[a].X, pillarBases[a].Y, midZ);
+                    var ptB2 = new Vector3(pillarBases[b].X, pillarBases[b].Y, midZ);
+                    bool clear2 = true;
+                    if (bvh != null)
+                    {
+                        var dir2 = Vector3.Normalize(ptB2 - ptA2);
+                        float len2 = Vector3.Distance(ptA2, ptB2);
+                        if (len2 > 0.1f) { float cl = bvh.BeamCast(ptA2, dir2, config.StrutRadiusMm, 8, len2); clear2 = cl >= len2 - 0.1f; }
+                    }
+                    if (clear2)
+                    {
+                        connections.Add(new Interconnection { PillarA = a, PillarB = b, PointA = ptA2, PointB = ptB2, Radius = config.StrutRadiusMm, Type = "horizontal" });
+                        connectionCount[a]++; connectionCount[b]++;
+                    }
+                }
+                continue;
+            }
 
             // Limit per-pair based on overlap height (1 per interval, max 4)
             float overlap = maxZ - minZ;
@@ -145,6 +169,7 @@ public static class InterconnectBuilder
         }
 
         // Enforce structural requirements: tall pillars must have connections
+        int _gridCount = connections.Count; // braces placed by the pair/interval loop
         for (int i = 0; i < n; i++)
         {
             float height = pillarTops[i] - pillarBases[i].Z;
@@ -201,6 +226,22 @@ public static class InterconnectBuilder
                 }
             }
         }
+
+        // Diagnostics: count grid-driven vs need-driven braces
+        int needDriven = connections.Count - _gridCount;
+
+        // Brace distribution
+        var bracesPerPair = new Dictionary<(int, int), int>();
+        foreach (var c in connections)
+        {
+            var key = (Math.Min(c.PillarA, c.PillarB), Math.Max(c.PillarA, c.PillarB));
+            bracesPerPair[key] = bracesPerPair.GetValueOrDefault(key) + 1;
+        }
+        var distrib = bracesPerPair.Values.GroupBy(v => v).OrderBy(g => g.Key)
+            .Select(g => $"{g.Key}braces×{g.Count()}pairs").ToList();
+
+        Serilog.Log.Information("DIAG-BRACE: total={Total} gridDriven={Grid} needDriven={Need} pairs={Pairs} distrib=[{Distrib}] interval={Interval}mm",
+            connections.Count, _gridCount, needDriven, bracesPerPair.Count, string.Join(", ", distrib), config.ConnectionIntervalMm);
 
         return connections;
     }
