@@ -148,8 +148,10 @@ public static class SupportEngineV2
         public bool EnableForking { get; init; } = false;
         /// <summary>Max tips per fork (2..N).</summary>
         public int MaxTipsPerFork { get; init; } = 4;
-        /// <summary>Max XY distance between tips to consider forking (mm).</summary>
-        public float ForkClusterRadiusMm { get; init; } = 4f;
+        /// <summary>Max XY distance between tips to consider forking (mm). 0 = use spacing-relative.</summary>
+        public float ForkClusterRadiusMm { get; init; } = 0f;
+        /// <summary>Fork cluster radius as a multiple of median tip spacing. Used when ForkClusterRadiusMm=0.</summary>
+        public float ForkClusterRadiusMultiplier { get; init; } = 1.3f;
 
         // Line contact (dense tips along overhang edges)
         /// <summary>Enable line contact for downward overhang edges. Default OFF.</summary>
@@ -527,14 +529,46 @@ public static class SupportEngineV2
         ForkBuilder.ForkResult? forkResult = null;
         if (config.EnableForking && pinheads.Count >= 2)
         {
+            // Derive effective fork radius: spacing-relative (1.3× median) or absolute override
+            float effectiveForkRadius = config.ForkClusterRadiusMm;
+            if (effectiveForkRadius <= 0.01f)
+            {
+                // Compute median nearest-neighbor spacing from valid pinhead junctions
+                var validJunctions = pinheads.Where(p => p.pinhead.IsValid).Select(p => p.pinhead.JunctionPoint).ToList();
+                if (validJunctions.Count >= 2)
+                {
+                    var nnDists = new List<float>();
+                    for (int i = 0; i < validJunctions.Count; i++)
+                    {
+                        float minD = float.MaxValue;
+                        for (int j = 0; j < validJunctions.Count; j++)
+                        {
+                            if (i == j) continue;
+                            float dx = validJunctions[i].X - validJunctions[j].X;
+                            float dy = validJunctions[i].Y - validJunctions[j].Y;
+                            float d = MathF.Sqrt(dx * dx + dy * dy);
+                            if (d < minD) minD = d;
+                        }
+                        nnDists.Add(minD);
+                    }
+                    nnDists.Sort();
+                    float medianSpacing = nnDists[nnDists.Count / 2];
+                    effectiveForkRadius = medianSpacing * config.ForkClusterRadiusMultiplier;
+                }
+                else
+                {
+                    effectiveForkRadius = 4f; // fallback for very few tips
+                }
+            }
+
             forkResult = ForkBuilder.FindForks(pinheads, bvh, new ForkBuilder.ForkConfig
             {
-                ForkClusterRadiusMm = config.ForkClusterRadiusMm,
+                ForkClusterRadiusMm = effectiveForkRadius,
                 MaxTipsPerFork = config.MaxTipsPerFork,
                 CriticalAngleDeg = config.OverhangAngleDeg,
             });
-            Serilog.Log.Information("V2 Step 3b Forks: {Ms}ms ({Forks} forks, {MaxAngle:F1}° max strut angle, {Rejected} collision rejections)",
-                stepSw.ElapsedMilliseconds, forkResult.ForkNodes.Count, forkResult.MaxStrutAngleDeg, forkResult.CollisionRejections);
+            Serilog.Log.Information("V2 Step 3b Forks: {Ms}ms ({Forks} forks, {MaxAngle:F1}° max strut angle, {Rejected} collision rejections, radius={Radius:F1}mm)",
+                stepSw.ElapsedMilliseconds, forkResult.ForkNodes.Count, forkResult.MaxStrutAngleDeg, forkResult.CollisionRejections, effectiveForkRadius);
             stepSw.Restart();
         }
 
@@ -561,12 +595,12 @@ public static class SupportEngineV2
         {
             foreach (var (cid, forkNode) in forkResult.ForkNodes)
             {
-                // Area-equivalent radius for the fork trunk
+                // Area-equivalent radius for the fork trunk — visually amplified for distinctness
                 var members = forkResult.ClusterMembers[cid];
                 float sumR2 = 0;
                 foreach (int idx in members)
                     sumR2 += pinheads[idx].pinhead.BackRadius * pinheads[idx].pinhead.BackRadius;
-                float trunkRadius = MathF.Sqrt(sumR2);
+                float trunkRadius = MathF.Max(MathF.Sqrt(sumR2), config.PillarRadiusMm * 2f); // at least 2× normal pillar
 
                 var trunkRoute = PillarRouter.Route(forkNode, trunkRadius, bvh, routingConfig);
                 forkTrunkRoutes[cid] = trunkRoute;
@@ -1024,9 +1058,13 @@ public static class SupportEngineV2
                 if (isManualRoute) manualMeshParts[id].Add(segMesh);
 
                 // Junction sphere at each waypoint (full radius to avoid visual gaps)
+                // Fork/tree junction nodes get larger spheres for visual distinction
                 if (i > 0)
                 {
-                    var sphere = SupportMesher.OrientedSphere(wp1.Position, wp1.Radius, 4, meshSides);
+                    float junctionR = wp1.Radius;
+                    if (wp1.Type == "bridge" || wp2.Type == "bridge")
+                        junctionR = Math.Max(junctionR, wp1.Radius * 1.8f); // visibly larger at fork/tree junctions
+                    var sphere = SupportMesher.OrientedSphere(wp1.Position, junctionR, 4, meshSides);
                     meshParts.Add(sphere);
                     if (isManualRoute) manualMeshParts[id].Add(sphere);
                 }

@@ -1250,7 +1250,9 @@ export default function StlImport() {
       fd.append('maxTipsPerFork', String(supportOptions.forkTips))
       fd.append('enableLineContact', String(supportOptions.contactStyle === 'line'))
       fd.append('enableFaceContact', String(supportOptions.contactStyle === 'face'))
-      fd.append('reinforcementMode', supportOptions.reinforcementMode)
+      fd.append('reinforcementMode', supportOptions.reinforcementMode === 'none' ? 'None'
+        : supportOptions.reinforcementMode === 'pairwise' ? 'Pairwise'
+        : supportOptions.reinforcementMode === 'triangular' ? 'Triangular' : 'Global')
       fd.append('raftMode', supportOptions.raftMode === 'none' ? 'None' : supportOptions.raftMode === 'mini' ? 'MiniRafts' : 'FullPlate')
       fd.append('fullPlateRaftPattern', supportOptions.raftMode === 'fullHex' ? 'Honeycomb' : 'Grid')
       fd.append('enableDrainageAwareSupports', String(supportOptions.drainageAware))

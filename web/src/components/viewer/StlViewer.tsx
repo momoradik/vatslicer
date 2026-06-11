@@ -1251,6 +1251,75 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     }
   }, [supportMeshBuffer, supportMeshOffset, sceneReady, selectedId])
 
+  // ── Colored segment overlays (branches, braces — make types visually distinct) ──
+  const segmentOverlayRef = useRef<THREE.Group | null>(null)
+
+  useEffect(() => {
+    if (!sceneReady || !sceneRef.current) return
+
+    // Remove old overlays
+    if (segmentOverlayRef.current) {
+      sceneRef.current.remove(segmentOverlayRef.current)
+      segmentOverlayRef.current.traverse(c => {
+        if ((c as THREE.Mesh).geometry) (c as THREE.Mesh).geometry.dispose()
+        if ((c as THREE.Mesh).material) ((c as THREE.Mesh).material as THREE.Material).dispose()
+      })
+      segmentOverlayRef.current = null
+    }
+
+    const points = _supportPoints ?? []
+    const braces = _crossBraces ?? []
+    if (points.length === 0 && braces.length === 0) return
+
+    const group = new THREE.Group()
+    group.name = 'support-type-overlays'
+
+    // Helper: create a cylinder between two points
+    const makeCylinder = (x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, r: number, mat: THREE.Material) => {
+      // Convert Z-up to Y-up: (x, z, y)
+      const a = new THREE.Vector3(x1, z1, y1)
+      const b = new THREE.Vector3(x2, z2, y2)
+      const len = a.distanceTo(b)
+      if (len < 0.01) return
+      const geo = new THREE.CylinderGeometry(r, r, len, 6)
+      const mesh = new THREE.Mesh(geo, mat)
+      const mid = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5)
+      mesh.position.copy(mid)
+      const dir = new THREE.Vector3().subVectors(b, a).normalize()
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir)
+      group.add(mesh)
+    }
+
+    // Materials
+    const branchMat = new THREE.MeshPhongMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.85, depthWrite: false }) // amber for branches
+    const trunkMat = new THREE.MeshPhongMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.8, depthWrite: false }) // cyan for trunks
+    const braceMat = new THREE.MeshPhongMaterial({ color: 0x818cf8, transparent: true, opacity: 0.8, depthWrite: false }) // indigo for braces
+
+    // Draw branch & trunk segments from support data
+    for (const sp of points) {
+      if (!sp.segments) continue
+      for (const seg of sp.segments) {
+        if (seg.part === 'branch') {
+          makeCylinder(seg.x1, seg.y1, seg.z1, seg.x2, seg.y2, seg.z2, Math.max(seg.r1, seg.r2) * 1.5, branchMat)
+        }
+        // Highlight thick trunk segments (radius > normal pillar — indicates shared trunk)
+        if (seg.part === 'shaft' && Math.min(seg.r1, seg.r2) > 0.8) {
+          makeCylinder(seg.x1, seg.y1, seg.z1, seg.x2, seg.y2, seg.z2, Math.max(seg.r1, seg.r2) * 1.2, trunkMat)
+        }
+      }
+    }
+
+    // Draw cross-braces in contrasting color
+    for (const br of braces) {
+      makeCylinder(br.x1, br.y1, br.z1, br.x2, br.y2, br.z2, br.diameter * 0.7, braceMat)
+    }
+
+    if (group.children.length > 0) {
+      sceneRef.current.add(group)
+      segmentOverlayRef.current = group
+    }
+  }, [_supportPoints, _crossBraces, sceneReady])
+
   // ── ALL models' support meshes (rendered simultaneously) ────────────────
   const allV2MeshesRef = useRef<Map<string, THREE.Mesh>>(new Map())
 
