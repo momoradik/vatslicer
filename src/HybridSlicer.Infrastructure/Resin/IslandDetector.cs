@@ -17,21 +17,46 @@ public static class IslandDetector
         List<List<Vector2>> currentLayer,
         List<List<Vector2>> previousLayer)
     {
-        if (previousLayer.Count == 0)
-            return 0; // first layer — everything is on the build plate
+        return FindIslandContours(currentLayer, previousLayer, isFirstLayer: false).Count;
+    }
+
+    /// <summary>
+    /// Find island contours in the current layer — contours whose centroid does not fall
+    /// inside any polygon from the previous layer. Returns each island's centroid.
+    /// <para>
+    /// When <paramref name="previousLayer"/> is empty and <paramref name="isFirstLayer"/> is false,
+    /// ALL current-layer contours are islands (geometry appearing after an air gap).
+    /// When <paramref name="isFirstLayer"/> is true, nothing is flagged (everything is on the plate).
+    /// </para>
+    /// </summary>
+    public static List<(List<Vector2> contour, Vector2 centroid)> FindIslandContours(
+        List<List<Vector2>> currentLayer,
+        List<List<Vector2>> previousLayer,
+        bool isFirstLayer)
+    {
+        var islands = new List<(List<Vector2> contour, Vector2 centroid)>();
 
         if (currentLayer.Count == 0)
-            return 0;
+            return islands;
 
-        int islands = 0;
+        // First layer on the plate: nothing is an island
+        if (isFirstLayer)
+            return islands;
+
         foreach (var contour in currentLayer)
         {
             if (contour.Count < 3) continue;
 
-            // Check if the centroid of this contour falls inside any previous-layer contour
             var centroid = ComputeCentroid(contour);
-            bool hasSupport = false;
 
+            // If previous layer is empty, this contour appeared after an air gap → island
+            if (previousLayer.Count == 0)
+            {
+                islands.Add((contour, centroid));
+                continue;
+            }
+
+            bool hasSupport = false;
             foreach (var prevContour in previousLayer)
             {
                 if (PointInPolygon(centroid, prevContour))
@@ -41,7 +66,8 @@ public static class IslandDetector
                 }
             }
 
-            if (!hasSupport) islands++;
+            if (!hasSupport)
+                islands.Add((contour, centroid));
         }
 
         return islands;

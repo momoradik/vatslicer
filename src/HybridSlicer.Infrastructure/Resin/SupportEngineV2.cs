@@ -9,6 +9,9 @@ using HybridSlicer.Infrastructure.Resin.Validation;
 
 namespace HybridSlicer.Infrastructure.Resin;
 
+/// <summary>Raft mode for build-plate adhesion.</summary>
+public enum RaftMode { None, MiniRafts, FullPlate }
+
 /// <summary>
 /// Production-grade resin support engine (V2).
 ///
@@ -65,6 +68,10 @@ public static class SupportEngineV2
         public float InterconnectDistMm { get; init; } = 50f;
         public float InterconnectIntervalMm { get; init; } = 5f;
         public float StrutRadiusMm { get; init; } = 0.3f;
+        /// <summary>Reinforcement mode: None, Pairwise (default), Triangular, Global.</summary>
+        public ReinforcementMode ReinforcementMode { get; init; } = ReinforcementMode.Pairwise;
+        /// <summary>Only brace pillars taller than this (mm) in Triangular/Global mode.</summary>
+        public float ReinforcementStartHeightMm { get; init; } = 5f;
 
         // Tree supports
         /// <summary>Enable tree support merging (nearby pillars share trunks).</summary>
@@ -128,6 +135,51 @@ public static class SupportEngineV2
             public float? ShaftDiameterMm { get; init; }
             public float? BaseDiameterMm { get; init; }
         }
+
+        /// <summary>
+        /// When ON, uses contour-based island detection (same as the slicer's IslandDetector)
+        /// instead of the z&lt;2mm heuristic. Every disconnected island at any Z gets a support
+        /// point forced to route to the plate. Default OFF for backward compatibility.
+        /// </summary>
+        public bool UnifiedIslandDetection { get; init; } = false;
+
+        // Forked supports (one trunk, multiple tips)
+        /// <summary>Enable forked supports — merge nearby tips into one trunk. Default OFF.</summary>
+        public bool EnableForking { get; init; } = false;
+        /// <summary>Max tips per fork (2..N).</summary>
+        public int MaxTipsPerFork { get; init; } = 4;
+        /// <summary>Max XY distance between tips to consider forking (mm).</summary>
+        public float ForkClusterRadiusMm { get; init; } = 4f;
+
+        // Line contact (dense tips along overhang edges)
+        /// <summary>Enable line contact for downward overhang edges. Default OFF.</summary>
+        public bool EnableLineContact { get; init; } = false;
+        /// <summary>Spacing of tips along overhang edges (mm). 0 = use base contact spacing.</summary>
+        public float LineContactSpacingMm { get; init; } = 0;
+
+        // Force-driven placement
+        /// <summary>Enable force-driven placement: densify where peel force is high. Default OFF.</summary>
+        public bool EnableForceDrivenPlacement { get; init; } = false;
+
+        // Drainage-aware supports
+        /// <summary>Enable drainage-aware supports: detect resin traps and ensure drain paths. Default OFF.</summary>
+        public bool EnableDrainageAwareSupports { get; init; } = false;
+        /// <summary>Minimum drain gap between supports near trap positions (mm).</summary>
+        public float MinDrainGapMm { get; init; } = 2.0f;
+
+        // Face contact (even grid on large flat overhangs)
+        /// <summary>Enable face contact: regular grid of tips on large flat overhangs. Default OFF.</summary>
+        public bool EnableFaceContact { get; init; } = false;
+        /// <summary>Grid spacing for face contact tips (mm).</summary>
+        public float FaceGridSpacingMm { get; init; } = 3f;
+        /// <summary>Minimum overhang face area (mm²) to trigger face contact grid.</summary>
+        public float FaceContactAreaThresholdMm2 { get; init; } = 50f;
+
+        // Full-plate raft
+        /// <summary>Raft mode: None, MiniRafts (per-support pads), FullPlate (one connected lattice raft).</summary>
+        public RaftMode RaftMode { get; init; } = RaftMode.MiniRafts;
+        /// <summary>Full-plate raft pattern (grid/hex).</summary>
+        public LatticeBase.LatticePattern FullPlateRaftPattern { get; init; } = LatticeBase.LatticePattern.Grid;
 
         public int Seed { get; init; } = 42;
 
@@ -199,6 +251,9 @@ public static class SupportEngineV2
         // Segment data for backward compatibility with the existing frontend
         public required List<AdvancedSupportEngine.AdvancedSupport> LegacySupports { get; init; }
         public required List<AdvancedSupportEngine.CrossBrace> LegacyCrossBraces { get; init; }
+
+        /// <summary>Drain holes detected by drainage-aware analysis. Empty if feature is OFF.</summary>
+        public required List<DrainHolePlacer.DrainHole> DetectedDrainHoles { get; init; }
     }
 
     // ── Main pipeline ────────────────────────────────────────────────────
@@ -244,6 +299,34 @@ public static class SupportEngineV2
         Serilog.Log.Information("V2 Step 1 BVH: {Ms}ms ({Tris} triangles, {Nodes} nodes)", bvhMs, bvh.TriangleCount, bvh.NodeCount);
         stepSw.Restart();
 
+        // ── Step 1b: Drainage-aware support placement ──────────────────
+        // Detect resin traps in the model and add exclusion zones to prevent
+        // supports from blocking drain paths.
+        var drainExclusions = config.DrainHoleExclusions != null
+            ? new List<(Vector3 position, float radiusMm)>(config.DrainHoleExclusions)
+            : new List<(Vector3 position, float radiusMm)>();
+        List<DrainHolePlacer.DrainHole> detectedDrainHoles = new();
+
+        if (config.EnableDrainageAwareSupports)
+        {
+            detectedDrainHoles = DrainHolePlacer.Suggest(mesh, new DrainHolePlacer.DrainConfig
+            {
+                LayerHeightMm = config.LayerHeightMm,
+                MinTrapVolumeMm3 = 20f,
+                HoleDiameterMm = config.MinDrainGapMm * 2f,
+            });
+
+            // Add each drain hole location as a support exclusion zone
+            foreach (var hole in detectedDrainHoles)
+            {
+                float exclusionRadius = Math.Max(hole.DiameterMm, config.MinDrainGapMm);
+                drainExclusions.Add((hole.Position, exclusionRadius));
+            }
+
+            Serilog.Log.Information("V2 DrainageAware: {Holes} drain holes detected, {Exclusions} exclusion zones (gap={Gap}mm)",
+                detectedDrainHoles.Count, drainExclusions.Count, config.MinDrainGapMm);
+        }
+
         // Adaptive layer height for large models — coarser analysis = faster
         float meshHeight = mesh.Max.Z - mesh.Min.Z;
         float adaptiveLayerHeight = config.LayerHeightMm;
@@ -259,8 +342,15 @@ public static class SupportEngineV2
             Orientation = config.Orientation,
             RecoaterSpeedMmS = config.RecoaterSpeedMmS,
             LayerHeightMm = adaptiveLayerHeight,
-            DrainHoleExclusions = config.DrainHoleExclusions,
+            DrainHoleExclusions = drainExclusions,
             DrainHoleClearanceMm = config.DrainHoleClearanceMm,
+            UnifiedIslandDetection = config.UnifiedIslandDetection,
+            EnableLineContact = config.EnableLineContact,
+            LineContactSpacingMm = config.LineContactSpacingMm,
+            EnableFaceContact = config.EnableFaceContact,
+            FaceGridSpacingMm = config.FaceGridSpacingMm,
+            FaceContactAreaThresholdMm2 = config.FaceContactAreaThresholdMm2,
+            EnableForceDrivenPlacement = config.EnableForceDrivenPlacement,
         }, bvh);
 
         // Cap support count — scaled by mesh size. With BVH cache + parallel pinheads,
@@ -433,6 +523,21 @@ public static class SupportEngineV2
         Serilog.Log.Information("V2 Step 3 Pinheads: {Ms}ms ({Count} optimized, parallel)", stepSw.ElapsedMilliseconds, pinheads.Count);
         stepSw.Restart();
 
+        // ── Step 3b: Fork merging (multiple tips → one trunk) ────────────
+        ForkBuilder.ForkResult? forkResult = null;
+        if (config.EnableForking && pinheads.Count >= 2)
+        {
+            forkResult = ForkBuilder.FindForks(pinheads, bvh, new ForkBuilder.ForkConfig
+            {
+                ForkClusterRadiusMm = config.ForkClusterRadiusMm,
+                MaxTipsPerFork = config.MaxTipsPerFork,
+                CriticalAngleDeg = config.OverhangAngleDeg,
+            });
+            Serilog.Log.Information("V2 Step 3b Forks: {Ms}ms ({Forks} forks, {MaxAngle:F1}° max strut angle, {Rejected} collision rejections)",
+                stepSw.ElapsedMilliseconds, forkResult.ForkNodes.Count, forkResult.MaxStrutAngleDeg, forkResult.CollisionRejections);
+            stepSw.Restart();
+        }
+
         // ── Step 4: Route pillars ────────────────────────────────────────
         var routingConfig = new PillarRouter.RoutingConfig
         {
@@ -449,9 +554,56 @@ public static class SupportEngineV2
         // Build lookup for point weight recommendations
         var pointWeights = pointResult.Points.ToDictionary(p => p.Id, p => p.RecommendedWeight);
 
+        // Pre-route fork trunks (one route per fork cluster, shared by all tips)
+        var forkTrunkRoutes = new Dictionary<int, PillarRouter.PillarRoute>();
+        var forkedPinheadIds = new HashSet<string>();
+        if (forkResult != null)
+        {
+            foreach (var (cid, forkNode) in forkResult.ForkNodes)
+            {
+                // Area-equivalent radius for the fork trunk
+                var members = forkResult.ClusterMembers[cid];
+                float sumR2 = 0;
+                foreach (int idx in members)
+                    sumR2 += pinheads[idx].pinhead.BackRadius * pinheads[idx].pinhead.BackRadius;
+                float trunkRadius = MathF.Sqrt(sumR2);
+
+                var trunkRoute = PillarRouter.Route(forkNode, trunkRadius, bvh, routingConfig);
+                forkTrunkRoutes[cid] = trunkRoute;
+
+                // For each tip in the fork, build route: junction → strut → fork node → trunk
+                foreach (int idx in members)
+                {
+                    var (tipId, tipPinhead) = pinheads[idx];
+                    forkedPinheadIds.Add(tipId);
+
+                    var path = new List<PillarRouter.Waypoint>();
+                    // Junction at the tip
+                    var routeStart = tipPinhead.JunctionPoint.Z > 0.1f
+                        ? tipPinhead.JunctionPoint
+                        : tipPinhead.ContactPoint;
+                    path.Add(new PillarRouter.Waypoint { Position = routeStart, Radius = tipPinhead.BackRadius, Type = "junction" });
+                    // Strut from junction to fork node
+                    path.Add(new PillarRouter.Waypoint { Position = forkNode, Radius = trunkRadius, Type = "bridge" });
+                    // Append trunk
+                    path.AddRange(trunkRoute.Path);
+
+                    routes.Add((tipId, new PillarRouter.PillarRoute
+                    {
+                        Path = path,
+                        ReachesGround = trunkRoute.ReachesGround,
+                        AnchorPoint = trunkRoute.AnchorPoint,
+                        AnchorNormal = trunkRoute.AnchorNormal,
+                        TotalLength = Vector3.Distance(routeStart, forkNode) + trunkRoute.TotalLength,
+                    }));
+                }
+            }
+        }
+
         foreach (var (id, pinhead) in pinheads)
         {
             if (!pinhead.IsValid) continue;
+            if (forkedPinheadIds.Contains(id)) continue; // already routed via fork
 
             // Auto-scale pillar radius based on support height — ALL supports, not just heavy
             var rCfg = routingConfig;
@@ -766,7 +918,7 @@ public static class SupportEngineV2
         // Disable heavy features for large support sets to prevent mesh explosion
         bool useLattice = config.BaseLatticePattern != LatticeBase.LatticePattern.Solid && totalRoutes < 500;
         bool useHollow = config.EnableHollowSupports && totalRoutes < 150;
-        bool useMiniRaft = config.EnableMiniRafts && totalRoutes < 200;
+        bool useMiniRaft = config.RaftMode == RaftMode.MiniRafts && totalRoutes < 200;
         Serilog.Log.Information("V2 Step 6: meshSides={Sides}, lattice={Lat}, hollow={Hol}, raft={Raft}, routes={Routes}",
             meshSides, useLattice, useHollow, useMiniRaft, totalRoutes);
         Serilog.Log.Information("DIAG-RAFT-GATE: EnableMiniRafts={Enabled} totalRoutes={Routes} useMiniRaft={Use} RaftMargin={Margin} RaftThickness={Thick}",
@@ -932,6 +1084,51 @@ public static class SupportEngineV2
                 raftMinZ, raftMaxZ, minSupportBaseZ, gap,
                 MathF.Abs(raftMinZ) <= 0.05f ? "PASS" : $"FAIL({raftMinZ})",
                 MathF.Abs(gap) <= 0.05f ? "PASS" : $"FAIL({gap})");
+        }
+
+        // ── Full-plate raft (one connected lattice under all supports) ──
+        if (config.RaftMode == RaftMode.FullPlate)
+        {
+            // Compute footprint: bounding box of all plate-routed base positions + margin
+            float fpMinX = float.MaxValue, fpMinY = float.MaxValue;
+            float fpMaxX = float.MinValue, fpMaxY = float.MinValue;
+            int plateRouted = 0;
+            foreach (var (_, route) in validRoutes)
+            {
+                if (!route.ReachesGround || route.Path.Count == 0) continue;
+                var baseWp = route.Path[^1];
+                if (baseWp.Type != "base") continue;
+                plateRouted++;
+                float bx = baseWp.Position.X, by = baseWp.Position.Y;
+                float r = baseWp.Radius;
+                if (bx - r < fpMinX) fpMinX = bx - r;
+                if (by - r < fpMinY) fpMinY = by - r;
+                if (bx + r > fpMaxX) fpMaxX = bx + r;
+                if (by + r > fpMaxY) fpMaxY = by + r;
+            }
+
+            if (plateRouted > 0 && fpMaxX > fpMinX && fpMaxY > fpMinY)
+            {
+                fpMinX -= config.RaftMarginMm;
+                fpMinY -= config.RaftMarginMm;
+                fpMaxX += config.RaftMarginMm;
+                fpMaxY += config.RaftMarginMm;
+                float raftW = fpMaxX - fpMinX;
+                float raftD = fpMaxY - fpMinY;
+                float cx = (fpMinX + fpMaxX) / 2f;
+                float cy = (fpMinY + fpMaxY) / 2f;
+                float raftTopR = MathF.Max(raftW, raftD) / 2f;
+
+                var fullRaft = LatticeBase.Generate(
+                    new Vector3(cx, cy, 0), raftTopR, raftTopR,
+                    config.RaftThicknessMm,
+                    config.FullPlateRaftPattern,
+                    config.LatticeStrutDiameterMm, config.LatticeSpacingMm, 8);
+                meshParts.Add(fullRaft);
+
+                Serilog.Log.Information("V2 FullPlateRaft: footprint=({MinX:F1},{MinY:F1})→({MaxX:F1},{MaxY:F1}) size={W:F1}x{D:F1}mm plateRouted={N} tris={Tris}",
+                    fpMinX, fpMinY, fpMaxX, fpMaxY, raftW, raftD, plateRouted, fullRaft.FaceCount);
+            }
         }
 
         // Skip vertex welding for speed — meshes are already clean individually.
@@ -1209,13 +1406,19 @@ public static class SupportEngineV2
                 pillarBases.Count > 0 ? pillarBases[0].Z : 0,
                 pillarTops.Count > 0 ? pillarTops[0] : 0);
 
-            interconnections = InterconnectBuilder.Build(pillarBases, pillarTops, pillarRadii, bvh,
-                new InterconnectBuilder.InterconnectConfig
-                {
-                    MaxConnectionDistMm = config.InterconnectDistMm,
-                    ConnectionIntervalMm = config.InterconnectIntervalMm,
-                    StrutRadiusMm = config.StrutRadiusMm,
-                });
+            var icConfig = new InterconnectBuilder.InterconnectConfig
+            {
+                MaxConnectionDistMm = config.InterconnectDistMm,
+                ConnectionIntervalMm = config.InterconnectIntervalMm,
+                StrutRadiusMm = config.StrutRadiusMm,
+                Mode = config.ReinforcementMode,
+                ReinforcementStartHeightMm = config.ReinforcementStartHeightMm,
+            };
+
+            if (config.ReinforcementMode == ReinforcementMode.Triangular || config.ReinforcementMode == ReinforcementMode.Global)
+                interconnections = InterconnectBuilder.BuildTriangulated(pillarBases, pillarTops, pillarRadii, bvh, icConfig);
+            else
+                interconnections = InterconnectBuilder.Build(pillarBases, pillarTops, pillarRadii, bvh, icConfig);
 
             // Test C: do tree-merged routes also get cross-braces? (stacking check)
             if (config.EnableTreeSupports && treeMergeCount > 0 && interconnections.Count > 0)
@@ -1281,6 +1484,7 @@ public static class SupportEngineV2
                 kv => { var m = new IndexedTriangleSet(); foreach (var p in kv.Value) m.Merge(p); return m; }),
             LegacySupports = legacySupports,
             LegacyCrossBraces = legacyCrossBraces,
+            DetectedDrainHoles = detectedDrainHoles,
         };
     }
 
