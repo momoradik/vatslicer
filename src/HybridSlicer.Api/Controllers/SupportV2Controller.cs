@@ -50,6 +50,19 @@ public sealed class SupportV2Controller : ControllerBase
         [FromForm] float raftThicknessMm = 0.3f,
         [FromForm] string materialPreset = "standard",
         [FromForm] string? manualContacts = null,
+        // New V2 features from visual picker
+        [FromForm] bool enableForking = false,
+        [FromForm] int maxTipsPerFork = 4,
+        [FromForm] float forkClusterRadiusMm = 4f,
+        [FromForm] bool enableLineContact = false,
+        [FromForm] float lineContactSpacingMm = 0f,
+        [FromForm] bool enableFaceContact = false,
+        [FromForm] float faceGridSpacingMm = 3f,
+        [FromForm] string reinforcementMode = "Pairwise",
+        [FromForm] string raftMode = "MiniRafts",
+        [FromForm] string fullPlateRaftPattern = "Grid",
+        [FromForm] bool enableDrainageAwareSupports = false,
+        [FromForm] bool enableForceDrivenPlacement = false,
         // User transforms are baked into STL vertices by the frontend — no rotation/scale params
         CancellationToken ct = default)
     {
@@ -96,6 +109,21 @@ public sealed class SupportV2Controller : ControllerBase
         // MeshValidator would recompute normals from winding, losing interior/exterior info
         var mesh = StlMesh.FromBinary(data);
 
+        // Parse reinforcement mode
+        var reinfMode = HybridSlicer.Infrastructure.Resin.Routing.ReinforcementMode.Pairwise;
+        if (Enum.TryParse<HybridSlicer.Infrastructure.Resin.Routing.ReinforcementMode>(reinforcementMode, true, out var rm))
+            reinfMode = rm;
+
+        // Parse raft mode
+        var raftModeEnum = HybridSlicer.Infrastructure.Resin.RaftMode.MiniRafts;
+        if (Enum.TryParse<HybridSlicer.Infrastructure.Resin.RaftMode>(raftMode, true, out var rmE))
+            raftModeEnum = rmE;
+
+        // Parse full-plate raft pattern
+        var fpRaftPattern = LatticeBase.LatticePattern.Grid;
+        if (Enum.TryParse<LatticeBase.LatticePattern>(fullPlateRaftPattern, true, out var fpRp))
+            fpRaftPattern = fpRp;
+
         var result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig
         {
             Orientation = orient,
@@ -106,17 +134,30 @@ public sealed class SupportV2Controller : ControllerBase
             PillarRadiusMm = pillarRadius,
             BaseRadiusMm = baseRadius,
             WideningFactor = wideningFactor,
-            EnableInterconnections = enableInterconnections,
+            EnableInterconnections = enableInterconnections || reinfMode != HybridSlicer.Infrastructure.Resin.Routing.ReinforcementMode.None,
             InterconnectDistMm = interconnectDistMm,
             EnableTreeSupports = enableTreeSupports,
             EnableHollowSupports = enableHollowSupports,
             HollowMinHeightMm = hollowMinHeightMm,
             HollowWallThicknessMm = hollowWallThicknessMm,
             BaseLatticePattern = lattice,
-            EnableMiniRafts = enableMiniRafts,
+            EnableMiniRafts = raftModeEnum == HybridSlicer.Infrastructure.Resin.RaftMode.MiniRafts,
             RaftMarginMm = raftMarginMm,
             RaftThicknessMm = raftThicknessMm,
             ManualContacts = manualContactList,
+            // New features from visual picker
+            EnableForking = enableForking,
+            MaxTipsPerFork = maxTipsPerFork,
+            ForkClusterRadiusMm = forkClusterRadiusMm,
+            EnableLineContact = enableLineContact,
+            LineContactSpacingMm = lineContactSpacingMm,
+            EnableFaceContact = enableFaceContact,
+            FaceGridSpacingMm = faceGridSpacingMm,
+            ReinforcementMode = reinfMode,
+            RaftMode = raftModeEnum,
+            FullPlateRaftPattern = fpRaftPattern,
+            EnableDrainageAwareSupports = enableDrainageAwareSupports,
+            EnableForceDrivenPlacement = enableForceDrivenPlacement,
         });
 
         return Ok(new

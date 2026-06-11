@@ -177,20 +177,31 @@ public sealed class SupportPointGenerator
         var candidates = new List<(Vector3 point, Vector3 normal, float area, float steepness, float z)>();
 
         // Pre-compute per-triangle peel force for force-driven placement
+        // Uses Z-binning (O(n)) instead of O(n²) per-triangle area accumulation
         float maxPeelForce = 0, minPeelForce = float.MaxValue;
         float[] triPeelForces = new float[0];
         if (config.EnableForceDrivenPlacement)
         {
+            // Bin overhang area by Z in 2mm bins
+            float binSize = 2f;
+            float meshMinZLocal = mesh.Min.Z;
+            int numBins = Math.Max(1, (int)MathF.Ceiling(meshHeight / binSize) + 1);
+            var areaBins = new float[numBins];
+            foreach (var ot in overhangTris)
+            {
+                int bin = Math.Clamp((int)((ot.centroid.Z - meshMinZLocal) / binSize), 0, numBins - 1);
+                areaBins[bin] += ot.area;
+            }
+
             triPeelForces = new float[overhangTris.Count];
             for (int ti = 0; ti < overhangTris.Count; ti++)
             {
-                // Peel force ∝ cured layer area at this Z. Approximate by collecting
-                // total overhang area within ±2mm of this triangle's Z.
-                float triZ = overhangTris[ti].centroid.Z;
-                float layerArea = 0;
-                foreach (var ot in overhangTris)
-                    if (MathF.Abs(ot.centroid.Z - triZ) < 2f) layerArea += ot.area;
-                float peelForce = layerArea * 0.015f; // P_adhesion × A_layer
+                int bin = Math.Clamp((int)((overhangTris[ti].centroid.Z - meshMinZLocal) / binSize), 0, numBins - 1);
+                // Sum this bin + neighbors for ±2mm window
+                float layerArea = areaBins[bin];
+                if (bin > 0) layerArea += areaBins[bin - 1];
+                if (bin < numBins - 1) layerArea += areaBins[bin + 1];
+                float peelForce = layerArea * 0.015f;
                 triPeelForces[ti] = peelForce;
                 if (peelForce > maxPeelForce) maxPeelForce = peelForce;
                 if (peelForce < minPeelForce) minPeelForce = peelForce;

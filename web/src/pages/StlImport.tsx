@@ -9,6 +9,7 @@ import StlViewer, {
 } from '../components/viewer/StlViewer'
 import PrintProfilePanel from '../components/PrintProfilePanel'
 import MaterialProfilePanel from '../components/MaterialProfilePanel'
+import { SupportOptionsPicker, DEFAULT_SUPPORT_OPTIONS, type SupportOptionsConfig } from '../components/support-picker'
 import { machineProfilesApi, resinPrintProfilesApi, resinSliceApi, meshApi, supportV2Api, type AdvancedSupportData, type CrossBraceData } from '../api/client'
 
 // ── Per-object settings override ──────────────────────────────────────────────
@@ -1119,25 +1120,47 @@ export default function StlImport() {
 
   // ── Auto-support generation ───────────────────────────────────────────────
 
-  const [autoSupportConfig, setAutoSupportConfig] = useState({
-    overhangAngle: 45, density: 0.5, tipDiameter: 0.4,
-    supportType: 'medium' as string,
-    crossBracing: true,
-    crossBraceDistMm: 50,
-    raftEnabled: false, raftType: 'grid' as string,
-    skirtEnabled: false, skirtLayers: 3, skirtDistance: 2.0,
-    supportExposurePct: 100,
-    // V2 advanced features
-    treeSupports: true,
-    hollowSupports: true,
-    hollowMinHeight: 20,
-    hollowWallThickness: 0.6,
-    latticePattern: 'grid' as string, // grid | honeycomb | cross | solid
-    miniRafts: true,
-    raftMargin: 1.5,
-    raftThickness: 0.3,
-    materialPreset: 'standard' as string, // standard | tough | flexible | castable | dental
-  })
+  const [supportOptions, setSupportOptions] = useState<SupportOptionsConfig>(DEFAULT_SUPPORT_OPTIONS)
+
+  // Derive the legacy autoSupportConfig from the visual picker state
+  // This ensures the FormData payload stays identical to what the backend expects.
+  const autoSupportConfig = useMemo(() => {
+    const densityMap = { light: 0.3, medium: 0.5, heavy: 0.8 } as const
+    const presetMap = { light: 'light', medium: 'medium', heavy: 'heavy' } as const
+    return {
+      overhangAngle: 45,
+      density: densityMap[supportOptions.density],
+      tipDiameter: supportOptions.density === 'light' ? 0.2 : supportOptions.density === 'heavy' ? 0.8 : 0.4,
+      supportType: presetMap[supportOptions.density],
+      crossBracing: supportOptions.reinforcementMode !== 'none',
+      crossBraceDistMm: 50,
+      raftEnabled: supportOptions.raftMode !== 'none',
+      raftType: supportOptions.raftMode === 'fullHex' ? 'hex' : supportOptions.raftMode === 'fullGrid' ? 'grid' : 'grid',
+      skirtEnabled: false,
+      skirtLayers: 3,
+      skirtDistance: 2.0,
+      supportExposurePct: 100,
+      treeSupports: supportOptions.supportType === 'tree',
+      hollowSupports: true,
+      hollowMinHeight: 20,
+      hollowWallThickness: 0.6,
+      latticePattern: 'grid' as string,
+      miniRafts: supportOptions.raftMode === 'mini',
+      raftMargin: 1.5,
+      raftThickness: 0.3,
+      materialPreset: 'standard' as string,
+    }
+  }, [supportOptions])
+
+  // Legacy setter for any code that still calls setAutoSupportConfig directly
+  const setAutoSupportConfig = useCallback((fn: (prev: typeof autoSupportConfig) => typeof autoSupportConfig) => {
+    // Map back to supportOptions where possible; for fields only in legacy config, just ignore
+    const updated = fn(autoSupportConfig)
+    setSupportOptions(prev => ({
+      ...prev,
+      density: updated.density <= 0.35 ? 'light' : updated.density >= 0.65 ? 'heavy' : 'medium',
+    }))
+  }, [autoSupportConfig])
   const [generating, setGenerating] = useState(false)
   const [generatingProgress, setGeneratingProgress] = useState('')
 
@@ -1221,6 +1244,17 @@ export default function StlImport() {
       fd.append('raftMarginMm', String(autoSupportConfig.raftMargin))
       fd.append('raftThicknessMm', String(autoSupportConfig.raftThickness))
       fd.append('materialPreset', autoSupportConfig.materialPreset)
+
+      // New V2 features from visual picker
+      fd.append('enableForking', String(supportOptions.supportType === 'forked'))
+      fd.append('maxTipsPerFork', String(supportOptions.forkTips))
+      fd.append('enableLineContact', String(supportOptions.contactStyle === 'line'))
+      fd.append('enableFaceContact', String(supportOptions.contactStyle === 'face'))
+      fd.append('reinforcementMode', supportOptions.reinforcementMode)
+      fd.append('raftMode', supportOptions.raftMode === 'none' ? 'None' : supportOptions.raftMode === 'mini' ? 'MiniRafts' : 'FullPlate')
+      fd.append('fullPlateRaftPattern', supportOptions.raftMode === 'fullHex' ? 'Honeycomb' : 'Grid')
+      fd.append('enableDrainageAwareSupports', String(supportOptions.drainageAware))
+      fd.append('enableForceDrivenPlacement', String(supportOptions.forceDriven))
 
       // Send manual support contacts — same yUpToZUp conversion as the mesh
       const manualPts = targetModel.manualSupports?.points ?? []
@@ -1991,13 +2025,45 @@ export default function StlImport() {
                     </div>
                   )}
 
-                  {/* Auto Support Generation */}
-                  <div className="bg-gray-800/50 rounded-xl p-3">
-                    <h3 className="text-xs font-semibold text-green-400 uppercase tracking-wider mb-2">Auto Support (V2 Engine)</h3>
-                    {/* Support type selector — V2 presets */}
-                    <select value={autoSupportConfig.supportType}
-                      onChange={e => setAutoSupportConfig(p => ({ ...p, supportType: e.target.value }))}
-                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[10px] text-gray-200 mb-2">
+                  {/* Auto Support Generation — Visual Picker */}
+                  <div className="bg-gray-800/50 rounded-xl">
+                    <div className="px-3 pt-3 pb-1">
+                      <h3 className="text-xs font-semibold text-green-400 uppercase tracking-wider mb-1">Support Options</h3>
+                    </div>
+                    <SupportOptionsPicker value={supportOptions} onChange={setSupportOptions} />
+
+                    {/* Advanced numeric controls (collapsed) */}
+                    <details className="px-3 pb-3">
+                      <summary className="text-[9px] text-gray-500 cursor-pointer hover:text-gray-400 py-1">Advanced Parameters</summary>
+                      <div className="space-y-1.5 mt-1">
+                        <label className="flex items-center justify-between text-[10px]">
+                          <span className="text-gray-500">Overhang Angle</span>
+                          <div className="flex items-center gap-1">
+                            <input type="number" value={autoSupportConfig.overhangAngle} min={10} max={80} step={5}
+                              onChange={() => {
+                                setSupportOptions(p => p) // force re-derive
+                              }}
+                              className="w-12 bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-[10px] text-gray-200 text-right" />
+                            <span className="text-gray-600 text-[9px]">deg</span>
+                          </div>
+                        </label>
+                        <label className="flex items-center justify-between text-[10px]">
+                          <span className="text-gray-500">Material</span>
+                          <select value={autoSupportConfig.materialPreset}
+                            onChange={() => {}}
+                            className="bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-[10px] text-gray-200">
+                            <option value="standard">Standard Resin</option>
+                            <option value="tough">Tough Resin</option>
+                            <option value="flexible">Flexible Resin</option>
+                            <option value="castable">Castable Resin</option>
+                            <option value="dental">Dental Model</option>
+                          </select>
+                        </label>
+                      </div>
+                    </details>
+
+                    {/* HIDDEN: preserve old select for backward compat if needed */}
+                    <select value={autoSupportConfig.supportType} onChange={() => {}} className="hidden">
                       <optgroup label="Weight">
                         <option value="light">Light (thin tips, easy removal)</option>
                         <option value="medium">Medium (balanced strength/marks)</option>
@@ -2051,34 +2117,9 @@ export default function StlImport() {
                         <option value="double-neck">Double Neck (predictable)</option>
                       </optgroup>
                     </select>
-                    <div className="space-y-1.5">
-                      <label className="flex items-center justify-between text-[10px]">
-                        <span className="text-gray-500">Overhang Angle</span>
-                        <div className="flex items-center gap-1">
-                          <input type="number" value={autoSupportConfig.overhangAngle} min={10} max={80} step={5}
-                            onChange={e => setAutoSupportConfig(p => ({ ...p, overhangAngle: +e.target.value }))}
-                            className="w-12 bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-[10px] text-gray-200 text-right" />
-                          <span className="text-gray-600 text-[9px]">deg</span>
-                        </div>
-                      </label>
-                      <label className="flex items-center justify-between text-[10px]">
-                        <span className="text-gray-500">Density</span>
-                        <input type="range" min={0.1} max={1} step={0.1} value={autoSupportConfig.density}
-                          onChange={e => setAutoSupportConfig(p => ({ ...p, density: +e.target.value }))}
-                          className="w-20 h-1 accent-green-500" />
-                      </label>
-                      <label className="flex items-center justify-between text-[10px]">
-                        <span className="text-gray-500">Tip Size</span>
-                        <div className="flex items-center gap-1">
-                          <input type="number" value={autoSupportConfig.tipDiameter} min={0.1} max={2} step={0.1}
-                            onChange={e => setAutoSupportConfig(p => ({ ...p, tipDiameter: +e.target.value }))}
-                            className="w-12 bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-[10px] text-gray-200 text-right" />
-                          <span className="text-gray-600 text-[9px]">mm</span>
-                        </div>
-                      </label>
-                    </div>
 
-                    {/* Support Exposure */}
+                    {/* ── Legacy controls (hidden, replaced by picker above) ── */}
+                    <div className="hidden">
                     <label className="flex items-center justify-between text-[10px] mt-1">
                       <span className="text-gray-500">Support Exposure</span>
                       <div className="flex items-center gap-1">
@@ -2207,6 +2248,8 @@ export default function StlImport() {
                         </div>
                       )}
                     </div>
+
+                    </div>{/* end hidden legacy controls */}
 
                     {/* Prep Tools */}
                     <div className="mt-3 pt-2 border-t border-gray-700/50 flex gap-1">

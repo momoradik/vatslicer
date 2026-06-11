@@ -221,12 +221,12 @@ export const supportV2Api = {
       manualSupportMeshes: Record<string, string>  // ID → base64 STL of real generated mesh per manual support
       supports: AdvancedSupportData[]; crossBraces: CrossBraceData[]
     }>('/support-v2', fd, {
-      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120000,
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 300000,
     }).then(r => r.data),
   downloadMesh: (fd: FormData) =>
     http.post('/support-v2/mesh', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      responseType: 'blob', timeout: 120000,
+      responseType: 'blob', timeout: 300000,
     }).then(r => r.data as Blob),
   /** Compute a single support in real time (same engine as auto, for ONE tip) */
   computeSingle: (fd: FormData) =>
@@ -245,13 +245,13 @@ export const supportV2Api = {
   getMeshBuffer: (fd: FormData) =>
     http.post('/support-v2/mesh', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      responseType: 'arraybuffer', timeout: 120000,
+      responseType: 'arraybuffer', timeout: 300000,
     }).then(r => r.data as ArrayBuffer),
   /** Export model + supports as ZIP (model.stl + supports.stl + metadata) */
   exportCombined: (fd: FormData) =>
     http.post('/support-v2/export-combined', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      responseType: 'blob', timeout: 120000,
+      responseType: 'blob', timeout: 300000,
     }).then(r => r.data as Blob),
   /** Auto-orient: find best orientation for minimal supports */
   autoOrient: (fd: FormData) =>
