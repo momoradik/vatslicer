@@ -53,7 +53,7 @@ public sealed class SupportV2Controller : ControllerBase
         // New V2 features from visual picker
         [FromForm] bool enableForking = false,
         [FromForm] int maxTipsPerFork = 4,
-        [FromForm] float forkClusterRadiusMm = 4f,
+        [FromForm] float forkClusterRadiusMm = 0f,
         [FromForm] bool enableLineContact = false,
         [FromForm] float lineContactSpacingMm = 0f,
         [FromForm] bool enableFaceContact = false,
