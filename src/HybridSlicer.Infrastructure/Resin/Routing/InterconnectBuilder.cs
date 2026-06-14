@@ -68,12 +68,14 @@ public static class InterconnectBuilder
     /// <param name="pillarRadii">Radius of each pillar at its base.</param>
     /// <param name="bvh">Mesh BVH for collision checking.</param>
     /// <param name="config">Configuration.</param>
+    /// <param name="pillarPaths">Optional: full waypoint paths per pillar for centerline interpolation.</param>
     public static List<Interconnection> Build(
         List<Vector3> pillarBases,
         List<float> pillarTops,
         List<float> pillarRadii,
         AabbBvh? bvh,
-        InterconnectConfig config)
+        InterconnectConfig config,
+        List<List<PillarRouter.Waypoint>>? pillarPaths = null)
     {
         var connections = new List<Interconnection>();
         int n = pillarBases.Count;
@@ -110,20 +112,12 @@ public static class InterconnectBuilder
             // If overlap is too small for interval-based placement, still place ONE brace at midpoint
             if (maxZ <= minZ)
             {
-                // Try placing a single brace at the average of the two tops
                 float midZ = (pillarTops[a] + pillarTops[b]) / 2f;
                 if (midZ > 1f && connections.Count < maxTotalBraces)
                 {
-                    var ptA2 = new Vector3(pillarBases[a].X, pillarBases[a].Y, midZ);
-                    var ptB2 = new Vector3(pillarBases[b].X, pillarBases[b].Y, midZ);
-                    bool clear2 = true;
-                    if (bvh != null)
-                    {
-                        var dir2 = Vector3.Normalize(ptB2 - ptA2);
-                        float len2 = Vector3.Distance(ptA2, ptB2);
-                        if (len2 > 0.1f) { float cl = bvh.BeamCast(ptA2, dir2, config.StrutRadiusMm, 8, len2); clear2 = cl >= len2 - 0.1f; }
-                    }
-                    if (clear2)
+                    var (ptA2, ptB2, _, _) = ComputeBraceEndpoints(
+                        a, midZ, b, midZ, pillarBases, pillarRadii, pillarPaths);
+                    if (IsStrutClear(ptA2, ptB2, config.StrutRadiusMm, bvh))
                     {
                         connections.Add(new Interconnection { PillarA = a, PillarB = b, PointA = ptA2, PointB = ptB2, Radius = config.StrutRadiusMm, Type = "horizontal" });
                         connectionCount[a]++; connectionCount[b]++;
@@ -142,32 +136,14 @@ public static class InterconnectBuilder
             for (float z = minZ + config.ConnectionIntervalMm; z < maxZ && pairConnections < pairMax;
                  z += config.ConnectionIntervalMm)
             {
-                var ptA = new Vector3(pillarBases[a].X, pillarBases[a].Y, z);
-                Vector3 ptB;
+                float zB = alternate
+                    ? Math.Min(z + config.ConnectionIntervalMm * 0.4f, maxZ)
+                    : z;
 
-                if (alternate)
-                {
-                    // Diagonal: offset Z on one side
-                    float z2 = Math.Min(z + config.ConnectionIntervalMm * 0.4f, maxZ);
-                    ptB = new Vector3(pillarBases[b].X, pillarBases[b].Y, z2);
-                }
-                else
-                {
-                    // Horizontal: same Z
-                    ptB = new Vector3(pillarBases[b].X, pillarBases[b].Y, z);
-                }
+                var (ptA, ptB, jrA, jrB) = ComputeBraceEndpoints(
+                    a, z, b, zB, pillarBases, pillarRadii, pillarPaths);
 
-                // Collision check: verify the strut doesn't pass through the mesh
-                bool clear = true;
-                if (bvh != null)
-                {
-                    var dir = Vector3.Normalize(ptB - ptA);
-                    float len = Vector3.Distance(ptA, ptB);
-                    float clearance = bvh.BeamCast(ptA, dir, config.StrutRadiusMm, 8, len);
-                    clear = clearance >= len - 0.1f;
-                }
-
-                if (clear)
+                if (IsStrutClear(ptA, ptB, config.StrutRadiusMm, bvh))
                 {
                     connections.Add(new Interconnection
                     {
@@ -215,20 +191,10 @@ public static class InterconnectBuilder
                 {
                     float midZ = (Math.Max(pillarBases[i].Z, pillarBases[bestJ].Z) +
                                   Math.Min(pillarTops[i], pillarTops[bestJ])) / 2f;
-                    var ptA = new Vector3(pillarBases[i].X, pillarBases[i].Y, midZ);
-                    var ptB = new Vector3(pillarBases[bestJ].X, pillarBases[bestJ].Y, midZ);
+                    var (ptA, ptB, _, _) = ComputeBraceEndpoints(
+                        i, midZ, bestJ, midZ, pillarBases, pillarRadii, pillarPaths);
 
-                    // Collision check even for forced connections
-                    bool clear = true;
-                    if (bvh != null)
-                    {
-                        var dir = Vector3.Normalize(ptB - ptA);
-                        float len = Vector3.Distance(ptA, ptB);
-                        float clearance = bvh.BeamCast(ptA, dir, config.StrutRadiusMm, 8, len);
-                        clear = clearance >= len - 0.1f;
-                    }
-
-                    if (clear)
+                    if (IsStrutClear(ptA, ptB, config.StrutRadiusMm, bvh))
                     {
                         connections.Add(new Interconnection
                         {
@@ -272,7 +238,8 @@ public static class InterconnectBuilder
         List<float> pillarTops,
         List<float> pillarRadii,
         AabbBvh? bvh,
-        InterconnectConfig config)
+        InterconnectConfig config,
+        List<List<PillarRouter.Waypoint>>? pillarPaths = null)
     {
         var connections = new List<Interconnection>();
         int n = pillarBases.Count;
@@ -331,8 +298,8 @@ public static class InterconnectBuilder
                 float midZ = (pillarTops[ri] + pillarTops[rj]) / 2f;
                 if (midZ > 1f)
                 {
-                    var ptA = new Vector3(pillarBases[ri].X, pillarBases[ri].Y, midZ);
-                    var ptB = new Vector3(pillarBases[rj].X, pillarBases[rj].Y, midZ);
+                    var (ptA, ptB, _, _) = ComputeBraceEndpoints(
+                        ri, midZ, rj, midZ, pillarBases, pillarRadii, pillarPaths);
                     if (IsStrutClear(ptA, ptB, config.StrutRadiusMm, bvh))
                     {
                         connections.Add(new Interconnection { PillarA = ri, PillarB = rj, PointA = ptA, PointB = ptB, Radius = config.StrutRadiusMm, Type = "horizontal" });
@@ -347,8 +314,8 @@ public static class InterconnectBuilder
 
             for (float z = minZ + config.ConnectionIntervalMm; z < maxZ && placed < pairMax; z += config.ConnectionIntervalMm)
             {
-                var ptA = new Vector3(pillarBases[ri].X, pillarBases[ri].Y, z);
-                var ptB = new Vector3(pillarBases[rj].X, pillarBases[rj].Y, z);
+                var (ptA, ptB, _, _) = ComputeBraceEndpoints(
+                    ri, z, rj, z, pillarBases, pillarRadii, pillarPaths);
 
                 if (IsStrutClear(ptA, ptB, config.StrutRadiusMm, bvh))
                 {
@@ -362,6 +329,82 @@ public static class InterconnectBuilder
             tallIndices.Count, triangles.Count, filteredEdges.Count, connections.Count);
 
         return connections;
+    }
+
+    /// <summary>
+    /// Get the pillar centerline position and radius at a given Z height.
+    /// If pillar paths are available, interpolates between waypoints.
+    /// Otherwise falls back to the base XY position (vertical assumption).
+    /// </summary>
+    private static (Vector3 center, float radius) GetPillarCenterAndRadiusAtZ(int pillarIdx, float z,
+        List<Vector3> pillarBases, List<float> pillarRadii, List<List<PillarRouter.Waypoint>>? pillarPaths)
+    {
+        float defaultR = pillarIdx < pillarRadii.Count ? pillarRadii[pillarIdx] : 0.5f;
+
+        if (pillarPaths == null || pillarIdx >= pillarPaths.Count || pillarPaths[pillarIdx].Count < 2)
+            return (new Vector3(pillarBases[pillarIdx].X, pillarBases[pillarIdx].Y, z), defaultR);
+
+        var path = pillarPaths[pillarIdx];
+        for (int i = 0; i < path.Count - 1; i++)
+        {
+            float z1 = path[i].Position.Z;
+            float z2 = path[i + 1].Position.Z;
+            float zHi = Math.Max(z1, z2);
+            float zLo = Math.Min(z1, z2);
+
+            if (z >= zLo - 0.01f && z <= zHi + 0.01f)
+            {
+                float range = z1 - z2;
+                if (MathF.Abs(range) < 0.001f)
+                    return (new Vector3(path[i].Position.X, path[i].Position.Y, z), path[i].Radius);
+
+                float t = (z1 - z) / range;
+                t = Math.Clamp(t, 0f, 1f);
+                float x = path[i].Position.X + (path[i + 1].Position.X - path[i].Position.X) * t;
+                float y = path[i].Position.Y + (path[i + 1].Position.Y - path[i].Position.Y) * t;
+                float r = path[i].Radius + (path[i + 1].Radius - path[i].Radius) * t;
+                return (new Vector3(x, y, z), r);
+            }
+        }
+
+        if (z > path[0].Position.Z)
+            return (new Vector3(path[0].Position.X, path[0].Position.Y, z), path[0].Radius);
+        var last = path[^1];
+        return (new Vector3(last.Position.X, last.Position.Y, z), last.Radius);
+    }
+
+    /// <summary>
+    /// Compute surface-snapped brace endpoints: each end sits on the pillar's outer surface
+    /// (not at the centerline), so the brace visually connects flush to the pillar wall.
+    /// Also returns a junction sphere radius for smooth blending at each connection.
+    /// </summary>
+    private static (Vector3 ptA, Vector3 ptB, float junctionRadiusA, float junctionRadiusB)
+        ComputeBraceEndpoints(int a, float zA, int b, float zB,
+            List<Vector3> pillarBases, List<float> pillarRadii,
+            List<List<PillarRouter.Waypoint>>? pillarPaths)
+    {
+        var (centerA, radiusA) = GetPillarCenterAndRadiusAtZ(a, zA, pillarBases, pillarRadii, pillarPaths);
+        var (centerB, radiusB) = GetPillarCenterAndRadiusAtZ(b, zB, pillarBases, pillarRadii, pillarPaths);
+
+        // Direction from A to B (in XY, ignoring Z for surface push)
+        float dx = centerB.X - centerA.X;
+        float dy = centerB.Y - centerA.Y;
+        float xyDist = MathF.Sqrt(dx * dx + dy * dy);
+
+        if (xyDist < 0.01f)
+        {
+            // Pillars are coaxial — can't push outward, use centers
+            return (centerA, centerB, radiusA, radiusB);
+        }
+
+        float nx = dx / xyDist;
+        float ny = dy / xyDist;
+
+        // Push A outward toward B by A's radius, push B outward toward A by B's radius
+        var ptA = new Vector3(centerA.X + nx * radiusA, centerA.Y + ny * radiusA, zA);
+        var ptB = new Vector3(centerB.X - nx * radiusB, centerB.Y - ny * radiusB, zB);
+
+        return (ptA, ptB, radiusA, radiusB);
     }
 
     private static bool IsStrutClear(Vector3 a, Vector3 b, float radius, AabbBvh? bvh)

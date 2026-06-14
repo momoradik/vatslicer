@@ -83,6 +83,12 @@ public static class SupportEngineV2
         /// <summary>Max branch angle from vertical for tree merging (degrees).</summary>
         public float TreeBranchAngleDeg { get; init; } = 35f;
 
+        // Fillets (smooth blends at joints)
+        /// <summary>Enable smooth fillet blends at support joints (angle changes, fork/tree junctions, tip contact).</summary>
+        public bool EnableFillets { get; init; } = true;
+        /// <summary>Number of arc subdivisions per fillet corner (more = smoother).</summary>
+        public int FilletSubdivisions { get; init; } = 4;
+
         // Hollow supports
         /// <summary>Enable hollow shell geometry for tall pillars.</summary>
         public bool EnableHollowSupports { get; init; } = true;
@@ -182,6 +188,12 @@ public static class SupportEngineV2
         public RaftMode RaftMode { get; init; } = RaftMode.MiniRafts;
         /// <summary>Full-plate raft pattern (grid/hex).</summary>
         public LatticeBase.LatticePattern FullPlateRaftPattern { get; init; } = LatticeBase.LatticePattern.Grid;
+        /// <summary>Wall height above base plate (mm). Supports land on top. Typical: 1-2mm.</summary>
+        public float FullPlateRaftHeightMm { get; init; } = 1.5f;
+        /// <summary>Wall thickness for grid/hex walls (mm).</summary>
+        public float FullPlateRaftWallThicknessMm { get; init; } = 0.4f;
+        /// <summary>Cell opening size — grid cell width or hex side length (mm).</summary>
+        public float FullPlateRaftCellSizeMm { get; init; } = 3.0f;
 
         public int Seed { get; init; } = 42;
 
@@ -573,9 +585,14 @@ public static class SupportEngineV2
         }
 
         // ── Step 4: Route pillars ────────────────────────────────────────
+        // When FullPlate raft is active, supports land on top of the wall structure
+        float effectiveBaseZ = config.RaftMode == RaftMode.FullPlate
+            ? config.RaftThicknessMm + config.FullPlateRaftHeightMm
+            : 0f;
+
         var routingConfig = new PillarRouter.RoutingConfig
         {
-            BaseZ = 0,
+            BaseZ = effectiveBaseZ,
             PillarRadiusMm = config.PillarRadiusMm,
             BaseRadiusMm = config.BaseRadiusMm,
             BaseHeightMm = config.BaseHeightMm,
@@ -982,6 +999,46 @@ public static class SupportEngineV2
         Serilog.Log.Information("V2 Emission gate: {Before} routes → {After} with complete load path (uncoverable manual: {Uncov})",
             routes.Count, validRoutes.Count, uncoverableManualIds.Count);
 
+        // ── Floater safety net: verify every route's geometry actually terminates ──
+        // A route may claim ReachesGround but its path waypoints might not extend
+        // to Z≈0 (e.g., after escalation ladder Y-junction merging). Drop any route
+        // whose lowest point is above the plate AND has no anchor termination on
+        // the part surface. Re-flag dropped supports as uncoverable so the coverage
+        // check sees them as unsupported overhang (not silently hidden).
+        {
+            int droppedFloaters = 0;
+            var verifiedRoutes = new List<(string id, PillarRouter.PillarRoute route)>(validRoutes.Count);
+            foreach (var (rid, rroute) in validRoutes)
+            {
+                float lowestZ = rroute.Path.Min(wp => wp.Position.Z);
+                bool geometryGrounded = lowestZ < 0.5f;
+                bool hasAnchorWp = rroute.Path.Any(wp => wp.Type == "anchor");
+                bool isAnchored = rroute.AnchorPoint.HasValue || hasAnchorWp;
+
+                if (geometryGrounded || isAnchored)
+                {
+                    verifiedRoutes.Add((rid, rroute));
+                }
+                else
+                {
+                    // Floater detected — drop it and re-flag as uncoverable
+                    droppedFloaters++;
+                    Serilog.Log.Warning("Floater dropped: {Id} lowestZ={Z:F2} reachesGround={RG} anchor={A} pathLen={P}",
+                        rid, lowestZ, rroute.ReachesGround, rroute.AnchorPoint.HasValue, rroute.Path.Count);
+                    // Re-flag: if it was a manual support, add to uncoverable list
+                    if (manualPointIds.Contains(rid) && !uncoverableManualIds.Contains(rid))
+                        uncoverableManualIds.Add(rid);
+                }
+            }
+            if (droppedFloaters > 0)
+            {
+                Serilog.Log.Warning("Floater safety net: dropped {Count} floating supports — these overhang regions are now flagged uncovered",
+                    droppedFloaters);
+                validRoutes = verifiedRoutes;
+                validIds = new HashSet<string>(validRoutes.Select(r => r.id));
+            }
+        }
+
         // Generate pinhead meshes ONLY for supports that passed the emission gate.
         // Previously this ran before the gate, causing floating pinhead geometry
         // for supports whose routes were rejected.
@@ -1006,11 +1063,40 @@ public static class SupportEngineV2
 
             if (Vector3.Distance(pinhead.ContactPoint, routeStart) > 0.1f)
             {
-                var phMesh = SupportMesher.OrientedFrustum(
-                    pinhead.ContactPoint, routeStart,
-                    sizing.TipRadius, sizing.PillarRadius, meshSides);
-                meshParts.Add(phMesh);
-                if (isManualSupport) manualMeshParts[id].Add(phMesh);
+                if (config.EnableFillets)
+                {
+                    // Tip cove: smooth flare at the contact point
+                    var coveWps = FilletBuilder.GenerateTipCove(
+                        pinhead.ContactPoint, routeStart, sizing.TipRadius, sizing.PillarRadius,
+                        subdivisions: Math.Max(2, config.FilletSubdivisions / 2));
+
+                    // Build chain: contact → cove waypoints → routeStart
+                    var tipChain = new List<Vector3> { pinhead.ContactPoint };
+                    var tipRadii = new List<float> { sizing.TipRadius };
+                    foreach (var cw in coveWps)
+                    {
+                        tipChain.Add(cw.Position);
+                        tipRadii.Add(cw.Radius);
+                    }
+                    tipChain.Add(routeStart);
+                    tipRadii.Add(sizing.PillarRadius);
+
+                    for (int ti = 0; ti < tipChain.Count - 1; ti++)
+                    {
+                        var seg = SupportMesher.OrientedFrustum(
+                            tipChain[ti], tipChain[ti + 1], tipRadii[ti], tipRadii[ti + 1], meshSides);
+                        meshParts.Add(seg);
+                        if (isManualSupport) manualMeshParts[id].Add(seg);
+                    }
+                }
+                else
+                {
+                    var phMesh = SupportMesher.OrientedFrustum(
+                        pinhead.ContactPoint, routeStart,
+                        sizing.TipRadius, sizing.PillarRadius, meshSides);
+                    meshParts.Add(phMesh);
+                    if (isManualSupport) manualMeshParts[id].Add(phMesh);
+                }
             }
         }
 
@@ -1019,12 +1105,17 @@ public static class SupportEngineV2
             bool isManualRoute = manualPointIds.Contains(id);
             if (isManualRoute && !manualMeshParts.ContainsKey(id)) manualMeshParts[id] = new();
 
-            float totalPillarHeight = route.Path[0].Position.Z - route.Path[^1].Position.Z;
+            // Apply fillet smoothing to the route path before meshing
+            var meshPath = config.EnableFillets
+                ? FilletBuilder.FilletRoute(route.Path, config.FilletSubdivisions)
+                : route.Path;
 
-            for (int i = 0; i < route.Path.Count - 1; i++)
+            float totalPillarHeight = meshPath[0].Position.Z - meshPath[^1].Position.Z;
+
+            for (int i = 0; i < meshPath.Count - 1; i++)
             {
-                var wp1 = route.Path[i];
-                var wp2 = route.Path[i + 1];
+                var wp1 = meshPath[i];
+                var wp2 = meshPath[i + 1];
                 float segHeight = Vector3.Distance(wp1.Position, wp2.Position);
                 IndexedTriangleSet segMesh;
 
@@ -1057,9 +1148,10 @@ public static class SupportEngineV2
                 meshParts.Add(segMesh);
                 if (isManualRoute) manualMeshParts[id].Add(segMesh);
 
-                // Junction sphere at each waypoint (full radius to avoid visual gaps)
-                // Fork/tree junction nodes get larger spheres for visual distinction
-                if (i > 0)
+                // Junction sphere at each waypoint — only at original waypoints (not fillet subdivisions).
+                // With fillets ON, the arc segments already smooth the transition; junction spheres
+                // are only needed at widely-spaced original waypoints to prevent visual gaps.
+                if (i > 0 && !config.EnableFillets)
                 {
                     float junctionR = wp1.Radius;
                     if (wp1.Type == "bridge" || wp2.Type == "bridge")
@@ -1090,11 +1182,8 @@ public static class SupportEngineV2
             }
         }
 
-        foreach (var conn in interconnections)
-        {
-            var strut = SupportMesher.OrientedFrustum(conn.PointA, conn.PointB, conn.Radius, conn.Radius, braceSides);
-            meshParts.Add(strut);
-        }
+        // NOTE: interconnection geometry is added AFTER Step 7c builds them (see below).
+        // The `interconnections` list is empty here — braces are built post-validation.
 
         Serilog.Log.Information("DIAG-RAFT-SUMMARY: raftCount={Count} totalRaftTris={Tris} | TEST1: {Pass}",
             _raftCount, _raftTotalTris, _raftTotalTris > 0 ? "PASS" : "FAIL");
@@ -1157,34 +1246,23 @@ public static class SupportEngineV2
                 float cy = (fpMinY + fpMaxY) / 2f;
                 float raftTopR = MathF.Max(raftW, raftD) / 2f;
 
-                var fullRaft = LatticeBase.Generate(
-                    new Vector3(cx, cy, 0), raftTopR, raftTopR,
-                    config.RaftThicknessMm,
-                    config.FullPlateRaftPattern,
-                    config.LatticeStrutDiameterMm, config.LatticeSpacingMm, 8);
+                var raftPattern = config.FullPlateRaftPattern == LatticeBase.LatticePattern.Honeycomb
+                    ? FullPlateRaft.Pattern.Hex : FullPlateRaft.Pattern.Grid;
+                var fullRaft = FullPlateRaft.Generate(
+                    fpMinX, fpMinY, fpMaxX, fpMaxY,
+                    baseThickness: config.RaftThicknessMm,
+                    wallHeight: config.FullPlateRaftHeightMm,
+                    wallThickness: config.FullPlateRaftWallThicknessMm,
+                    cellSize: config.FullPlateRaftCellSizeMm,
+                    pattern: raftPattern);
                 meshParts.Add(fullRaft);
 
-                Serilog.Log.Information("V2 FullPlateRaft: footprint=({MinX:F1},{MinY:F1})→({MaxX:F1},{MaxY:F1}) size={W:F1}x{D:F1}mm plateRouted={N} tris={Tris}",
-                    fpMinX, fpMinY, fpMaxX, fpMaxY, raftW, raftD, plateRouted, fullRaft.FaceCount);
+                Serilog.Log.Information("V2 FullPlateRaft: footprint=({MinX:F1},{MinY:F1})→({MaxX:F1},{MaxY:F1}) size={W:F1}x{D:F1}mm plateRouted={N} tris={Tris} pattern={Pat}",
+                    fpMinX, fpMinY, fpMaxX, fpMaxY, raftW, raftD, plateRouted, fullRaft.FaceCount, raftPattern);
             }
         }
 
-        // Skip vertex welding for speed — meshes are already clean individually.
-        // Welding is only needed for watertight export, not for preview/slicing.
-        var combined = new IndexedTriangleSet();
-        foreach (var part in meshParts) combined.Merge(part);
-        var mergeResult = new MeshMerger.MergeResult
-        {
-            Mesh = combined,
-            OriginalVertices = combined.VertexCount,
-            WeldedVertices = combined.VertexCount,
-            OriginalFaces = combined.FaceCount,
-            FinalFaces = combined.FaceCount,
-            DegenerateFacesRemoved = 0,
-            NonManifoldEdges = 0, // skip expensive check
-        };
-
-        Serilog.Log.Information("V2 Step 6 Meshing: {Ms}ms ({Verts}v {Faces}f)", stepSw.ElapsedMilliseconds, mergeResult.WeldedVertices, mergeResult.FinalFaces);
+        Serilog.Log.Information("V2 Step 6 Meshing (pre-brace): {Ms}ms ({Parts} parts)", stepSw.ElapsedMilliseconds, meshParts.Count);
         stepSw.Restart();
 
         // ── Step 7: Validate (collision + structural) ──────────────────
@@ -1353,12 +1431,14 @@ public static class SupportEngineV2
                                     if (wp.Position.Z <= mergeZ) newPath.Add(wp);
                                 }
 
-                                if (newPath.Count >= 2)
+                                if (newPath.Count >= 2 && (neighborReachesGround || routes[bestMergeIdx].route.AnchorPoint.HasValue))
                                 {
                                     routes[ri] = (oldRoute.id, new PillarRouter.PillarRoute
                                     {
                                         Path = newPath,
                                         ReachesGround = neighborReachesGround,
+                                        AnchorPoint = routes[bestMergeIdx].route.AnchorPoint,
+                                        AnchorNormal = routes[bestMergeIdx].route.AnchorNormal,
                                         TotalLength = 0, // recalculated later
                                     });
                                     fixed2 = true; recovered++;
@@ -1381,7 +1461,7 @@ public static class SupportEngineV2
                             };
                             var routeStart = ph.JunctionPoint.Z > 0.1f ? ph.JunctionPoint : ph.ContactPoint;
                             var newRoute = PillarRouter.Route(routeStart, newRadius, bvh, biggerCfg);
-                            if (newRoute.Path.Count > 1)
+                            if (newRoute.Path.Count > 1 && (newRoute.ReachesGround || newRoute.AnchorPoint.HasValue))
                             {
                                 routes[ri] = (oldRoute.id, newRoute);
                                 fixed2 = true; recovered++;
@@ -1411,25 +1491,22 @@ public static class SupportEngineV2
 
         // ── Step 7c: Build interconnections (AFTER all route modifications) ──
         // Built here instead of Step 5 so cross-braces reference FINAL pillar positions.
-        if (config.EnableInterconnections && routes.Count >= 2)
+        if (config.EnableInterconnections && validRoutes.Count >= 2)
         {
-            // pillarBases = lowest waypoint position (XY used for distance, Z for bottom extent)
-            // pillarTops = HIGHEST Z across ALL data sources: route waypoints + pinhead contact point.
-            // The pinhead contact Z is critical — the route path may start below the contact point
-            // (pinhead junction is offset downward from contact). Without the contact Z, pillarTops
-            // can be near 0 even for tall supports, causing the interconnect builder to skip all pairs.
-            var pillarBases = routes.Select(r => {
+            // Use validRoutes (not routes) so braces only connect supports that have mesh geometry.
+            // Using routes[] would create braces referencing pillars that failed the emission gate
+            // and have no mesh — causing floating brace struts.
+            var pillarBases = validRoutes.Select(r => {
                 var lowest = r.route.Path.OrderBy(wp => wp.Position.Z).First();
                 return lowest.Position;
             }).ToList();
-            var pillarTops = routes.Select(r => {
+            var pillarTops = validRoutes.Select(r => {
                 float routeMaxZ = r.route.Path.Max(wp => wp.Position.Z);
-                // Also check the pinhead contact point Z (the actual model surface)
                 if (pinheadLookup.TryGetValue(r.id, out var ph) && ph.IsValid)
                     routeMaxZ = Math.Max(routeMaxZ, ph.ContactPoint.Z);
                 return routeMaxZ;
             }).ToList();
-            var pillarRadii = routes.Select(r => r.route.Path.First().Radius).ToList();
+            var pillarRadii = validRoutes.Select(r => r.route.Path.First().Radius).ToList();
 
             // Log ALL pillar top Zs to diagnose brace failures
             var topMin = pillarTops.Count > 0 ? pillarTops.Min() : 0f;
@@ -1453,18 +1530,21 @@ public static class SupportEngineV2
                 ReinforcementStartHeightMm = config.ReinforcementStartHeightMm,
             };
 
+            // Pass full route paths so braces connect to actual pillar centerlines (not base XY)
+            var pillarPaths = validRoutes.Select(r => r.route.Path).ToList();
+
             if (config.ReinforcementMode == ReinforcementMode.Triangular || config.ReinforcementMode == ReinforcementMode.Global)
-                interconnections = InterconnectBuilder.BuildTriangulated(pillarBases, pillarTops, pillarRadii, bvh, icConfig);
+                interconnections = InterconnectBuilder.BuildTriangulated(pillarBases, pillarTops, pillarRadii, bvh, icConfig, pillarPaths);
             else
-                interconnections = InterconnectBuilder.Build(pillarBases, pillarTops, pillarRadii, bvh, icConfig);
+                interconnections = InterconnectBuilder.Build(pillarBases, pillarTops, pillarRadii, bvh, icConfig, pillarPaths);
 
             // Test C: do tree-merged routes also get cross-braces? (stacking check)
             if (config.EnableTreeSupports && treeMergeCount > 0 && interconnections.Count > 0)
             {
                 // Find which route indices have bridges (= tree-merged)
                 var mergedIndices = new HashSet<int>();
-                for (int ri = 0; ri < routes.Count; ri++)
-                    if (routes[ri].route.Path.Any(wp => wp.Type == "bridge"))
+                for (int ri = 0; ri < validRoutes.Count; ri++)
+                    if (validRoutes[ri].route.Path.Any(wp => wp.Type == "bridge"))
                         mergedIndices.Add(ri);
 
                 int bracesOnMerged = interconnections.Count(c => mergedIndices.Contains(c.PillarA) || mergedIndices.Contains(c.PillarB));
@@ -1475,6 +1555,37 @@ public static class SupportEngineV2
         }
         Serilog.Log.Information("V2 Step 7c Interconnect: {Ms}ms ({Count} connections)", stepSw.ElapsedMilliseconds, interconnections.Count);
         stepSw.Restart();
+
+        // ── Step 7d: Add interconnection geometry to mesh ────────────────
+        // Now that interconnections are built (Step 7c), generate their frustum
+        // geometry and append to meshParts before the final merge.
+        // Each brace strut gets junction spheres at both endpoints for a smooth
+        // blend where it meets the pillar surface.
+        float braceJR = config.StrutRadiusMm * 1.2f;
+        foreach (var conn in interconnections)
+        {
+            var strut = SupportMesher.OrientedFrustum(conn.PointA, conn.PointB, conn.Radius, conn.Radius, braceSides);
+            meshParts.Add(strut);
+            // Junction spheres at each connection point for smooth blend
+            meshParts.Add(SupportMesher.OrientedSphere(conn.PointA, braceJR, 3, braceSides));
+            meshParts.Add(SupportMesher.OrientedSphere(conn.PointB, braceJR, 3, braceSides));
+        }
+
+        // Final mesh merge
+        var combined = new IndexedTriangleSet();
+        foreach (var part in meshParts) combined.Merge(part);
+        var mergeResult = new MeshMerger.MergeResult
+        {
+            Mesh = combined,
+            OriginalVertices = combined.VertexCount,
+            WeldedVertices = combined.VertexCount,
+            OriginalFaces = combined.FaceCount,
+            FinalFaces = combined.FaceCount,
+            DegenerateFacesRemoved = 0,
+            NonManifoldEdges = 0,
+        };
+        Serilog.Log.Information("V2 Step 7d Mesh merge: {Verts}v {Faces}f (incl {Braces} brace struts)",
+            mergeResult.WeldedVertices, mergeResult.FinalFaces, interconnections.Count);
 
         // ── Step 8: Prepare slice elements ───────────────────────────────
         var sliceElements = AnalyticalSupportSlicer.ExtractElements(
@@ -1601,9 +1712,11 @@ public static class SupportEngineV2
         }
 
         // ── Step 2: Pillar routing (same as auto Step 4) ──
+        float effectiveBaseZ = config.RaftMode == RaftMode.FullPlate
+            ? config.RaftThicknessMm + config.FullPlateRaftHeightMm : 0f;
         var routingConfig = new PillarRouter.RoutingConfig
         {
-            BaseZ = 0,
+            BaseZ = effectiveBaseZ,
             PillarRadiusMm = config.PillarRadiusMm,
             BaseRadiusMm = config.BaseRadiusMm,
             BaseHeightMm = config.BaseHeightMm,

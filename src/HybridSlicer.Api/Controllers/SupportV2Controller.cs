@@ -63,6 +63,10 @@ public sealed class SupportV2Controller : ControllerBase
         [FromForm] string fullPlateRaftPattern = "Grid",
         [FromForm] bool enableDrainageAwareSupports = false,
         [FromForm] bool enableForceDrivenPlacement = false,
+        [FromForm] bool enableFillets = true,
+        [FromForm] float fullPlateRaftHeightMm = 1.5f,
+        [FromForm] float fullPlateRaftWallThicknessMm = 0.4f,
+        [FromForm] float fullPlateRaftCellSizeMm = 3.0f,
         // User transforms are baked into STL vertices by the frontend — no rotation/scale params
         CancellationToken ct = default)
     {
@@ -119,10 +123,12 @@ public sealed class SupportV2Controller : ControllerBase
         if (Enum.TryParse<HybridSlicer.Infrastructure.Resin.RaftMode>(raftMode, true, out var rmE))
             raftModeEnum = rmE;
 
-        // Parse full-plate raft pattern
+        // Parse full-plate raft pattern — accept both "Honeycomb" (enum name) and "Hex" (shorthand)
         var fpRaftPattern = LatticeBase.LatticePattern.Grid;
         if (Enum.TryParse<LatticeBase.LatticePattern>(fullPlateRaftPattern, true, out var fpRp))
             fpRaftPattern = fpRp;
+        else if (string.Equals(fullPlateRaftPattern, "Hex", StringComparison.OrdinalIgnoreCase))
+            fpRaftPattern = LatticeBase.LatticePattern.Honeycomb;
 
         var result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig
         {
@@ -156,8 +162,12 @@ public sealed class SupportV2Controller : ControllerBase
             ReinforcementMode = reinfMode,
             RaftMode = raftModeEnum,
             FullPlateRaftPattern = fpRaftPattern,
+            FullPlateRaftHeightMm = fullPlateRaftHeightMm,
+            FullPlateRaftWallThicknessMm = fullPlateRaftWallThicknessMm,
+            FullPlateRaftCellSizeMm = fullPlateRaftCellSizeMm,
             EnableDrainageAwareSupports = enableDrainageAwareSupports,
             EnableForceDrivenPlacement = enableForceDrivenPlacement,
+            EnableFillets = enableFillets,
         });
 
         return Ok(new
