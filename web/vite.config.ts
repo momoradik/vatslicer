@@ -10,6 +10,8 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:5555',
         changeOrigin: true,
+        timeout: 600000,     // 10 min — support generation on large models can take minutes
+        proxyTimeout: 600000,
       },
       '/hubs': {
         target: 'http://localhost:5555',

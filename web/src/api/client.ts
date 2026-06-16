@@ -221,7 +221,7 @@ export const supportV2Api = {
       manualSupportMeshes: Record<string, string>  // ID → base64 STL of real generated mesh per manual support
       supports: AdvancedSupportData[]; crossBraces: CrossBraceData[]
     }>('/support-v2', fd, {
-      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 300000,
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 600000, // 10 min for large models
     }).then(r => r.data),
   downloadMesh: (fd: FormData) =>
     http.post('/support-v2/mesh', fd, {

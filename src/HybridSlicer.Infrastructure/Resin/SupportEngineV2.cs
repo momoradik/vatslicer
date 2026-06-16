@@ -737,54 +737,44 @@ public static class SupportEngineV2
             }
         }
 
-        foreach (var (id, pinhead) in pinheads)
-        {
-            if (!pinhead.IsValid) continue;
-            if (forkedPinheadIds.Contains(id)) continue; // already routed via fork
+        // Build point lookup dictionary for O(1) access (replaces O(n) FirstOrDefault)
+        var pointLookup = pointResult.Points.ToDictionary(p => p.Id);
 
-            // Auto-scale pillar radius based on support height — ALL supports, not just heavy
+        // Step 4 routing: parallelize since each support routes independently against the
+        // read-only BVH. Collect results in a concurrent bag, then sort by ID for determinism.
+        var routeBag = new System.Collections.Concurrent.ConcurrentBag<(string id, PillarRouter.PillarRoute route)>();
+        var routingCandidates = pinheads.Where(p => p.pinhead.IsValid && !forkedPinheadIds.Contains(p.id)).ToList();
+
+        float spacing0 = config.MinSpacingMm + (config.MaxSpacingMm - config.MinSpacingMm) * (1f - config.DensityFactor);
+
+        Parallel.ForEach(routingCandidates, (item) =>
+        {
+            var (id, pinhead) = item;
+
             var rCfg = routingConfig;
-            float supportHeight = pinhead.JunctionPoint.Z; // height above base
+            float supportHeight = pinhead.JunctionPoint.Z;
             var weight = pointWeights.TryGetValue(id, out var w) ? w : ForceEstimator.SupportWeight.Light;
 
-            // Height-based auto-sizing: compute minimum radius from Euler buckling
-            // P_cr = π²EI/L², I = πr⁴/4, solve for r: r = (4PL²/(π³E))^(1/4)
-            // With SF=2.5 and estimated load from overhang area
             if (supportHeight > 1f)
             {
-                // Estimate load from overhang area — use total nearby overhang area divided by
-                // estimated number of supports in region for more realistic per-support load
-                float overhangArea = 50f; // conservative default
-                var pt = pointResult.Points.FirstOrDefault(p => p.Id == id);
-                if (pt != null)
+                float overhangArea = 50f;
+                if (pointLookup.TryGetValue(id, out var pt))
                 {
-                    // Use the point's overhang area but assume it shares with nearby supports
                     float pointArea = Math.Max(pt.OverhangArea, 20f);
-                    // Approximate region coverage: each support covers spacing² area
-                    float spacing = config.MinSpacingMm + (config.MaxSpacingMm - config.MinSpacingMm) * (1f - config.DensityFactor);
-                    float coverageArea = spacing * spacing;
+                    float coverageArea = spacing0 * spacing0;
                     overhangArea = Math.Max(pointArea, coverageArea);
                 }
 
-                // Conservative load: gravity (full column) + peel force (proportional to area)
                 float estLoad = overhangArea * supportHeight * 0.3f * 1.1e-6f * 9810f
-                              + overhangArea * 0.02f; // higher peel coefficient for safety
-
-                // Euler buckling minimum radius with SF=3.0 (margin for load uncertainty)
+                              + overhangArea * 0.02f;
                 float bucklingR = MathF.Pow(
                     4f * estLoad * 3.0f * supportHeight * supportHeight /
-                    (MathF.PI * MathF.PI * MathF.PI * 2000f),
-                    0.25f);
-
-                // Minimum floor: ensures all supports handle peel + bending forces
+                    (MathF.PI * MathF.PI * MathF.PI * 2000f), 0.25f);
                 float linearR = 0.7f + supportHeight * 0.015f;
                 float heightScaledR = Math.Max(bucklingR, linearR);
 
-                // Weight class scaling
-                if (weight == ForceEstimator.SupportWeight.Heavy)
-                    heightScaledR *= 1.3f;
-                else if (weight == ForceEstimator.SupportWeight.Medium)
-                    heightScaledR *= 1.1f;
+                if (weight == ForceEstimator.SupportWeight.Heavy) heightScaledR *= 1.3f;
+                else if (weight == ForceEstimator.SupportWeight.Medium) heightScaledR *= 1.1f;
 
                 rCfg = rCfg with
                 {
@@ -794,15 +784,11 @@ public static class SupportEngineV2
                 };
             }
 
-            // Start pillar from junction or contact (whichever is above the bed)
             float startRadius = Math.Max(pinhead.BackRadius, rCfg.PillarRadiusMm);
             var routeStart = pinhead.JunctionPoint.Z > 0.1f
-                ? pinhead.JunctionPoint
-                : pinhead.ContactPoint; // near-bed: start from contact, skip pinhead
+                ? pinhead.JunctionPoint : pinhead.ContactPoint;
             var route = PillarRouter.Route(routeStart, startRadius, bvh, rCfg);
 
-            // For manual supports that failed to reach ground, try offset positions.
-            // The user placed this point — try harder to find a valid route.
             if (!route.ReachesGround && manualPointIds.Contains(id))
             {
                 float retryDist = rCfg.PillarRadiusMm * 3f;
@@ -815,7 +801,6 @@ public static class SupportEngineV2
                     var retryRoute = PillarRouter.Route(routeStart + off, startRadius, bvh, rCfg);
                     if (retryRoute.ReachesGround)
                     {
-                        // Bridge from original position to the offset, then descend
                         var bridgedPath = new List<PillarRouter.Waypoint>();
                         bridgedPath.Add(new PillarRouter.Waypoint { Position = routeStart, Radius = startRadius, Type = "junction" });
                         bridgedPath.Add(new PillarRouter.Waypoint { Position = routeStart + off, Radius = startRadius, Type = "bridge" });
@@ -826,10 +811,11 @@ public static class SupportEngineV2
                 }
             }
 
-            // Manual supports that can't route are flagged uncoverable (not force-routed
-            // through the model). The user sees them highlighted and can reposition.
-            routes.Add((id, route));
-        }
+            routeBag.Add((id, route));
+        });
+
+        // Re-sort by ID for deterministic output order
+        routes.AddRange(routeBag.OrderBy(r => r.id));
 
         // Post-routing collision filter: penetration-depth based, not binary hit.
         //
@@ -973,9 +959,9 @@ public static class SupportEngineV2
                     ? route.Path[0].Position.Z - route.Path[^1].Position.Z
                     : 1f;
 
-                // Get the overhang area from the support point
+                // Get the overhang area from the support point (O(1) lookup)
                 float supportArea = estLayerArea;
-                var pt = pointResult.Points.FirstOrDefault(p => p.Id == id);
+                var pt = pointLookup.TryGetValue(id, out var ptVal) ? ptVal : (SupportPointGenerator.SupportPoint?)null;
                 if (pt != null) supportArea = Math.Max(pt.OverhangArea, 10f);
 
                 var sizing = SupportSizer.Size(

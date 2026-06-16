@@ -458,8 +458,11 @@ public sealed class SupportPointGenerator
         }
 
         // ── Unified island detection (contour-based, same as slicer) ──────
+        // Skip on very large meshes — cross-section + polygon tests are O(layers * tris)
+        // and can take minutes on >100K tri models. Fall back to z<2mm heuristic.
         int islandsDetected = overhangTris.Count(t => t.centroid.Z < 2f);
-        if (config.UnifiedIslandDetection)
+        bool useIslandDetection = config.UnifiedIslandDetection && mesh.TriangleCount <= 100_000;
+        if (useIslandDetection)
         {
             float analysisLayerH = config.LayerHeightMm;
             float meshMinZ = mesh.Min.Z;
@@ -547,12 +550,11 @@ public sealed class SupportPointGenerator
         // (reclassification happens inline in the island scan loop above)
 
         // ── Minima detection: local lowest points of down-facing triangles ──
-        // A pure overhang-angle test misses the bottom of curves/bowls where the normal
-        // is near-vertical but the geometry still needs support. Find triangles whose
-        // centroid Z is lower than all adjacent triangles' centroids.
+        // Skip on large meshes (>100K tris) — spatial grid over all triangles is O(n)
+        // with large constant factor for FindInRadius queries.
         int minimaInjected = 0;
+        if (mesh.TriangleCount <= 100_000)
         {
-            // Build adjacency: for each triangle, find neighbors sharing an edge
             var triCentroids = new Vector3[mesh.TriangleCount];
             var triNormals = new Vector3[mesh.TriangleCount];
             for (int t = 0; t < mesh.TriangleCount; t++)
