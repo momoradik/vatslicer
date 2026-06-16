@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useMemo } from 'react'
+import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import StlViewer, {
   type BuildVolume,
@@ -460,6 +460,7 @@ export default function StlImport() {
   const [orientationCommitted, setOrientationCommitted] = useState(true) // false while bake is in progress
   const [supportBrushSize, setSupportBrushSize] = useState(3) // mm
   const [supportTipType, setSupportTipType] = useState<'light' | 'medium' | 'heavy'>('medium')
+  const [selectedManualSupportId, setSelectedManualSupportId] = useState<string | null>(null)
 
   // Persist support state
   const setSupportEnabled = (v: boolean) => { setJobSupportEnabled(v); _savedSupportEnabled = v; setSliceStale(true) }
@@ -870,6 +871,22 @@ export default function StlImport() {
       m.id === selectedId ? { ...m, manualSupports: { ...m.manualSupports, points: m.manualSupports.points.map(p => p.id === pointId ? { ...p, ...updates } : p) } } : m
     ))
   }
+
+  // B4: Delete selected support via Delete/Backspace key
+  const selectedSupportRef = useRef(selectedManualSupportId)
+  selectedSupportRef.current = selectedManualSupportId
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedSupportRef.current) {
+        if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'SELECT') return
+        e.preventDefault()
+        deleteSupportPoint(selectedSupportRef.current)
+        setSelectedManualSupportId(null)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
 
   const retrySupportPoint = async (pointId: string) => {
     if (!selectedId || !selected) return
@@ -1922,6 +1939,8 @@ export default function StlImport() {
                   supportBrushSize={supportBrushSize}
                   onSupportPointAdd={(x, y, z, nx, ny, nz, fi, bu, bv) => addSupportPoint(x, y, z, nx, ny, nz, fi, bu, bv)}
                   onSupportPointDelete={(id) => deleteSupportPoint(id)}
+                  onSupportPointSelect={(id) => setSelectedManualSupportId(id)}
+                  selectedManualSupportId={selectedManualSupportId}
                   onPaintRegionAdd={(mode, cx, cy, cz) => addPaintedRegion(mode, cx, cy, cz)}
                   raftData={selectedPrep.raft}
                   skirtData={selectedPrep.skirt}
@@ -2828,9 +2847,12 @@ export default function StlImport() {
                       <span className="text-[9px] text-gray-500 block mb-1">
                         Support Points ({selectedSupportData.points.length})
                       </span>
-                      <ul className="space-y-0.5 max-h-24 overflow-y-auto">
+                      <ul className="space-y-0.5 max-h-40 overflow-y-auto">
                         {selectedSupportData.points.map(p => (
-                          <li key={p.id} className="flex items-center justify-between text-[10px] px-1.5 py-0.5 rounded bg-gray-800/50">
+                          <li key={p.id}
+                            onClick={() => setSelectedManualSupportId(selectedManualSupportId === p.id ? null : p.id)}
+                            className={`flex flex-col text-[10px] px-1.5 py-0.5 rounded cursor-pointer transition-colors
+                              ${selectedManualSupportId === p.id ? 'bg-teal-900/40 ring-1 ring-teal-500/50' : 'bg-gray-800/50 hover:bg-gray-700/50'}`}>
                             <span className="text-gray-400 truncate">
                               <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1 ${
                                 p.engineStatus === 'error' ? 'bg-fuchsia-500' :
@@ -2860,9 +2882,32 @@ export default function StlImport() {
                                 <option value="medium">Med</option>
                                 <option value="heavy">Heavy</option>
                               </select>
-                              <button onClick={() => deleteSupportPoint(p.id)}
+                              <button onClick={(e) => { e.stopPropagation(); deleteSupportPoint(p.id); if (selectedManualSupportId === p.id) setSelectedManualSupportId(null) }}
                                 className="text-red-400 hover:text-red-300 transition">x</button>
                             </div>
+                            {/* B3: Per-support size controls when selected */}
+                            {selectedManualSupportId === p.id && (
+                              <div className="mt-1 grid grid-cols-3 gap-1" onClick={e => e.stopPropagation()}>
+                                <label className="text-[9px] text-gray-500">
+                                  Tip
+                                  <input type="number" step="0.1" min="0.1" max="5" value={p.tipDiameterMm}
+                                    onChange={e => { updateSupportPoint(p.id, { tipDiameterMm: +e.target.value }); retrySupportPoint(p.id) }}
+                                    className="w-full bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-[9px] text-gray-300" />
+                                </label>
+                                <label className="text-[9px] text-gray-500">
+                                  Shaft
+                                  <input type="number" step="0.1" min="0.2" max="10" value={p.shaftDiameterMm}
+                                    onChange={e => { updateSupportPoint(p.id, { shaftDiameterMm: +e.target.value }); retrySupportPoint(p.id) }}
+                                    className="w-full bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-[9px] text-gray-300" />
+                                </label>
+                                <label className="text-[9px] text-gray-500">
+                                  Base
+                                  <input type="number" step="0.5" min="0.5" max="20" value={p.baseDiameterMm}
+                                    onChange={e => { updateSupportPoint(p.id, { baseDiameterMm: +e.target.value }); retrySupportPoint(p.id) }}
+                                    className="w-full bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-[9px] text-gray-300" />
+                                </label>
+                              </div>
+                            )}
                           </li>
                         ))}
                       </ul>

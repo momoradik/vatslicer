@@ -91,6 +91,8 @@ interface Props {
   supportBrushSize?: number
   onSupportPointAdd?: (x: number, y: number, z: number, nx: number, ny: number, nz: number, faceIndex?: number, baryU?: number, baryV?: number) => void
   onSupportPointDelete?: (id: string) => void
+  onSupportPointSelect?: (id: string | null) => void
+  selectedManualSupportId?: string | null
   onPaintRegionAdd?: (mode: 'enforcer' | 'blocker', cx: number, cy: number, cz: number) => void
   crossBraces?: CrossBraceDisplayData[]
   // V2 support mesh (binary STL ArrayBuffer) — renders as single mesh instead of individual cylinders
@@ -203,6 +205,8 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     supportBrushSize: _supportBrushSize,
     onSupportPointAdd,
     onSupportPointDelete,
+    onSupportPointSelect,
+    selectedManualSupportId,
     onPaintRegionAdd,
     crossBraces: _crossBraces,
     supportMeshBuffer,
@@ -699,6 +703,11 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
                 if (sid) onSupportPointDeleteRef.current?.(sid)
               }
             }
+          } else if (supportMode === 'none' && manualMarkerGroupRef.current) {
+            // Click to select/deselect manual support for editing
+            const hits = raycaster.intersectObjects(manualMarkerGroupRef.current.children, false)
+            const sid = hits.length > 0 ? hits[0].object.userData.supportPointId : null
+            onSupportPointSelectRef.current?.(sid ?? null)
           } else if (supportMode === 'paint-enforcer' || supportMode === 'paint-blocker') {
             const meshes: THREE.Mesh[] = []
             meshMapRef.current.forEach(d => meshes.push(d.mesh))
@@ -1426,20 +1435,8 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     const markers = manualMarkers ?? []
     if (markers.length === 0) return
 
-    // Scale marker radius to model bbox diagonal, clamped to [0.3, 2.0] mm
-    let markerRadius = 0.5
-    const selId = selectedIdRef.current
-    const selData = selId ? meshMapRef.current.get(selId) : null
-    if (selData) {
-      const diag = selData.naturalSize.length()
-      markerRadius = Math.max(0.3, Math.min(2.0, diag * 0.012))
-    }
-
     const group = new THREE.Group()
     group.name = 'manual-support-markers'
-
-    const sharedGeo = new THREE.SphereGeometry(markerRadius, 10, 10)
-    markerSharedGeoRef.current = sharedGeo
 
     const loader = new STLLoader()
 
@@ -1456,17 +1453,42 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       }
       const c = statusColors[engineStatus ?? 'pending']
 
-      // ── Contact marker sphere (always shown) — pulsing wireframe when provisional ──
+      // ── Realistic tip marker: small sphere at actual tip radius + tapered cone ──
       const markerProvisional = m.provisional ?? false
+      const tipRadius = (m.shaftDiameter ?? 0.5) / 2  // actual tip radius in mm
+      const coneLength = Math.max(tipRadius * 3, 0.6)  // short tapered cone along normal
+      const pillarRadius = tipRadius * 1.5
+
       const markerMat = new THREE.MeshPhongMaterial({
         color: c.marker, emissive: c.emissive,
         wireframe: markerProvisional,
         transparent: markerProvisional, opacity: markerProvisional ? 0.6 : 1.0,
       })
-      const sphere = new THREE.Mesh(sharedGeo, markerMat)
-      sphere.position.set(m.x, m.y, m.z)
-      sphere.userData = { supportPointId: m.id }
-      group.add(sphere)
+
+      // Tip sphere at contact point
+      const isSelected = m.id === selectedManualSupportId
+      const tipGeo = new THREE.SphereGeometry(tipRadius, 16, 16)
+      const tipSphere = new THREE.Mesh(tipGeo, markerMat)
+      tipSphere.position.set(m.x, m.y, m.z)
+      tipSphere.userData = { supportPointId: m.id }
+      group.add(tipSphere)
+
+      // Selection highlight ring
+      if (isSelected) {
+        const ringGeo = new THREE.RingGeometry(tipRadius * 2, tipRadius * 2.8, 24)
+        const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, side: THREE.DoubleSide, transparent: true, opacity: 0.8 })
+        const ring = new THREE.Mesh(ringGeo, ringMat)
+        ring.position.set(m.x, m.y, m.z)
+        ring.lookAt(m.x, m.y + 1, m.z) // face up in Y-up space
+        group.add(ring)
+      }
+
+      // Short tapered cone from tip downward (along -Y in viewer space)
+      const coneGeo = new THREE.CylinderGeometry(tipRadius, pillarRadius, coneLength, 16)
+      const coneMesh = new THREE.Mesh(coneGeo, markerMat)
+      coneMesh.position.set(m.x, m.y - coneLength / 2, m.z)
+      coneMesh.userData = { supportPointId: m.id }
+      group.add(coneMesh)
 
       // ── Real engine geometry (replaces fake cylinder) ──
       if (m.engineMeshBase64) {
@@ -1528,20 +1550,20 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     manualMarkerGroupRef.current = group
 
     // ── STEP J: marker render ──
-    const markersInScene = group.children.filter(c => c.userData?.supportPointId).length
-    const passJ = markersInScene === markers.length
-    console.log('MSADD', { step: 'J', pointsInState: markers.length, markersInScene, pass: passJ })
-    if (!passJ) console.error('MSADD RENDER INVARIANT FAILED:', markersInScene, 'markers vs', markers.length, 'points')
-    // ── STEP K: preview pillar ──
-    const pillarsInScene = group.children.length - markersInScene
-    console.log('MSADD', { step: 'K', pillarCreated: pillarsInScene, pillarBaseZ: 0 })
-  }, [manualMarkers, sceneReady])
+    // Each marker produces 2 objects (tip sphere + cone) + optional engine mesh
+    const markerObjects = group.children.filter(c => c.userData?.supportPointId)
+    const uniqueIds = new Set(markerObjects.map(c => c.userData.supportPointId))
+    const passJ = uniqueIds.size === markers.length
+    console.log('MSADD', { step: 'J', pointsInState: markers.length, uniqueMarkerIds: uniqueIds.size, pass: passJ })
+  }, [manualMarkers, sceneReady, selectedManualSupportId])
 
   // ── Support callback refs (avoid stale closures) ─────────────────────────
   const onSupportPointAddRef = useRef(onSupportPointAdd)
   onSupportPointAddRef.current = onSupportPointAdd
   const onSupportPointDeleteRef = useRef(onSupportPointDelete)
   onSupportPointDeleteRef.current = onSupportPointDelete
+  const onSupportPointSelectRef = useRef(onSupportPointSelect)
+  onSupportPointSelectRef.current = onSupportPointSelect
   const onPaintRegionAddRef = useRef(onPaintRegionAdd)
   onPaintRegionAddRef.current = onPaintRegionAdd
 
