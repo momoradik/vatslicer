@@ -901,8 +901,10 @@ public static class SupportEngineV2
             return true;
         }).ToList();
 
-        Serilog.Log.Information("V2 Step 4 Routing: {Ms}ms ({Count} routes, {Removed} removed by collision)",
-            stepSw.ElapsedMilliseconds, routes.Count, removedByCollision);
+        int bridgeRoutes = routes.Count(r => r.route.Path.Any(wp => wp.Type == "bridge"));
+        int directRoutes = routes.Count(r => r.route.ReachesGround && !r.route.Path.Any(wp => wp.Type == "bridge"));
+        Serilog.Log.Information("V2 Step 4 Routing: {Ms}ms ({Count} routes, {Direct} direct, {Bridge} bridged, {Removed} removed by collision)",
+            stepSw.ElapsedMilliseconds, routes.Count, directRoutes, bridgeRoutes, removedByCollision);
         stepSw.Restart();
 
         // ── Step 4b: Tree support merging ────────────────────────────────

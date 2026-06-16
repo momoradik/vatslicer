@@ -167,7 +167,12 @@ public sealed class SupportV2Controller : ControllerBase
         var pillarShapeEnum = SupportShape.Cylinder;
         Enum.TryParse<SupportShape>(middlePillarShape, true, out pillarShapeEnum);
 
-        var result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig
+        // Step 5: Check cancellation before expensive generation; surface exceptions
+        ct.ThrowIfCancellationRequested();
+        SupportEngineV2.EngineResult result;
+        try
+        {
+        result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig
         {
             Orientation = orient,
             OverhangAngleDeg = (float)overhangAngleDeg,
@@ -225,6 +230,16 @@ public sealed class SupportV2Controller : ControllerBase
             BottomBaseThicknessMm = bottomBaseThicknessMm,
             RaftCustomThicknessMm = raftCustomThicknessMm,
         });
+        }
+        catch (OperationCanceledException)
+        {
+            return StatusCode(499, new { error = "Generation cancelled by client" });
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Error(ex, "Support generation failed");
+            return StatusCode(500, new { error = ex.Message, type = ex.GetType().Name });
+        }
 
         return Ok(new
         {
