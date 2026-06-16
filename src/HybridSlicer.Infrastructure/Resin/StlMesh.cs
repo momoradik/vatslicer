@@ -119,6 +119,28 @@ public sealed class StlMesh
     }
 
     /// <summary>
+    /// Recompute face normals from vertex winding order (cross product of edges).
+    /// For meshes with unreliable STL normals (flipped/zero), this provides
+    /// consistent normals based on the actual geometry. Returns a new mesh.
+    /// </summary>
+    public StlMesh RecomputeNormals()
+    {
+        var newNormals = new Vector3[TriangleCount];
+        for (int t = 0; t < TriangleCount; t++)
+        {
+            var v0 = Vertices[t * 3];
+            var v1 = Vertices[t * 3 + 1];
+            var v2 = Vertices[t * 3 + 2];
+            var edge1 = v1 - v0;
+            var edge2 = v2 - v0;
+            var normal = Vector3.Cross(edge1, edge2);
+            float len = normal.Length();
+            newNormals[t] = len > 1e-8f ? normal / len : Vector3.UnitZ;
+        }
+        return new StlMesh(Vertices, newNormals, Min, Max);
+    }
+
+    /// <summary>
     /// Find triangle indices that are overhang candidates at a given Z height.
     /// Returns indices of triangles that span Z and have downward-facing normals.
     /// </summary>

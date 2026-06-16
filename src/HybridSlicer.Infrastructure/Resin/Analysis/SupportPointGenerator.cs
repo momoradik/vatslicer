@@ -48,7 +48,7 @@ public sealed class SupportPointGenerator
         public List<(Vector3 position, float radiusMm)>? DrainHoleExclusions { get; init; }
         public float DrainHoleClearanceMm { get; init; } = 2.0f;
         /// <summary>When true, uses contour-based island detection instead of z&lt;2mm heuristic.</summary>
-        public bool UnifiedIslandDetection { get; init; } = false;
+        public bool UnifiedIslandDetection { get; init; } = true;
         /// <summary>Enable line contact: detect downward overhang edges and place dense tips along them.</summary>
         public bool EnableLineContact { get; init; } = false;
         /// <summary>Spacing of tips along overhang edges (mm). Default = base contact spacing.</summary>
@@ -546,13 +546,82 @@ public sealed class SupportPointGenerator
 
         // (reclassification happens inline in the island scan loop above)
 
+        // ── Minima detection: local lowest points of down-facing triangles ──
+        // A pure overhang-angle test misses the bottom of curves/bowls where the normal
+        // is near-vertical but the geometry still needs support. Find triangles whose
+        // centroid Z is lower than all adjacent triangles' centroids.
+        int minimaInjected = 0;
+        {
+            // Build adjacency: for each triangle, find neighbors sharing an edge
+            var triCentroids = new Vector3[mesh.TriangleCount];
+            var triNormals = new Vector3[mesh.TriangleCount];
+            for (int t = 0; t < mesh.TriangleCount; t++)
+            {
+                var v0 = mesh.Vertices[t * 3]; var v1 = mesh.Vertices[t * 3 + 1]; var v2 = mesh.Vertices[t * 3 + 2];
+                triCentroids[t] = (v0 + v1 + v2) / 3f;
+                triNormals[t] = mesh.FileNormals[t];
+            }
+
+            // Use spatial grid to find nearby triangles efficiently
+            var triGrid = new Spatial.SpatialGrid<int>(baseSpacing * 2f);
+            for (int t = 0; t < mesh.TriangleCount; t++)
+                triGrid.Insert(triCentroids[t], t);
+
+            for (int t = 0; t < mesh.TriangleCount; t++)
+            {
+                // Only consider down-facing triangles (normal Z < -0.1 — gentle overhangs included)
+                if (triNormals[t].Z > -0.1f) continue;
+                // Skip triangles near the build plate
+                if (triCentroids[t].Z < 1.0f) continue;
+
+                var pos = triCentroids[t];
+                var neighborsRaw = triGrid.FindInRadius(pos, baseSpacing * 2f);
+                var neighbors = neighborsRaw.Select(n => n.id).ToList();
+                bool isLocalMinimum = true;
+                foreach (var ni in neighbors)
+                {
+                    if (ni == t) continue;
+                    if (triCentroids[ni].Z < pos.Z - 0.01f)
+                    {
+                        isLocalMinimum = false;
+                        break;
+                    }
+                }
+                if (!isLocalMinimum) continue;
+
+                // Check if already covered by an existing point
+                if (grid.ExistsInRadius(pos, baseSpacing)) continue;
+
+                var force = ForceEstimator.Estimate(
+                    pos.Z, 10f, 1, 10f, baseSpacing,
+                    config.Orientation, config.RecoaterSpeedMmS);
+
+                string id = $"sp-{++idCounter}";
+                grid.Insert(pos, id);
+                points.Add(new SupportPoint
+                {
+                    Id = id,
+                    Position = pos,
+                    Normal = triNormals[t],
+                    OverhangArea = 10f,
+                    OverhangType = OverhangAnalyzer.OverhangType.NewIsland, // reuse island type for priority
+                    Priority = 0.8f,
+                    RecommendedWeight = force.Weight,
+                    SafetyFactor = force.SafetyFactor,
+                });
+                minimaInjected++;
+            }
+            if (minimaInjected > 0)
+                Serilog.Log.Information("V2 Minima detection: injected {Count} support points at local Z-minima", minimaInjected);
+        }
+
         sw.Stop();
         return new GenerationResult
         {
             Points = points,
             OverhangRegions = new List<OverhangAnalyzer.OverhangRegion>(),
             OverhangRegionsAnalyzed = overhangTris.Count,
-            IslandsDetected = islandsDetected,
+            IslandsDetected = islandsDetected + minimaInjected,
             TotalOverhangArea = totalOverhangArea,
             ElapsedMs = sw.ElapsedMilliseconds,
         };

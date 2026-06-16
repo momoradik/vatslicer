@@ -131,8 +131,11 @@ public sealed class SupportV2Controller : ControllerBase
             lattice = lp;
 
         // Parse directly from STL to preserve file normals (outward-pointing from CAD)
-        // MeshValidator would recompute normals from winding, losing interior/exterior info
         var mesh = StlMesh.FromBinary(data);
+        // B2: On large meshes, recompute normals from vertex winding to guard against
+        // flipped/zero normals that cause mis-detected overhangs
+        if (mesh.TriangleCount > 50_000)
+            mesh = mesh.RecomputeNormals();
 
         // Parse reinforcement mode
         var reinfMode = HybridSlicer.Infrastructure.Resin.Routing.ReinforcementMode.Pairwise;

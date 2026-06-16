@@ -179,7 +179,7 @@ public static class SupportEngineV2
         /// instead of the z&lt;2mm heuristic. Every disconnected island at any Z gets a support
         /// point forced to route to the plate. Default OFF for backward compatibility.
         /// </summary>
-        public bool UnifiedIslandDetection { get; init; } = false;
+        public bool UnifiedIslandDetection { get; init; } = true;
 
         // Forked supports (one trunk, multiple tips)
         /// <summary>Enable forked supports — merge nearby tips into one trunk. Default OFF.</summary>
