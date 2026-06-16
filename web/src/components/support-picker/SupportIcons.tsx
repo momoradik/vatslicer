@@ -314,3 +314,82 @@ export const IconDensityHeavy = () => (
     ))}
   </svg>
 )
+
+// ═══ SHAPE ICONS: Touch, Connection, Pillar ═══
+
+// Touch shapes
+export const IconTouchSphere = () => (
+  <svg viewBox={VB} className="w-full h-full">
+    <PartBar x1={20} x2={100} y={40} />
+    <circle cx={60} cy={45} r={10} className="fill-teal-400/30 stroke-teal-400" strokeWidth={SW} />
+    <Pillar x1={60} y1={55} x2={60} y2={100} />
+  </svg>
+)
+
+export const IconTouchSkate = () => (
+  <svg viewBox={VB} className="w-full h-full">
+    <PartBar x1={20} x2={100} y={40} />
+    <ellipse cx={60} cy={44} rx={16} ry={5} className="fill-amber-400/30 stroke-amber-400" strokeWidth={SW} />
+    <Pillar x1={60} y1={49} x2={60} y2={100} />
+  </svg>
+)
+
+export const IconTouchNone = () => (
+  <svg viewBox={VB} className="w-full h-full">
+    <PartBar x1={20} x2={100} y={40} />
+    <line x1={60} y1={40} x2={60} y2={100} className="stroke-teal-500" strokeWidth={SW} strokeLinecap={LC} />
+    <line x1={50} y1={35} x2={70} y2={55} className="stroke-red-400/50" strokeWidth={1.5} />
+  </svg>
+)
+
+// Connection shapes
+export const IconConnCone = () => (
+  <svg viewBox={VB} className="w-full h-full">
+    <Tip x={60} y={25} />
+    <polygon points="60,28 52,65 68,65" className="fill-teal-400/20 stroke-teal-400" strokeWidth={SW} strokeLinejoin={LC} />
+    <Pillar x1={60} y1={65} x2={60} y2={100} />
+  </svg>
+)
+
+export const IconConnCylinder = () => (
+  <svg viewBox={VB} className="w-full h-full">
+    <Tip x={60} y={25} />
+    <rect x={54} y={28} width={12} height={37} rx={1} className="fill-teal-400/20 stroke-teal-400" strokeWidth={SW} />
+    <Pillar x1={60} y1={65} x2={60} y2={100} />
+  </svg>
+)
+
+export const IconConnPyramid = () => (
+  <svg viewBox={VB} className="w-full h-full">
+    <Tip x={60} y={25} />
+    <polygon points="60,28 48,65 72,65" className="fill-amber-400/20 stroke-amber-400" strokeWidth={SW} strokeLinejoin="miter" />
+    <Pillar x1={60} y1={65} x2={60} y2={100} />
+  </svg>
+)
+
+// Pillar shapes
+export const IconPillarCylinder = () => (
+  <svg viewBox={VB} className="w-full h-full">
+    <Tip x={60} y={20} />
+    <rect x={54} y={25} width={12} height={60} rx={1} className="fill-teal-400/20 stroke-teal-400" strokeWidth={SW} />
+    <Plate />
+  </svg>
+)
+
+export const IconPillarCube = () => (
+  <svg viewBox={VB} className="w-full h-full">
+    <Tip x={60} y={20} />
+    <rect x={50} y={25} width={20} height={60} rx={0} className="fill-amber-400/20 stroke-amber-400" strokeWidth={SW} />
+    <Plate />
+  </svg>
+)
+
+export const IconPillarCross = () => (
+  <svg viewBox={VB} className="w-full h-full">
+    <Tip x={60} y={20} />
+    {/* Cross shape: + */}
+    <rect x={55} y={25} width={10} height={60} rx={0} className="fill-violet-400/20 stroke-violet-400" strokeWidth={SW} />
+    <rect x={48} y={45} width={24} height={10} rx={0} className="fill-violet-400/20 stroke-violet-400" strokeWidth={SW} />
+    <Plate />
+  </svg>
+)
