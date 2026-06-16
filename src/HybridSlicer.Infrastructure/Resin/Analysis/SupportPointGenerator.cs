@@ -457,164 +457,152 @@ public sealed class SupportPointGenerator
                 facePointsAdded, faceSpacing, areaThresh);
         }
 
-        // ── Unified island detection (contour-based, same as slicer) ──────
-        // Skip on very large meshes — cross-section + polygon tests are O(layers * tris)
-        // and can take minutes on >100K tri models. Fall back to z<2mm heuristic.
-        int islandsDetected = overhangTris.Count(t => t.centroid.Z < 2f);
-        bool useIslandDetection = config.UnifiedIslandDetection && mesh.TriangleCount <= 100_000;
-        if (useIslandDetection)
-        {
-            float analysisLayerH = config.LayerHeightMm;
-            float meshMinZ = mesh.Min.Z;
-            float meshMaxZ = mesh.Max.Z;
-            int layerCount = Math.Max(1, (int)MathF.Ceiling((meshMaxZ - meshMinZ) / analysisLayerH));
-
-            var prevPolygons = new List<List<Vector2>>();
-            int contourIslands = 0;
-
-            for (int li = 0; li < layerCount; li++)
-            {
-                float z = meshMinZ + (li + 0.5f) * analysisLayerH;
-                var polygons = MeshCrossSectionEngine.CrossSection(mesh, z);
-
-                bool isFirstLayer = (li == 0);
-                var islands = IslandDetector.FindIslandContours(polygons, prevPolygons, isFirstLayer);
-
-                foreach (var (contour, centroid2D) in islands)
-                {
-                    contourIslands++;
-
-                    // Collect indices of existing points within this island for reclassification
-                    var island3D = new Vector3(centroid2D.X, centroid2D.Y, z);
-                    float contourRadius = MathF.Sqrt(ComputeContourArea(contour) / MathF.PI);
-                    for (int pi = 0; pi < points.Count; pi++)
-                    {
-                        var pt = points[pi];
-                        if (pt.OverhangType == OverhangAnalyzer.OverhangType.NewIsland) continue;
-                        float dz = MathF.Abs(pt.Position.Z - z);
-                        if (dz > analysisLayerH) continue;
-                        float dxy = Vector2.Distance(new Vector2(pt.Position.X, pt.Position.Y), centroid2D);
-                        if (dxy <= contourRadius * 1.2f)
-                        {
-                            points[pi] = new SupportPoint
-                            {
-                                Id = pt.Id, Position = pt.Position, Normal = pt.Normal,
-                                OverhangArea = pt.OverhangArea,
-                                OverhangType = OverhangAnalyzer.OverhangType.NewIsland,
-                                Priority = 1.0f,
-                                RecommendedWeight = pt.RecommendedWeight,
-                                SafetyFactor = pt.SafetyFactor,
-                                ManualTipRadiusMm = pt.ManualTipRadiusMm,
-                                ManualPillarRadiusMm = pt.ManualPillarRadiusMm,
-                                ManualBaseRadiusMm = pt.ManualBaseRadiusMm,
-                            };
-                        }
-                    }
-
-                    // Check if any existing point already covers this island
-                    bool alreadyCovered = grid.ExistsInRadius(island3D, baseSpacing * 1.5f);
-                    if (alreadyCovered) continue;
-
-                    // Inject a forced support point at the island centroid
-                    // Normal = straight down (-Z), since this is a floating underside
-                    var normal = new Vector3(0, 0, -1);
-                    float area = ComputeContourArea(contour);
-
-                    var force = ForceEstimator.Estimate(
-                        z, Math.Max(area, 10f), 1, area, baseSpacing,
-                        config.Orientation, config.RecoaterSpeedMmS);
-
-                    string id = $"sp-{++idCounter}";
-                    grid.Insert(island3D, id);
-                    points.Add(new SupportPoint
-                    {
-                        Id = id,
-                        Position = island3D,
-                        Normal = normal,
-                        OverhangArea = area,
-                        OverhangType = OverhangAnalyzer.OverhangType.NewIsland,
-                        Priority = 1.0f, // islands get max priority
-                        RecommendedWeight = force.Weight,
-                        SafetyFactor = force.SafetyFactor,
-                    });
-                }
-
-                prevPolygons = polygons;
-            }
-
-            islandsDetected = contourIslands;
-            Serilog.Log.Information("V2 UnifiedIslandDetection: {Layers} layers scanned, {Islands} island contours, {Injected} new points injected",
-                layerCount, contourIslands, points.Count - (points.Count - contourIslands)); // simplified
-        }
-
-        // (reclassification happens inline in the island scan loop above)
-
-        // ── Minima detection: local lowest points of down-facing triangles ──
-        // Skip on large meshes (>100K tris) — spatial grid over all triangles is O(n)
-        // with large constant factor for FindInRadius queries.
+        // ── Fast island detection: spatial-hash Z-gap method ──────────
+        // O(n) single pass: bin down-face centroids by XY cell. For each cell,
+        // check if there's any geometry below it within one layer height. If not,
+        // it's a floating island. No per-layer slicing or polygon tests needed.
+        int islandsDetected = 0;
         int minimaInjected = 0;
-        if (mesh.TriangleCount <= 100_000)
+        if (config.UnifiedIslandDetection)
         {
-            var triCentroids = new Vector3[mesh.TriangleCount];
-            var triNormals = new Vector3[mesh.TriangleCount];
+            float cellSize = Math.Max(baseSpacing, 3f); // spatial hash cell size
+            float layerH = config.LayerHeightMm;
+
+            // Build per-cell Z column data: for each XY cell, track all triangle Z ranges
+            var cellZRanges = new Dictionary<(int cx, int cy), List<(float minZ, float maxZ, int triIdx)>>();
+
             for (int t = 0; t < mesh.TriangleCount; t++)
             {
                 var v0 = mesh.Vertices[t * 3]; var v1 = mesh.Vertices[t * 3 + 1]; var v2 = mesh.Vertices[t * 3 + 2];
-                triCentroids[t] = (v0 + v1 + v2) / 3f;
-                triNormals[t] = mesh.FileNormals[t];
+                var centroid = (v0 + v1 + v2) / 3f;
+                float triMinZ = Math.Min(v0.Z, Math.Min(v1.Z, v2.Z));
+                float triMaxZ = Math.Max(v0.Z, Math.Max(v1.Z, v2.Z));
+                int cx = (int)MathF.Floor(centroid.X / cellSize);
+                int cy = (int)MathF.Floor(centroid.Y / cellSize);
+                var key = (cx, cy);
+                if (!cellZRanges.ContainsKey(key)) cellZRanges[key] = new();
+                cellZRanges[key].Add((triMinZ, triMaxZ, t));
             }
 
-            // Use spatial grid to find nearby triangles efficiently
-            var triGrid = new Spatial.SpatialGrid<int>(baseSpacing * 2f);
-            for (int t = 0; t < mesh.TriangleCount; t++)
-                triGrid.Insert(triCentroids[t], t);
-
+            // For each down-facing triangle, check for Z-gap (island)
             for (int t = 0; t < mesh.TriangleCount; t++)
             {
-                // Only consider down-facing triangles (normal Z < -0.1 — gentle overhangs included)
-                if (triNormals[t].Z > -0.1f) continue;
-                // Skip triangles near the build plate
-                if (triCentroids[t].Z < 1.0f) continue;
+                float nz = mesh.FileNormals[t].Z;
+                if (nz > -0.3f) continue; // only clearly down-facing
+                var v0 = mesh.Vertices[t * 3]; var v1 = mesh.Vertices[t * 3 + 1]; var v2 = mesh.Vertices[t * 3 + 2];
+                var centroid = (v0 + v1 + v2) / 3f;
+                float triMinZ = Math.Min(v0.Z, Math.Min(v1.Z, v2.Z));
+                if (triMinZ < 1.5f) continue; // near plate — not an island
 
-                var pos = triCentroids[t];
-                var neighborsRaw = triGrid.FindInRadius(pos, baseSpacing * 2f);
-                var neighbors = neighborsRaw.Select(n => n.id).ToList();
-                bool isLocalMinimum = true;
-                foreach (var ni in neighbors)
+                int cx = (int)MathF.Floor(centroid.X / cellSize);
+                int cy = (int)MathF.Floor(centroid.Y / cellSize);
+
+                // Check this cell and neighbors for any geometry below this triangle
+                bool hasGeometryBelow = false;
+                for (int dx = -1; dx <= 1 && !hasGeometryBelow; dx++)
+                for (int dy = -1; dy <= 1 && !hasGeometryBelow; dy++)
                 {
-                    if (ni == t) continue;
-                    if (triCentroids[ni].Z < pos.Z - 0.01f)
+                    var nk = (cx + dx, cy + dy);
+                    if (!cellZRanges.TryGetValue(nk, out var ranges)) continue;
+                    foreach (var (minZ, maxZ, idx) in ranges)
                     {
-                        isLocalMinimum = false;
-                        break;
+                        if (idx == t) continue;
+                        // Geometry below = its maxZ is close to our minZ (within gap threshold)
+                        if (maxZ >= triMinZ - layerH * 2 && maxZ < triMinZ - 0.01f)
+                        {
+                            hasGeometryBelow = true;
+                            break;
+                        }
+                        // Or geometry that overlaps our Z range from below
+                        if (minZ < triMinZ && maxZ >= triMinZ - 0.5f)
+                        {
+                            hasGeometryBelow = true;
+                            break;
+                        }
                     }
                 }
-                if (!isLocalMinimum) continue;
 
-                // Check if already covered by an existing point
-                if (grid.ExistsInRadius(pos, baseSpacing)) continue;
+                if (hasGeometryBelow) continue;
+
+                // This is a floating island — force a support point
+                if (grid.ExistsInRadius(centroid, baseSpacing * 1.5f)) continue;
 
                 var force = ForceEstimator.Estimate(
-                    pos.Z, 10f, 1, 10f, baseSpacing,
+                    centroid.Z, 10f, 1, 10f, baseSpacing,
                     config.Orientation, config.RecoaterSpeedMmS);
 
                 string id = $"sp-{++idCounter}";
-                grid.Insert(pos, id);
+                grid.Insert(centroid, id);
                 points.Add(new SupportPoint
                 {
                     Id = id,
-                    Position = pos,
-                    Normal = triNormals[t],
+                    Position = centroid,
+                    Normal = new Vector3(0, 0, -1),
                     OverhangArea = 10f,
-                    OverhangType = OverhangAnalyzer.OverhangType.NewIsland, // reuse island type for priority
-                    Priority = 0.8f,
+                    OverhangType = OverhangAnalyzer.OverhangType.NewIsland,
+                    Priority = 1.0f,
                     RecommendedWeight = force.Weight,
                     SafetyFactor = force.SafetyFactor,
+                });
+                islandsDetected++;
+            }
+            Serilog.Log.Information("V2 Fast island detection: {Islands} islands found in {Tris} triangles",
+                islandsDetected, mesh.TriangleCount);
+
+            // ── Fast minima detection: per-cell Z-minimum of down-faces ──────
+            // For each XY cell, find the down-face triangle with the lowest centroid Z.
+            // That's a local minimum if no neighboring cell has a lower down-face.
+            var cellMinZ = new Dictionary<(int cx, int cy), (float z, Vector3 pos, Vector3 normal)>();
+            for (int t = 0; t < mesh.TriangleCount; t++)
+            {
+                if (mesh.FileNormals[t].Z > -0.1f) continue;
+                var v0 = mesh.Vertices[t * 3]; var v1 = mesh.Vertices[t * 3 + 1]; var v2 = mesh.Vertices[t * 3 + 2];
+                var c = (v0 + v1 + v2) / 3f;
+                if (c.Z < 1.0f) continue;
+                int cx2 = (int)MathF.Floor(c.X / cellSize);
+                int cy2 = (int)MathF.Floor(c.Y / cellSize);
+                var key2 = (cx2, cy2);
+                if (!cellMinZ.ContainsKey(key2) || c.Z < cellMinZ[key2].z)
+                    cellMinZ[key2] = (c.Z, c, mesh.FileNormals[t]);
+            }
+
+            foreach (var (cell, (z, pos, normal)) in cellMinZ)
+            {
+                // Check 3x3 neighborhood: is this the lowest?
+                bool isMin = true;
+                for (int dx = -1; dx <= 1 && isMin; dx++)
+                for (int dy = -1; dy <= 1 && isMin; dy++)
+                {
+                    if (dx == 0 && dy == 0) continue;
+                    var nk = (cell.cx + dx, cell.cy + dy);
+                    if (cellMinZ.TryGetValue(nk, out var nb) && nb.z < z - 0.01f)
+                        isMin = false;
+                }
+                if (!isMin) continue;
+
+                if (grid.ExistsInRadius(pos, baseSpacing)) continue;
+
+                var force2 = ForceEstimator.Estimate(
+                    z, 10f, 1, 10f, baseSpacing,
+                    config.Orientation, config.RecoaterSpeedMmS);
+
+                string id2 = $"sp-{++idCounter}";
+                grid.Insert(pos, id2);
+                points.Add(new SupportPoint
+                {
+                    Id = id2,
+                    Position = pos,
+                    Normal = normal,
+                    OverhangArea = 10f,
+                    OverhangType = OverhangAnalyzer.OverhangType.NewIsland,
+                    Priority = 0.8f,
+                    RecommendedWeight = force2.Weight,
+                    SafetyFactor = force2.SafetyFactor,
                 });
                 minimaInjected++;
             }
             if (minimaInjected > 0)
-                Serilog.Log.Information("V2 Minima detection: injected {Count} support points at local Z-minima", minimaInjected);
+                Serilog.Log.Information("V2 Fast minima detection: {Count} local Z-minima", minimaInjected);
         }
 
         sw.Stop();

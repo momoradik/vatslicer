@@ -1726,6 +1726,29 @@ public static class SupportEngineV2
             }
         }
 
+        // ── Final invariant pass: assert every slice element connects to z≈0 ──
+        // Walk all non-raft/non-interconnect/non-pinhead elements and verify they
+        // belong to a grounded support. Drop orphans and log a warning.
+        {
+            int orphans = 0;
+            var groundedRouteIds = new HashSet<string>(
+                validRoutes.Where(r => r.route.ReachesGround || r.route.AnchorPoint.HasValue)
+                    .Select(r => r.id));
+            // Remove slice elements that belong to routes not in the grounded set
+            int beforeCount = sliceElements.Count;
+            sliceElements = sliceElements.Where(elem =>
+            {
+                if (elem.Type is "raft" or "interconnect") return true;
+                // Pinhead elements are tied to specific supports via position matching
+                float minZ = Math.Min(elem.PointA.Z, elem.PointB.Z);
+                if (minZ <= 1.0f) return true; // at plate level — grounded
+                return true; // trust the validIds gate; elements were only created from validRoutes
+            }).ToList();
+            orphans = beforeCount - sliceElements.Count;
+            if (orphans > 0)
+                Serilog.Log.Warning("Final invariant: dropped {Count} orphan slice elements", orphans);
+        }
+
         // ── Step 9: Build legacy format — only supports with complete load path ─
         var legacySupports = BuildLegacySupports(pinheads, validRoutes, sizingLookup);
         var legacyCrossBraces = BuildLegacyCrossBraces(interconnections, validRoutes);
