@@ -720,9 +720,7 @@ public static class SupportEngineV2
 
                     var path = new List<PillarRouter.Waypoint>();
                     // Junction at the tip
-                    var routeStart = tipPinhead.JunctionPoint.Z > 0.1f
-                        ? tipPinhead.JunctionPoint
-                        : tipPinhead.ContactPoint;
+                    var routeStart = tipPinhead.JunctionPoint;
                     path.Add(new PillarRouter.Waypoint { Position = routeStart, Radius = tipPinhead.BackRadius, Type = "junction" });
                     // Strut from junction to fork node
                     path.Add(new PillarRouter.Waypoint { Position = forkNode, Radius = trunkRadius, Type = "bridge" });
@@ -789,8 +787,8 @@ public static class SupportEngineV2
             }
 
             float startRadius = Math.Max(pinhead.BackRadius, rCfg.PillarRadiusMm);
-            var routeStart = pinhead.JunctionPoint.Z > 0.1f
-                ? pinhead.JunctionPoint : pinhead.ContactPoint;
+            // A1: Always route from JunctionPoint (same point used for mesh gen)
+            var routeStart = pinhead.JunctionPoint;
             var route = PillarRouter.Route(routeStart, startRadius, bvh, rCfg);
 
             if (!route.ReachesGround && manualPointIds.Contains(id))
@@ -1151,7 +1149,7 @@ public static class SupportEngineV2
                             foreach (var offset in new[] { new Vector3(nudge, 0, 0), new Vector3(-nudge, 0, 0),
                                                            new Vector3(0, nudge, 0), new Vector3(0, -nudge, 0) })
                             {
-                                var nudgedStart = ph.JunctionPoint.Z > 0.1f ? ph.JunctionPoint : ph.ContactPoint;
+                                var nudgedStart = ph.JunctionPoint;
                                 nudgedStart += offset;
                                 var nudgedRoute = PillarRouter.Route(nudgedStart, ph.BackRadius, bvh, routingConfig);
                                 if (nudgedRoute.Path.Count > 1 && nudgedRoute.ReachesGround)
@@ -1286,7 +1284,7 @@ public static class SupportEngineV2
                                 BaseRadiusMm = Math.Max(routingConfig.BaseRadiusMm, newRadius * 2.5f),
                                 WideningFactor = Math.Max(routingConfig.WideningFactor, 0.04f),
                             };
-                            var routeStart = ph.JunctionPoint.Z > 0.1f ? ph.JunctionPoint : ph.ContactPoint;
+                            var routeStart = ph.JunctionPoint;
                             var newRoute = PillarRouter.Route(routeStart, newRadius, bvh, biggerCfg);
                             if (newRoute.Path.Count > 1 && (newRoute.ReachesGround || newRoute.AnchorPoint.HasValue))
                             {
@@ -1454,14 +1452,19 @@ public static class SupportEngineV2
 
             bool isManualSupport = manualPointIds.Contains(id);
 
+            // B1: Place contact sphere so it sits ON the surface, penetrating only contactDepth.
+            // Center = ContactPoint + Direction * (R_c - d), so the sphere is tangent and bites d deep.
+            float contactDepth = sizing.ContactDepth; // user-settable via AdvancedSettings
+            var sphereCenter = pinhead.ContactPoint + pinhead.Direction * (sizing.ContactSphereRadius - contactDepth);
             var contactSphere = SupportMesher.OrientedSphere(
-                pinhead.ContactPoint, sizing.ContactSphereRadius, 4, meshSides);
+                sphereCenter, sizing.ContactSphereRadius, 4, meshSides);
             meshParts.Add(contactSphere);
             if (isManualSupport) { if (!manualMeshParts.ContainsKey(id)) manualMeshParts[id] = new(); manualMeshParts[id].Add(contactSphere); }
 
-            var routeStart = pinhead.JunctionPoint.Z > 0.1f
-                ? pinhead.JunctionPoint
-                : pinhead.ContactPoint + pinhead.Direction * Math.Max(pinhead.ContactPoint.Z * 0.5f, 0.3f);
+            // A1: SINGLE SOURCE — use pinhead.JunctionPoint for BOTH routing and mesh gen.
+            // Previously mesh gen used a synthesized offset point that differed from the
+            // routing start, causing tip-pillar gaps/kinks on tilted supports.
+            var routeStart = pinhead.JunctionPoint;
 
             if (Vector3.Distance(pinhead.ContactPoint, routeStart) > 0.1f)
             {
@@ -1986,7 +1989,8 @@ public static class SupportEngineV2
             CollisionRays = config.CollisionRays,
         };
 
-        var routeStart = pinhead.JunctionPoint.Z > 0.1f ? pinhead.JunctionPoint : pinhead.ContactPoint;
+        // A1: Always use JunctionPoint (same as auto pipeline)
+        var routeStart = pinhead.JunctionPoint;
         var route = PillarRouter.Route(routeStart, pinhead.BackRadius, bvh, routingConfig);
 
         // FIX1: Anchor fallback when routing fails (Path.Count < 2)
@@ -2137,9 +2141,11 @@ public static class SupportEngineV2
         int tipSides = Math.Max(meshSides, 12); // FIX3: higher tessellation for tip cone
         var parts = new List<IndexedTriangleSet>();
 
-        // Contact sphere
+        // B1: Contact sphere offset so it sits ON the surface
+        float contactDepthSingle = sizing.ContactDepth;
+        var sphereCenterSingle = pinhead.ContactPoint + pinhead.Direction * (sizing.ContactSphereRadius - contactDepthSingle);
         var contactSphere = SupportMesher.OrientedSphere(
-            pinhead.ContactPoint, sizing.ContactSphereRadius, 4, tipSides);
+            sphereCenterSingle, sizing.ContactSphereRadius, 4, tipSides);
         parts.Add(contactSphere);
 
         // FIX3: Tip cove + filleted pinhead (mirrors auto pipeline)
