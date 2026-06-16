@@ -3,11 +3,12 @@
  * Each option is a card with an SVG illustration + label. Groups as labeled sections.
  */
 import React from 'react'
+import AdvancedSettingsPanel, { DEFAULT_ADVANCED_SETTINGS, type AdvancedSupportSettings } from './AdvancedSettingsPanel'
 import {
   IconSingle, IconForked, IconTree,
   IconPointContact, IconLineContact, IconFaceContact,
   IconReinfNone, IconReinfPairwise, IconReinfTriangular, IconReinfGlobal, IconBranchAttach,
-  IconBaseNone, IconBaseMiniRaft, IconBaseFullGrid, IconBaseFullHex,
+  IconBaseNone, IconBaseMiniRaft, IconBaseSkate, IconBaseFullGrid, IconBaseFullHex,
   IconDrainage, IconForceDriven,
   IconDensityLight, IconDensityMedium, IconDensityHeavy,
 } from './SupportIcons'
@@ -24,12 +25,21 @@ export interface SupportOptionsConfig {
   reinforcementMode: 'none' | 'pairwise' | 'triangular' | 'global'
   branchAttachment: boolean
   // Group 4: Base / Raft
-  raftMode: 'none' | 'mini' | 'fullGrid' | 'fullHex'
+  raftMode: 'none' | 'mini' | 'skate' | 'fullGrid' | 'fullHex'
+  // Group 4b: Raft Advanced (context-sensitive per shape)
+  raftAreaRatioPct: number
+  raftThicknessMm: number
+  raftHeightMm: number
+  raftSlopeDeg: number
+  gridCellMm: number
+  gridStrutMm: number
   // Group 5: Smart Options
   drainageAware: boolean
   forceDriven: boolean
   // Group 6: Density
   density: 'light' | 'medium' | 'heavy'
+  // Group 7: Advanced Settings (ChiTuBox-style manual sizing)
+  advanced: AdvancedSupportSettings
 }
 
 export const DEFAULT_SUPPORT_OPTIONS: SupportOptionsConfig = {
@@ -39,9 +49,16 @@ export const DEFAULT_SUPPORT_OPTIONS: SupportOptionsConfig = {
   reinforcementMode: 'pairwise',
   branchAttachment: false,
   raftMode: 'mini',
+  raftAreaRatioPct: 115,
+  raftThicknessMm: 1.0,
+  raftHeightMm: 1.5,
+  raftSlopeDeg: 45,
+  gridCellMm: 2.0,
+  gridStrutMm: 0.4,
   drainageAware: false,
   forceDriven: false,
   density: 'medium',
+  advanced: DEFAULT_ADVANCED_SETTINGS,
 }
 
 interface Props {
@@ -111,6 +128,28 @@ function GroupLabel({ children }: { children: React.ReactNode }) {
   return <div className="text-[9px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1.5">{children}</div>
 }
 
+// ── Raft advanced control ──
+
+function RaftControl({ label, unit, value, min, max, step, hint, onChange }: {
+  label: string; unit: string; value: number; min: number; max: number; step: number
+  hint?: string; onChange: (v: number) => void
+}) {
+  return (
+    <label className="flex items-center justify-between text-[10px]" title={hint}>
+      <span className="text-gray-500">{label}</span>
+      <div className="flex items-center gap-1">
+        <input type="number" value={value} min={min} max={max} step={step}
+          onChange={e => {
+            const v = Math.min(max, Math.max(min, Number(e.target.value)))
+            onChange(v)
+          }}
+          className="w-14 bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-[10px] text-gray-200 text-right" />
+        <span className="text-gray-600 text-[9px] w-5">{unit}</span>
+      </div>
+    </label>
+  )
+}
+
 // ── Main Picker ──
 
 export default function SupportOptionsPicker({ value, onChange }: Props) {
@@ -173,12 +212,49 @@ export default function SupportOptionsPicker({ value, onChange }: Props) {
       {/* Group 4: Base / Raft */}
       <div>
         <GroupLabel>Base / Raft</GroupLabel>
-        <div className="grid grid-cols-4 gap-1.5" role="radiogroup" aria-label="Raft Mode">
+        <div className="grid grid-cols-5 gap-1.5" role="radiogroup" aria-label="Raft Mode">
           <OptionCard icon={<IconBaseNone />} label="None" selected={value.raftMode === 'none'} onClick={() => set('raftMode', 'none')} />
           <OptionCard icon={<IconBaseMiniRaft />} label="Mini" selected={value.raftMode === 'mini'} onClick={() => set('raftMode', 'mini')} />
+          <OptionCard icon={<IconBaseSkate />} label="Skate" selected={value.raftMode === 'skate'} onClick={() => set('raftMode', 'skate')} />
           <OptionCard icon={<IconBaseFullGrid />} label="Grid" selected={value.raftMode === 'fullGrid'} onClick={() => set('raftMode', 'fullGrid')} />
           <OptionCard icon={<IconBaseFullHex />} label="Hex" selected={value.raftMode === 'fullHex'} onClick={() => set('raftMode', 'fullHex')} />
         </div>
+
+        {/* Raft Advanced — context-sensitive controls per selected shape */}
+        {value.raftMode !== 'none' && value.raftMode !== 'mini' && (
+          <details className="mt-2">
+            <summary className="text-[9px] text-gray-500 cursor-pointer hover:text-gray-400 py-1">
+              Advanced ▸
+            </summary>
+            <div className="space-y-1.5 mt-1" data-testid="raft-advanced">
+              {/* Shown for ALL plate-raft shapes */}
+              <RaftControl label="Area Ratio" unit="%" value={value.raftAreaRatioPct} min={100} max={200} step={1}
+                hint="base size vs part footprint; higher = better adhesion, more material"
+                onChange={v => set('raftAreaRatioPct', v)} />
+              <RaftControl label="Thickness" unit="mm" value={value.raftThicknessMm} min={0.2} max={5.0} step={0.1}
+                onChange={v => set('raftThicknessMm', v)} />
+              <RaftControl label="Height" unit="mm" value={value.raftHeightMm} min={0.5} max={8.0} step={0.1}
+                onChange={v => set('raftHeightMm', v)} />
+
+              {/* Shown ONLY for Skate */}
+              {value.raftMode === 'skate' && (
+                <RaftControl label="Slope" unit="°" value={value.raftSlopeDeg} min={10} max={80} step={1}
+                  hint="angle of the peel edge"
+                  onChange={v => set('raftSlopeDeg', v)} />
+              )}
+
+              {/* Shown ONLY for CrossGrid and Hex */}
+              {(value.raftMode === 'fullGrid' || value.raftMode === 'fullHex') && (
+                <>
+                  <RaftControl label="Grid Cell" unit="mm" value={value.gridCellMm} min={0.5} max={10} step={0.1}
+                    onChange={v => set('gridCellMm', v)} />
+                  <RaftControl label="Grid Strut" unit="mm" value={value.gridStrutMm} min={0.1} max={2.0} step={0.05}
+                    onChange={v => set('gridStrutMm', v)} />
+                </>
+              )}
+            </div>
+          </details>
+        )}
       </div>
 
       {/* Group 5: Smart Options */}
@@ -199,6 +275,19 @@ export default function SupportOptionsPicker({ value, onChange }: Props) {
           <OptionCard icon={<IconDensityHeavy />} label="Heavy" selected={value.density === 'heavy'} onClick={() => set('density', 'heavy')} />
         </div>
       </div>
+
+      {/* Group 7: Advanced Settings */}
+      <details className="group">
+        <summary className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-400 py-1 select-none">
+          Advanced Settings <span className="text-[8px] text-gray-600 normal-case tracking-normal">({value.advanced.sizingMode})</span>
+        </summary>
+        <div className="mt-2 border border-gray-700/50 rounded-lg p-2">
+          <AdvancedSettingsPanel
+            value={value.advanced}
+            onChange={adv => set('advanced', adv)}
+          />
+        </div>
+      </details>
     </div>
   )
 }

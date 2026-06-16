@@ -112,6 +112,41 @@ public static class SupportSliceIntegrator
     }
 
     /// <summary>
+    /// Render polygon cross-sections (non-circular shapes: cube/cross/pyramid) onto a layer.
+    /// </summary>
+    public static void RenderPolygonsOnLayer(
+        SKCanvas canvas,
+        List<AnalyticalSupportSlicer.SupportPolygon> polygons,
+        float scaleX, float scaleY,
+        float offsetX, float offsetY,
+        byte intensity = 255)
+    {
+        if (polygons.Count == 0) return;
+
+        using var paint = new SKPaint
+        {
+            Color = new SKColor(intensity, intensity, intensity),
+            IsAntialias = true,
+            Style = SKPaintStyle.Fill,
+        };
+
+        foreach (var poly in polygons)
+        {
+            if (poly.Vertices.Length < 3) continue;
+            using var path = new SKPath();
+            var v0 = poly.Vertices[0];
+            path.MoveTo(v0.X * scaleX + offsetX, v0.Y * scaleY + offsetY);
+            for (int i = 1; i < poly.Vertices.Length; i++)
+            {
+                var v = poly.Vertices[i];
+                path.LineTo(v.X * scaleX + offsetX, v.Y * scaleY + offsetY);
+            }
+            path.Close();
+            canvas.DrawPath(path, paint);
+        }
+    }
+
+    /// <summary>
     /// Compute how many layer images will contain support geometry.
     /// Useful for print time estimation.
     /// </summary>

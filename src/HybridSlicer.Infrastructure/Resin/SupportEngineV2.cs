@@ -10,7 +10,35 @@ using HybridSlicer.Infrastructure.Resin.Validation;
 namespace HybridSlicer.Infrastructure.Resin;
 
 /// <summary>Raft mode for build-plate adhesion.</summary>
-public enum RaftMode { None, MiniRafts, FullPlate }
+public enum RaftMode { None, MiniRafts, FullPlate, Skate, CrossGrid, Hex }
+
+/// <summary>Auto (physics-driven) vs Manual (user-typed values) sizing mode.</summary>
+public enum SupportSizingMode { Auto, Manual }
+
+/// <summary>Preset templates for manual sizing: Light/Medium/Heavy seed numeric fields.</summary>
+public enum SupportPreset { Custom, Light, Medium, Heavy }
+
+/// <summary>Touch shape at the tip-model contact point.</summary>
+public enum TouchShape { Sphere, Skate, None }
+
+/// <summary>Cross-section shape for pillars, connections, and bases.</summary>
+public enum SupportShape { Cone, Cylinder, Cube, Cross, Pyramid }
+
+/// <summary>Maps a SupportShape to the number of polygon sides for meshing/slicing.</summary>
+public static class SupportShapeHelper
+{
+    /// <summary>
+    /// Returns the tessellation sides count for the given shape.
+    /// Circle-based shapes return 0 (use default 24), polygon shapes return their side count.
+    /// </summary>
+    public static int ToSides(SupportShape shape) => shape switch
+    {
+        SupportShape.Cube => 4,
+        SupportShape.Cross => 8,
+        SupportShape.Pyramid => 4,
+        _ => 0,  // Cone/Cylinder use default circular tessellation
+    };
+}
 
 /// <summary>
 /// Production-grade resin support engine (V2).
@@ -188,12 +216,20 @@ public static class SupportEngineV2
         public RaftMode RaftMode { get; init; } = RaftMode.MiniRafts;
         /// <summary>Full-plate raft pattern (grid/hex).</summary>
         public LatticeBase.LatticePattern FullPlateRaftPattern { get; init; } = LatticeBase.LatticePattern.Grid;
-        /// <summary>Wall height above base plate (mm). Supports land on top. Typical: 1-2mm.</summary>
-        public float FullPlateRaftHeightMm { get; init; } = 1.5f;
+        /// <summary>Wall height above base plate (mm). Kept low to minimize overlap with model.</summary>
+        public float FullPlateRaftHeightMm { get; init; } = 0.5f;
         /// <summary>Wall thickness for grid/hex walls (mm).</summary>
         public float FullPlateRaftWallThicknessMm { get; init; } = 0.4f;
         /// <summary>Cell opening size — grid cell width or hex side length (mm).</summary>
         public float FullPlateRaftCellSizeMm { get; init; } = 3.0f;
+        /// <summary>Raft area ratio (%). Raft footprint = model XY projection scaled by this ratio. 115 = 15% larger than model.</summary>
+        public float RaftAreaRatioPct { get; init; } = 115f;
+        /// <summary>Skate raft slope angle (degrees) for the outer peel edge.</summary>
+        public float RaftSlopeDeg { get; init; } = 45f;
+        /// <summary>Grid/hex cell opening size (mm).</summary>
+        public float GridCellMm { get; init; } = 2.0f;
+        /// <summary>Grid/hex strut wall thickness (mm).</summary>
+        public float GridStrutMm { get; init; } = 0.4f;
 
         public int Seed { get; init; } = 42;
 
@@ -212,6 +248,50 @@ public static class SupportEngineV2
         public float DrainHoleDiameterMm { get; init; } = 2.5f;
         /// <summary>Minimum trapped volume to warrant a drain hole (mm^3).</summary>
         public float DrainHoleMinTrapVolumeMm3 { get; init; } = 50f;
+
+        // ── Advanced Settings (ChiTuBox-style manual sizing) ─────────
+        /// <summary>Auto (physics) vs Manual (user-typed) sizing mode.</summary>
+        public SupportSizingMode SizingMode { get; init; } = SupportSizingMode.Auto;
+        /// <summary>Active preset (Light/Medium/Heavy/Custom).</summary>
+        public SupportPreset Preset { get; init; } = SupportPreset.Custom;
+
+        // Top section
+        public TouchShape TopTouchShape { get; init; } = TouchShape.Sphere;
+        public float? TopContactDepthMm { get; init; }
+        public float? TopTipUpperDiaMm { get; init; }
+        public float? TopTipLowerDiaMm { get; init; }
+        public SupportShape TopConnectionShape { get; init; } = SupportShape.Cone;
+        public float? TopConnectionLengthMm { get; init; }
+
+        // Middle section
+        public float? MiddlePillarDiaMm { get; init; }
+        public SupportShape MiddlePillarShape { get; init; } = SupportShape.Cylinder;
+
+        // Bottom section
+        public float? BottomBaseDiaMm { get; init; }
+        public float? BottomBaseThicknessMm { get; init; }
+
+        // Raft section
+        public float? RaftCustomThicknessMm { get; init; }
+
+        /// <summary>
+        /// Build a ManualOverrides from the Advanced Settings fields.
+        /// Returns null when SizingMode is Auto (physics-only).
+        /// </summary>
+        public SupportSizer.ManualOverrides? BuildSizerOverrides()
+        {
+            if (SizingMode != SupportSizingMode.Manual) return null;
+
+            var ov = new SupportSizer.ManualOverrides
+            {
+                TipRadiusMm = TopTipUpperDiaMm.HasValue ? TopTipUpperDiaMm.Value / 2f : null,
+                ContactDepthMm = TopContactDepthMm,
+                PillarRadiusMm = MiddlePillarDiaMm.HasValue ? MiddlePillarDiaMm.Value / 2f : null,
+                BaseRadiusMm = BottomBaseDiaMm.HasValue ? BottomBaseDiaMm.Value / 2f : null,
+                BaseHeightMm = BottomBaseThicknessMm,
+            };
+            return ov.IsEmpty ? null : ov;
+        }
     }
 
     // ── Result ───────────────────────────────────────────────────────────
@@ -585,10 +665,11 @@ public static class SupportEngineV2
         }
 
         // ── Step 4: Route pillars ────────────────────────────────────────
-        // When FullPlate raft is active, supports land on top of the wall structure
-        float effectiveBaseZ = config.RaftMode == RaftMode.FullPlate
-            ? config.RaftThicknessMm + config.FullPlateRaftHeightMm
-            : 0f;
+        // Supports always route to the build plate (Z=0). The raft is separate
+        // geometry that sits on the plate around/under the support bases — it does
+        // not change support routing. This keeps support behavior identical regardless
+        // of raft shape (Mini/Skate/Grid/Hex all produce the same supports).
+        float effectiveBaseZ = 0f;
 
         var routingConfig = new PillarRouter.RoutingConfig
         {
@@ -871,6 +952,9 @@ public static class SupportEngineV2
         // support height, and layer cross-section area.
         var sizingLookup = new Dictionary<string, SupportSizer.SupportSizing>();
         {
+            // Global manual overrides from Advanced Settings panel
+            var globalOverrides = config.BuildSizerOverrides();
+
             // Estimate layer area from total overhang area / layer count
             float estLayerArea = pointResult.TotalOverhangArea > 0
                 ? pointResult.TotalOverhangArea
@@ -893,9 +977,10 @@ public static class SupportEngineV2
                     supportHeight: Math.Max(height, 0.5f),
                     layerArea: supportArea,
                     supportsInLayer: Math.Max(1, totalSupports / 3), // approximate sharing
-                    rootsOnPlate: route.ReachesGround);
+                    rootsOnPlate: route.ReachesGround,
+                    ov: globalOverrides);
 
-                // Per-support manual diameter overrides (from interactive placement)
+                // Per-support manual diameter overrides (from interactive placement) win over globals
                 if (pt?.ManualPillarRadiusMm.HasValue == true || pt?.ManualBaseRadiusMm.HasValue == true || pt?.ManualTipRadiusMm.HasValue == true)
                 {
                     sizing = new SupportSizer.SupportSizing
@@ -907,6 +992,8 @@ public static class SupportEngineV2
                         BaseRadius = pt.ManualBaseRadiusMm ?? sizing.BaseRadius,
                         BaseHeight = sizing.BaseHeight,
                         Force = sizing.Force,
+                        RecommendedTipRadius = sizing.RecommendedTipRadius,
+                        RecommendedPillarRadius = sizing.RecommendedPillarRadius,
                     };
                 }
 
@@ -1001,17 +1088,16 @@ public static class SupportEngineV2
 
         // ── Floater safety net: verify every route's geometry actually terminates ──
         // A route may claim ReachesGround but its path waypoints might not extend
-        // to Z≈0 (e.g., after escalation ladder Y-junction merging). Drop any route
-        // whose lowest point is above the plate AND has no anchor termination on
-        // the part surface. Re-flag dropped supports as uncoverable so the coverage
-        // check sees them as unsupported overhang (not silently hidden).
+        // to the effective base level. Drop any route whose lowest point is above
+        // the base AND has no anchor termination on the part surface.
+        // When a raft is present, the base is raised to raftTop (effectiveBaseZ).
         {
             int droppedFloaters = 0;
             var verifiedRoutes = new List<(string id, PillarRouter.PillarRoute route)>(validRoutes.Count);
             foreach (var (rid, rroute) in validRoutes)
             {
                 float lowestZ = rroute.Path.Min(wp => wp.Position.Z);
-                bool geometryGrounded = lowestZ < 0.5f;
+                bool geometryGrounded = lowestZ < effectiveBaseZ + 0.5f;
                 bool hasAnchorWp = rroute.Path.Any(wp => wp.Type == "anchor");
                 bool isAnchored = rroute.AnchorPoint.HasValue || hasAnchorWp;
 
@@ -1213,52 +1299,60 @@ public static class SupportEngineV2
                 MathF.Abs(gap) <= 0.05f ? "PASS" : $"FAIL({gap})");
         }
 
-        // ── Full-plate raft (one connected lattice under all supports) ──
-        if (config.RaftMode == RaftMode.FullPlate)
+        // ── Plate raft (Skate / CrossGrid / Hex / legacy FullPlate) ──
+        if (config.RaftMode is RaftMode.FullPlate or RaftMode.Skate or RaftMode.CrossGrid or RaftMode.Hex)
         {
-            // Compute footprint: bounding box of all plate-routed base positions + margin
-            float fpMinX = float.MaxValue, fpMinY = float.MaxValue;
-            float fpMaxX = float.MinValue, fpMaxY = float.MinValue;
-            int plateRouted = 0;
-            foreach (var (_, route) in validRoutes)
-            {
-                if (!route.ReachesGround || route.Path.Count == 0) continue;
-                var baseWp = route.Path[^1];
-                if (baseWp.Type != "base") continue;
-                plateRouted++;
-                float bx = baseWp.Position.X, by = baseWp.Position.Y;
-                float r = baseWp.Radius;
-                if (bx - r < fpMinX) fpMinX = bx - r;
-                if (by - r < fpMinY) fpMinY = by - r;
-                if (bx + r > fpMaxX) fpMaxX = bx + r;
-                if (by + r > fpMaxY) fpMaxY = by + r;
-            }
+            // Footprint = model's projected XY bounding box, scaled by RaftAreaRatioPct.
+            float modelMinX = mesh.Min.X, modelMaxX = mesh.Max.X;
+            float modelMinY = mesh.Min.Y, modelMaxY = mesh.Max.Y;
+            float modelCx = (modelMinX + modelMaxX) / 2f;
+            float modelCy = (modelMinY + modelMaxY) / 2f;
+            float fpScale = config.RaftAreaRatioPct / 100f;
 
-            if (plateRouted > 0 && fpMaxX > fpMinX && fpMaxY > fpMinY)
+            float fpMinX = modelCx + (modelMinX - modelCx) * fpScale;
+            float fpMaxX = modelCx + (modelMaxX - modelCx) * fpScale;
+            float fpMinY = modelCy + (modelMinY - modelCy) * fpScale;
+            float fpMaxY = modelCy + (modelMaxY - modelCy) * fpScale;
+
+            int plateRouted = validRoutes.Count(r => r.route.ReachesGround && r.route.Path.Count > 0 && r.route.Path[^1].Type == "base");
+
+            if (fpMaxX > fpMinX && fpMaxY > fpMinY)
             {
-                fpMinX -= config.RaftMarginMm;
-                fpMinY -= config.RaftMarginMm;
-                fpMaxX += config.RaftMarginMm;
-                fpMaxY += config.RaftMarginMm;
                 float raftW = fpMaxX - fpMinX;
                 float raftD = fpMaxY - fpMinY;
-                float cx = (fpMinX + fpMaxX) / 2f;
-                float cy = (fpMinY + fpMaxY) / 2f;
-                float raftTopR = MathF.Max(raftW, raftD) / 2f;
+                IndexedTriangleSet raftMesh;
 
-                var raftPattern = config.FullPlateRaftPattern == LatticeBase.LatticePattern.Honeycomb
-                    ? FullPlateRaft.Pattern.Hex : FullPlateRaft.Pattern.Grid;
-                var fullRaft = FullPlateRaft.Generate(
+                if (config.RaftMode == RaftMode.Skate)
+                {
+                    // Skate: solid mat with sloped outer peel edge, sits on plate at Z=0
+                    raftMesh = FullPlateRaft.GenerateSkate(
+                        fpMinX, fpMinY, fpMaxX, fpMaxY,
+                        config.RaftThicknessMm, config.RaftSlopeDeg);
+                }
+                else
+                {
+                    // CrossGrid / Hex / legacy FullPlate: wall lattice
+                    var raftPattern = (config.RaftMode == RaftMode.Hex)
+                        ? FullPlateRaft.Pattern.Hex
+                        : (config.RaftMode == RaftMode.CrossGrid || config.FullPlateRaftPattern == LatticeBase.LatticePattern.Grid)
+                            ? FullPlateRaft.Pattern.Grid
+                            : FullPlateRaft.Pattern.Hex;
+                    // Raft sits on the plate at Z=0. Keep walls short to avoid
+                    // significant collision with the model.
+                    raftMesh = FullPlateRaft.Generate(
+                        fpMinX, fpMinY, fpMaxX, fpMaxY,
+                        baseThickness: config.RaftThicknessMm,
+                        wallHeight: config.FullPlateRaftHeightMm,
+                        wallThickness: config.GridStrutMm,
+                        cellSize: config.GridCellMm,
+                        pattern: raftPattern);
+                }
+                meshParts.Add(raftMesh);
+
+                Serilog.Log.Information("V2 Raft({Shape}): modelXY=({MnX:F1},{MnY:F1})→({MxX:F1},{MxY:F1}) raftXY=({RnX:F1},{RnY:F1})→({RxX:F1},{RxY:F1}) ratio={Ratio}% size={W:F1}x{D:F1}mm plateRouted={N} tris={Tris}",
+                    config.RaftMode, modelMinX, modelMinY, modelMaxX, modelMaxY,
                     fpMinX, fpMinY, fpMaxX, fpMaxY,
-                    baseThickness: config.RaftThicknessMm,
-                    wallHeight: config.FullPlateRaftHeightMm,
-                    wallThickness: config.FullPlateRaftWallThicknessMm,
-                    cellSize: config.FullPlateRaftCellSizeMm,
-                    pattern: raftPattern);
-                meshParts.Add(fullRaft);
-
-                Serilog.Log.Information("V2 FullPlateRaft: footprint=({MinX:F1},{MinY:F1})→({MaxX:F1},{MaxY:F1}) size={W:F1}x{D:F1}mm plateRouted={N} tris={Tris} pattern={Pat}",
-                    fpMinX, fpMinY, fpMaxX, fpMaxY, raftW, raftD, plateRouted, fullRaft.FaceCount, raftPattern);
+                    config.RaftAreaRatioPct, raftW, raftD, plateRouted, raftMesh.FaceCount);
             }
         }
 
@@ -1594,6 +1688,56 @@ public static class SupportEngineV2
                     .ToList(),
             interconnections);
 
+        // Route mini-raft pads into sliceElements so they actually print
+        if (config.RaftMode == RaftMode.MiniRafts)
+        {
+            foreach (var (id, route) in validRoutes)
+            {
+                if (!route.ReachesGround || route.Path.Count == 0) continue;
+                var baseWp = route.Path[^1];
+                if (baseWp.Type != "base") continue;
+                float raftR = baseWp.Radius + config.RaftMarginMm;
+                float raftZ = baseWp.Position.Z;
+                sliceElements.Add(new AnalyticalSupportSlicer.SupportElement
+                {
+                    PointA = new Vector3(baseWp.Position.X, baseWp.Position.Y, raftZ),
+                    PointB = new Vector3(baseWp.Position.X, baseWp.Position.Y, raftZ - config.RaftThicknessMm),
+                    RadiusA = raftR, RadiusB = raftR,
+                    Type = "raft",
+                });
+            }
+        }
+
+        // Route full-plate raft into sliceElements
+        if (config.RaftMode is RaftMode.FullPlate or RaftMode.Skate or RaftMode.CrossGrid or RaftMode.Hex)
+        {
+            float fpScale = config.RaftAreaRatioPct / 100f;
+            float modelCx = (mesh.Min.X + mesh.Max.X) / 2f;
+            float modelCy = (mesh.Min.Y + mesh.Max.Y) / 2f;
+            float fpMinX = modelCx + (mesh.Min.X - modelCx) * fpScale;
+            float fpMaxX = modelCx + (mesh.Max.X - modelCx) * fpScale;
+            float fpMinY = modelCy + (mesh.Min.Y - modelCy) * fpScale;
+            float fpMaxY = modelCy + (mesh.Max.Y - modelCy) * fpScale;
+
+            if (fpMaxX > fpMinX && fpMaxY > fpMinY)
+            {
+                // Approximate the raft footprint as a large circle for slice coverage
+                float raftCx = (fpMinX + fpMaxX) / 2f;
+                float raftCy = (fpMinY + fpMaxY) / 2f;
+                float raftR = MathF.Sqrt((fpMaxX - fpMinX) * (fpMaxX - fpMinX) + (fpMaxY - fpMinY) * (fpMaxY - fpMinY)) / 2f;
+                float raftH = config.RaftMode == RaftMode.Skate
+                    ? config.RaftThicknessMm
+                    : config.RaftThicknessMm + config.FullPlateRaftHeightMm;
+                sliceElements.Add(new AnalyticalSupportSlicer.SupportElement
+                {
+                    PointA = new Vector3(raftCx, raftCy, 0),
+                    PointB = new Vector3(raftCx, raftCy, raftH),
+                    RadiusA = raftR, RadiusB = raftR,
+                    Type = "raft",
+                });
+            }
+        }
+
         // ── Step 9: Build legacy format — only supports with complete load path ─
         var legacySupports = BuildLegacySupports(pinheads, validRoutes);
         var legacyCrossBraces = BuildLegacyCrossBraces(interconnections, validRoutes);
@@ -1712,8 +1856,7 @@ public static class SupportEngineV2
         }
 
         // ── Step 2: Pillar routing (same as auto Step 4) ──
-        float effectiveBaseZ = config.RaftMode == RaftMode.FullPlate
-            ? config.RaftThicknessMm + config.FullPlateRaftHeightMm : 0f;
+        float effectiveBaseZ = 0f;
         var routingConfig = new PillarRouter.RoutingConfig
         {
             BaseZ = effectiveBaseZ,
@@ -1808,7 +1951,8 @@ public static class SupportEngineV2
             supportHeight: Math.Max(supportHeight, 0.5f),
             layerArea: 25f,
             supportsInLayer: 1,
-            rootsOnPlate: route.ReachesGround);
+            rootsOnPlate: route.ReachesGround,
+            ov: config.BuildSizerOverrides());
 
         // Apply manual overrides
         if (overrideTipRadius.HasValue || overridePillarRadius.HasValue || overrideBaseRadius.HasValue)

@@ -67,6 +67,24 @@ public sealed class SupportV2Controller : ControllerBase
         [FromForm] float fullPlateRaftHeightMm = 1.5f,
         [FromForm] float fullPlateRaftWallThicknessMm = 0.4f,
         [FromForm] float fullPlateRaftCellSizeMm = 3.0f,
+        [FromForm] float raftAreaRatioPct = 115f,
+        [FromForm] float raftSlopeDeg = 45f,
+        [FromForm] float gridCellMm = 2.0f,
+        [FromForm] float gridStrutMm = 0.4f,
+        // Advanced Settings (ChiTuBox-style manual sizing)
+        [FromForm] string sizingMode = "auto",
+        [FromForm] string supportPreset = "custom",
+        [FromForm] string topTouchShape = "sphere",
+        [FromForm] float? topContactDepthMm = null,
+        [FromForm] float? topTipUpperDiaMm = null,
+        [FromForm] float? topTipLowerDiaMm = null,
+        [FromForm] string topConnectionShape = "cone",
+        [FromForm] float? topConnectionLengthMm = null,
+        [FromForm] float? middlePillarDiaMm = null,
+        [FromForm] string middlePillarShape = "cylinder",
+        [FromForm] float? bottomBaseDiaMm = null,
+        [FromForm] float? bottomBaseThicknessMm = null,
+        [FromForm] float? raftCustomThicknessMm = null,
         // User transforms are baked into STL vertices by the frontend — no rotation/scale params
         CancellationToken ct = default)
     {
@@ -130,6 +148,18 @@ public sealed class SupportV2Controller : ControllerBase
         else if (string.Equals(fullPlateRaftPattern, "Hex", StringComparison.OrdinalIgnoreCase))
             fpRaftPattern = LatticeBase.LatticePattern.Honeycomb;
 
+        // Parse advanced settings enums
+        var sizingModeEnum = SupportSizingMode.Auto;
+        Enum.TryParse<SupportSizingMode>(sizingMode, true, out sizingModeEnum);
+        var presetEnum = SupportPreset.Custom;
+        Enum.TryParse<SupportPreset>(supportPreset, true, out presetEnum);
+        var touchShapeEnum = TouchShape.Sphere;
+        Enum.TryParse<TouchShape>(topTouchShape, true, out touchShapeEnum);
+        var connShapeEnum = SupportShape.Cone;
+        Enum.TryParse<SupportShape>(topConnectionShape, true, out connShapeEnum);
+        var pillarShapeEnum = SupportShape.Cylinder;
+        Enum.TryParse<SupportShape>(middlePillarShape, true, out pillarShapeEnum);
+
         var result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig
         {
             Orientation = orient,
@@ -149,7 +179,7 @@ public sealed class SupportV2Controller : ControllerBase
             BaseLatticePattern = lattice,
             EnableMiniRafts = raftModeEnum == HybridSlicer.Infrastructure.Resin.RaftMode.MiniRafts,
             RaftMarginMm = raftMarginMm,
-            RaftThicknessMm = raftThicknessMm,
+            RaftThicknessMm = raftCustomThicknessMm ?? raftThicknessMm,
             ManualContacts = manualContactList,
             // New features from visual picker
             EnableForking = enableForking,
@@ -165,9 +195,27 @@ public sealed class SupportV2Controller : ControllerBase
             FullPlateRaftHeightMm = fullPlateRaftHeightMm,
             FullPlateRaftWallThicknessMm = fullPlateRaftWallThicknessMm,
             FullPlateRaftCellSizeMm = fullPlateRaftCellSizeMm,
+            RaftAreaRatioPct = raftAreaRatioPct,
+            RaftSlopeDeg = raftSlopeDeg,
+            GridCellMm = gridCellMm,
+            GridStrutMm = gridStrutMm,
             EnableDrainageAwareSupports = enableDrainageAwareSupports,
             EnableForceDrivenPlacement = enableForceDrivenPlacement,
             EnableFillets = enableFillets,
+            // Advanced Settings
+            SizingMode = sizingModeEnum,
+            Preset = presetEnum,
+            TopTouchShape = touchShapeEnum,
+            TopContactDepthMm = topContactDepthMm,
+            TopTipUpperDiaMm = topTipUpperDiaMm,
+            TopTipLowerDiaMm = topTipLowerDiaMm,
+            TopConnectionShape = connShapeEnum,
+            TopConnectionLengthMm = topConnectionLengthMm,
+            MiddlePillarDiaMm = middlePillarDiaMm,
+            MiddlePillarShape = pillarShapeEnum,
+            BottomBaseDiaMm = bottomBaseDiaMm,
+            BottomBaseThicknessMm = bottomBaseThicknessMm,
+            RaftCustomThicknessMm = raftCustomThicknessMm,
         });
 
         return Ok(new

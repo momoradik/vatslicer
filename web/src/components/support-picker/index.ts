@@ -1,3 +1,5 @@
 export { default as SupportOptionsPicker, DEFAULT_SUPPORT_OPTIONS } from './SupportOptionsPicker'
 export type { SupportOptionsConfig } from './SupportOptionsPicker'
+export { default as AdvancedSettingsPanel, DEFAULT_ADVANCED_SETTINGS } from './AdvancedSettingsPanel'
+export type { AdvancedSupportSettings } from './AdvancedSettingsPanel'
 export * from './SupportIcons'

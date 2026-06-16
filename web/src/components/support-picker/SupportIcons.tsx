@@ -237,6 +237,16 @@ export const IconBaseFullHex = () => (
   </svg>
 )
 
+export const IconBaseSkate = () => (
+  <svg viewBox={VB} className="w-full h-full">
+    <Plate /><PartBar />
+    {[40, 60, 80].map((x, i) => <React.Fragment key={i}><Tip x={x} y={PART_Y} /><Pillar x1={x} y1={PART_Y + 3} x2={x} y2={PLATE_Y - 4} /></React.Fragment>)}
+    {/* Skate: solid mat with sloped peel edge */}
+    <polygon points={`30,${PLATE_Y} 34,${PLATE_Y - 4} 86,${PLATE_Y - 4} 90,${PLATE_Y}`}
+      className="fill-cyan-400/25 dark:fill-cyan-300/20 stroke-cyan-400/60 dark:stroke-cyan-300/50" strokeWidth={0.8} />
+  </svg>
+)
+
 // ═══ GROUP 5: SMART OPTIONS ═══
 
 export const IconDrainage = () => (

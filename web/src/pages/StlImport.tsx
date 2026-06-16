@@ -1253,10 +1253,39 @@ export default function StlImport() {
       fd.append('reinforcementMode', supportOptions.reinforcementMode === 'none' ? 'None'
         : supportOptions.reinforcementMode === 'pairwise' ? 'Pairwise'
         : supportOptions.reinforcementMode === 'triangular' ? 'Triangular' : 'Global')
-      fd.append('raftMode', supportOptions.raftMode === 'none' ? 'None' : supportOptions.raftMode === 'mini' ? 'MiniRafts' : 'FullPlate')
+      const raftModeMap: Record<string, string> = {
+        'none': 'None', 'mini': 'MiniRafts', 'skate': 'Skate',
+        'fullGrid': 'CrossGrid', 'fullHex': 'Hex',
+      }
+      fd.append('raftMode', raftModeMap[supportOptions.raftMode] ?? 'MiniRafts')
       fd.append('fullPlateRaftPattern', supportOptions.raftMode === 'fullHex' ? 'Honeycomb' : 'Grid')
+      // Raft advanced params
+      fd.append('raftAreaRatioPct', String(supportOptions.raftAreaRatioPct))
+      fd.append('raftThicknessMm', String(supportOptions.raftThicknessMm))
+      fd.append('fullPlateRaftHeightMm', String(supportOptions.raftHeightMm))
+      fd.append('raftSlopeDeg', String(supportOptions.raftSlopeDeg))
+      fd.append('gridCellMm', String(supportOptions.gridCellMm))
+      fd.append('gridStrutMm', String(supportOptions.gridStrutMm))
       fd.append('enableDrainageAwareSupports', String(supportOptions.drainageAware))
       fd.append('enableForceDrivenPlacement', String(supportOptions.forceDriven))
+
+      // Advanced Settings (ChiTuBox-style manual sizing)
+      const adv = supportOptions.advanced
+      fd.append('sizingMode', adv.sizingMode)
+      fd.append('supportPreset', adv.preset)
+      fd.append('topTouchShape', adv.topTouchShape)
+      fd.append('topConnectionShape', adv.topConnectionShape)
+      fd.append('middlePillarShape', adv.middlePillarShape)
+      if (adv.sizingMode === 'manual') {
+        fd.append('topContactDepthMm', String(adv.topContactDepthMm))
+        fd.append('topTipUpperDiaMm', String(adv.topTipUpperDiaMm))
+        fd.append('topTipLowerDiaMm', String(adv.topTipLowerDiaMm))
+        fd.append('topConnectionLengthMm', String(adv.topConnectionLengthMm))
+        fd.append('middlePillarDiaMm', String(adv.middlePillarDiaMm))
+        fd.append('bottomBaseDiaMm', String(adv.bottomBaseDiaMm))
+        fd.append('bottomBaseThicknessMm', String(adv.bottomBaseThicknessMm))
+        fd.append('raftCustomThicknessMm', String(adv.raftThicknessMm))
+      }
 
       // Send manual support contacts — same yUpToZUp conversion as the mesh
       const manualPts = targetModel.manualSupports?.points ?? []

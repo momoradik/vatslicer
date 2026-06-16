@@ -43,6 +43,18 @@ public static class AnalyticalSupportSlicer
     }
 
     /// <summary>
+    /// A polygon cross-section at a given Z layer (for non-circular shapes: cube, cross, pyramid).
+    /// </summary>
+    public readonly struct SupportPolygon
+    {
+        public required float CenterX { get; init; }
+        public required float CenterY { get; init; }
+        /// <summary>Vertices of the polygon outline (closed, CCW winding).</summary>
+        public required Vector2[] Vertices { get; init; }
+        public bool IsSupport { get; init; }
+    }
+
+    /// <summary>
     /// A support element that can be analytically sliced.
     /// Represents a segment from point A to point B with radii at each end.
     /// </summary>
@@ -52,8 +64,12 @@ public static class AnalyticalSupportSlicer
         public required Vector3 PointB { get; init; }
         public required float RadiusA { get; init; }
         public required float RadiusB { get; init; }
-        /// <summary>"sphere", "pillar", "bridge", "pinhead", "pedestal", "interconnect"</summary>
+        /// <summary>"sphere", "pillar", "bridge", "pinhead", "pedestal", "interconnect", "fillet", "raft"</summary>
         public required string Type { get; init; }
+        /// <summary>Number of polygon sides for cross-section. 0 or >= 24 = circle, 4 = cube/pyramid, 8 = cross.</summary>
+        public int Sides { get; init; }
+        /// <summary>Rotation angle (radians) for polygon cross-sections.</summary>
+        public float RotationRad { get; init; }
     }
 
     /// <summary>
@@ -185,6 +201,87 @@ public static class AnalyticalSupportSlicer
         }
 
         return circles;
+    }
+
+    /// <summary>
+    /// Slice elements at Z, returning both circles AND polygon cross-sections.
+    /// Non-circular elements (Sides == 4 for cube/pyramid, 8 for cross) produce polygons.
+    /// </summary>
+    public static (List<SupportCircle> circles, List<SupportPolygon> polygons) SliceAtZFull(
+        List<SupportElement> elements, float z)
+    {
+        var circles = new List<SupportCircle>();
+        var polygons = new List<SupportPolygon>();
+
+        foreach (var elem in elements)
+        {
+            float zA = elem.PointA.Z, zB = elem.PointB.Z;
+            float zMin = Math.Min(zA, zB), zMax = Math.Max(zA, zB);
+            if (z < zMin - 0.001f || z > zMax + 0.001f) continue;
+
+            float segHeight = Math.Abs(zA - zB);
+            if (segHeight < 0.001f)
+            {
+                if (Math.Abs(z - zA) < 0.01f)
+                {
+                    float r = Math.Max(elem.RadiusA, elem.RadiusB);
+                    if (r > 0.01f)
+                    {
+                        circles.Add(new SupportCircle { CenterX = elem.PointA.X, CenterY = elem.PointA.Y, Radius = r, IsSupport = true });
+                        circles.Add(new SupportCircle { CenterX = elem.PointB.X, CenterY = elem.PointB.Y, Radius = r, IsSupport = true });
+                    }
+                }
+                continue;
+            }
+
+            float t = (z - zA) / (zB - zA);
+            t = Math.Clamp(t, 0f, 1f);
+            float cx = elem.PointA.X + (elem.PointB.X - elem.PointA.X) * t;
+            float cy = elem.PointA.Y + (elem.PointB.Y - elem.PointA.Y) * t;
+            float r2 = elem.RadiusA + (elem.RadiusB - elem.RadiusA) * t;
+
+            if (r2 < 0.01f) continue;
+
+            bool isPolygon = elem.Sides > 0 && elem.Sides < 24;
+            if (isPolygon)
+            {
+                var verts = GeneratePolygonVertices(cx, cy, r2, elem.Sides, elem.RotationRad);
+                polygons.Add(new SupportPolygon { CenterX = cx, CenterY = cy, Vertices = verts, IsSupport = true });
+            }
+            else
+            {
+                float dx = elem.PointB.X - elem.PointA.X;
+                float dy = elem.PointB.Y - elem.PointA.Y;
+                float dz = elem.PointB.Z - elem.PointA.Z;
+                float xyDist = MathF.Sqrt(dx * dx + dy * dy);
+                float tiltAngle = MathF.Atan2(xyDist, Math.Abs(dz));
+                float cosAngle = MathF.Cos(tiltAngle);
+                float effectiveR = cosAngle > 0.1f ? r2 / cosAngle : r2;
+                effectiveR = Math.Min(effectiveR, r2 * 3f);
+                if (effectiveR > 0.01f)
+                    circles.Add(new SupportCircle { CenterX = cx, CenterY = cy, Radius = effectiveR, IsSupport = true });
+            }
+        }
+
+        return (circles, polygons);
+    }
+
+    /// <summary>
+    /// Generate regular polygon vertices at a given center and radius.
+    /// Used for cube (4 sides), cross (8 sides), pyramid (4 sides) cross-sections.
+    /// Uses the same vertex formula as SupportMesher.Frustum so preview and print match.
+    /// </summary>
+    public static Vector2[] GeneratePolygonVertices(float cx, float cy, float radius, int sides, float rotationRad = 0)
+    {
+        var verts = new Vector2[sides];
+        for (int i = 0; i < sides; i++)
+        {
+            float angle = 2f * MathF.PI * i / sides + rotationRad;
+            verts[i] = new Vector2(
+                cx + MathF.Cos(angle) * radius,
+                cy + MathF.Sin(angle) * radius);
+        }
+        return verts;
     }
 
     /// <summary>

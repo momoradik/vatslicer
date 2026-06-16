@@ -62,6 +62,26 @@ public static class SupportSizer
     /// <summary>Bulk tensile strength of cured resin (MPa).</summary>
     public const float SIGMA_RESIN = 40f; // MPa — standard resin
 
+    // ── Manual overrides (from Advanced Settings panel) ─────────────
+
+    /// <summary>
+    /// Optional per-dimension manual overrides from the UI's Advanced Settings panel.
+    /// Any non-null value wins over the physics-computed dimension.
+    /// </summary>
+    public sealed class ManualOverrides
+    {
+        public float? TipRadiusMm { get; init; }
+        public float? ContactSphereRadiusMm { get; init; }
+        public float? ContactDepthMm { get; init; }
+        public float? PillarRadiusMm { get; init; }
+        public float? BaseRadiusMm { get; init; }
+        public float? BaseHeightMm { get; init; }
+
+        public bool IsEmpty =>
+            !TipRadiusMm.HasValue && !ContactSphereRadiusMm.HasValue && !ContactDepthMm.HasValue &&
+            !PillarRadiusMm.HasValue && !BaseRadiusMm.HasValue && !BaseHeightMm.HasValue;
+    }
+
     // ── Result ────────────────────────────────────────────────────────
 
     public sealed class SupportSizing
@@ -80,6 +100,10 @@ public static class SupportSizer
         public required float BaseHeight { get; init; }
         /// <summary>Peel force this support carries (N).</summary>
         public required float Force { get; init; }
+        /// <summary>Physics-recommended tip radius before any manual override (mm).</summary>
+        public float RecommendedTipRadius { get; init; }
+        /// <summary>Physics-recommended pillar radius before any manual override (mm).</summary>
+        public float RecommendedPillarRadius { get; init; }
     }
 
     /// <summary>
@@ -99,7 +123,8 @@ public static class SupportSizer
         bool rootsOnPlate,
         float pAdh = P_ADH_DEFAULT,
         float sigmaBond = SIGMA_BOND,
-        float sigmaResin = SIGMA_RESIN)
+        float sigmaResin = SIGMA_RESIN,
+        ManualOverrides? ov = null)
     {
         // ── 1. DEMAND: peel force per support ────────────────────────
         float F = (pAdh * layerArea) / MathF.Max(1, supportsInLayer);
@@ -123,15 +148,31 @@ public static class SupportSizer
             hBoss = rBase * 0.8f;
         }
 
+        // Store physics recommendations before applying overrides
+        float recommendedTip = rTip;
+        float recommendedPillar = rPillar;
+
+        // ── 5. Apply manual overrides ────────────────────────────────
+        if (ov != null)
+        {
+            if (ov.TipRadiusMm.HasValue) rTip = ov.TipRadiusMm.Value;
+            if (ov.ContactSphereRadiusMm.HasValue) rContactSphere = ov.ContactSphereRadiusMm.Value;
+            if (ov.PillarRadiusMm.HasValue) rPillar = ov.PillarRadiusMm.Value;
+            if (ov.BaseRadiusMm.HasValue) rBase = ov.BaseRadiusMm.Value;
+            if (ov.BaseHeightMm.HasValue) hBoss = ov.BaseHeightMm.Value;
+        }
+
         return new SupportSizing
         {
             TipRadius = rTip,
-            ContactSphereRadius = rContactSphere,
-            ContactDepth = CONTACT_DEPTH,
+            ContactSphereRadius = ov?.ContactSphereRadiusMm ?? rContactSphere,
+            ContactDepth = ov?.ContactDepthMm ?? CONTACT_DEPTH,
             PillarRadius = rPillar,
             BaseRadius = rBase,
             BaseHeight = hBoss,
             Force = F,
+            RecommendedTipRadius = recommendedTip,
+            RecommendedPillarRadius = recommendedPillar,
         };
     }
 }

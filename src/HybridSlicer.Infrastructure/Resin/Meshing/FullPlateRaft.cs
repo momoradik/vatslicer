@@ -81,10 +81,12 @@ public static class FullPlateRaft
         float zBot, float zTop, float wallThickness, float cellSize)
     {
         // Flat-topped hexagons: vertex at 0°, 60°, 120°, 180°, 240°, 300°
-        // cellSize = center-to-vertex radius
-        float hexR = cellSize;
-        float colStep = hexR * 1.5f;          // horizontal center-to-center
-        float rowStep = hexR * MathF.Sqrt(3f); // vertical center-to-center
+        // Scale hexR so we get ~10-15 hexes per axis (visible, not a dense mass).
+        // Target: footprint / hexR ≈ 12-15 cells across the larger dimension.
+        float footprintMax = Math.Max(maxX - minX, maxY - minY);
+        float hexR = Math.Max(cellSize * 2.5f, footprintMax / 14f);
+        float colStep = hexR * 1.5f;
+        float rowStep = hexR * MathF.Sqrt(3f);
 
         // Track edges to avoid duplicates (quantized vertex pairs)
         var edges = new HashSet<long>();
@@ -207,5 +209,65 @@ public static class FullPlateRaft
         mesh.AddFace(v0, v4, v7); mesh.AddFace(v0, v7, v3);
         // Right (+X)
         mesh.AddFace(v1, v2, v6); mesh.AddFace(v1, v6, v5);
+    }
+
+    // ── Skate raft ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Generate a skate raft: one solid connected mat filling the footprint.
+    /// The outer wall is sloped at RaftSlopeDeg, forming a raised peel edge
+    /// (top edge inset from bottom edge). The interior top surface is flat.
+    ///
+    /// Cross-section (side view):
+    ///         ┌───────────────┐  ← top surface (inset from bottom by lip)
+    ///        /                 \  ← sloped outer wall at RaftSlopeDeg
+    ///       └───────────────────┘ ← bottom on build plate (full footprint)
+    /// </summary>
+    public static IndexedTriangleSet GenerateSkate(
+        float minX, float minY, float maxX, float maxY,
+        float thickness = 1.0f, float slopeDeg = 45f)
+    {
+        var mesh = new IndexedTriangleSet();
+        float w = maxX - minX, d = maxY - minY;
+        if (w < 1f || d < 1f || thickness < 0.05f) return mesh;
+
+        // The lip inset: how far the top edge is inset from the bottom edge
+        // lip = thickness / tan(slope). At 45° → lip = thickness.
+        float slopeRad = slopeDeg * MathF.PI / 180f;
+        float tanSlope = MathF.Tan(slopeRad);
+        float lip = tanSlope > 0.01f ? thickness / tanSlope : thickness;
+        lip = Math.Min(lip, Math.Min(w, d) * 0.4f); // don't inset more than 40%
+
+        float topZ = thickness;
+
+        // Bottom corners (full footprint at Z=0)
+        int b0 = mesh.AddVertex(new Vector3(minX, minY, 0));
+        int b1 = mesh.AddVertex(new Vector3(maxX, minY, 0));
+        int b2 = mesh.AddVertex(new Vector3(maxX, maxY, 0));
+        int b3 = mesh.AddVertex(new Vector3(minX, maxY, 0));
+
+        // Top corners (inset by lip at Z=topZ)
+        int t0 = mesh.AddVertex(new Vector3(minX + lip, minY + lip, topZ));
+        int t1 = mesh.AddVertex(new Vector3(maxX - lip, minY + lip, topZ));
+        int t2 = mesh.AddVertex(new Vector3(maxX - lip, maxY - lip, topZ));
+        int t3 = mesh.AddVertex(new Vector3(minX + lip, maxY - lip, topZ));
+
+        // Bottom face (Z=0, normal -Z)
+        mesh.AddFace(b0, b2, b1); mesh.AddFace(b0, b3, b2);
+
+        // Top face (Z=topZ, normal +Z)
+        mesh.AddFace(t0, t1, t2); mesh.AddFace(t0, t2, t3);
+
+        // Sloped outer walls (4 sides, each a trapezoid = 2 tris)
+        // Front (-Y): b0,b1 (bottom) → t0,t1 (top, inset)
+        mesh.AddFace(b0, b1, t1); mesh.AddFace(b0, t1, t0);
+        // Back (+Y): b3,b2 (bottom) → t3,t2 (top, inset)
+        mesh.AddFace(b2, b3, t3); mesh.AddFace(b2, t3, t2);
+        // Left (-X): b0,b3 (bottom) → t0,t3 (top, inset)
+        mesh.AddFace(b3, b0, t0); mesh.AddFace(b3, t0, t3);
+        // Right (+X): b1,b2 (bottom) → t1,t2 (top, inset)
+        mesh.AddFace(b1, b2, t2); mesh.AddFace(b1, t2, t1);
+
+        return mesh;
     }
 }
