@@ -168,6 +168,10 @@ public static class SupportEngineV2
             public float? TipDiameterMm { get; init; }
             public float? ShaftDiameterMm { get; init; }
             public float? BaseDiameterMm { get; init; }
+            // Per-support shape overrides (B6)
+            public string? TouchShape { get; init; }
+            public string? ConnectionShape { get; init; }
+            public string? PillarShape { get; init; }
         }
 
         /// <summary>
@@ -1436,6 +1440,11 @@ public static class SupportEngineV2
         // ══════════════════════════════════════════════════════════════════
         int meshSides = totalRoutes > 200 ? 4 : totalRoutes > 50 ? 6 : 8;
         int braceSides = Math.Max(3, meshSides - 2);
+        // Shape-specific sides: non-circular shapes override the default tessellation
+        int pillarShapeSides = SupportShapeHelper.ToSides(config.MiddlePillarShape);
+        int connShapeSides = SupportShapeHelper.ToSides(config.TopConnectionShape);
+        int effectivePillarSides = pillarShapeSides > 0 ? pillarShapeSides : meshSides;
+        int effectiveConnSides = connShapeSides > 0 ? connShapeSides : meshSides;
         bool useLattice = config.BaseLatticePattern != LatticeBase.LatticePattern.Solid && totalRoutes < 500;
         bool useHollow = config.EnableHollowSupports && totalRoutes < 150;
         bool useMiniRaft = config.RaftMode == RaftMode.MiniRafts && totalRoutes < 200;
@@ -1485,7 +1494,7 @@ public static class SupportEngineV2
                     for (int ti = 0; ti < tipChain.Count - 1; ti++)
                     {
                         var seg = SupportMesher.OrientedFrustum(
-                            tipChain[ti], tipChain[ti + 1], tipRadii[ti], tipRadii[ti + 1], meshSides);
+                            tipChain[ti], tipChain[ti + 1], tipRadii[ti], tipRadii[ti + 1], effectiveConnSides);
                         meshParts.Add(seg);
                         if (isManualSupport) manualMeshParts[id].Add(seg);
                     }
@@ -1494,7 +1503,7 @@ public static class SupportEngineV2
                 {
                     var phMesh = SupportMesher.OrientedFrustum(
                         pinhead.ContactPoint, routeStart,
-                        sizing.TipRadius, sizing.PillarRadius, meshSides);
+                        sizing.TipRadius, sizing.PillarRadius, effectiveConnSides);
                     meshParts.Add(phMesh);
                     if (isManualSupport) manualMeshParts[id].Add(phMesh);
                 }
@@ -1545,7 +1554,9 @@ public static class SupportEngineV2
                 }
                 else
                 {
-                    segMesh = SupportMesher.OrientedFrustum(wp1.Position, wp2.Position, wp1.Radius, wp2.Radius, meshSides);
+                    // Use shape-specific sides for pillar segments, default for base/bridge
+                    int segSides = (wp1.Type == "pillar" || wp1.Type == "junction") ? effectivePillarSides : meshSides;
+                    segMesh = SupportMesher.OrientedFrustum(wp1.Position, wp2.Position, wp1.Radius, wp2.Radius, segSides);
                 }
                 meshParts.Add(segMesh);
                 if (isManualRoute) manualMeshParts[id].Add(segMesh);
@@ -1555,7 +1566,7 @@ public static class SupportEngineV2
                     float junctionR = wp1.Radius;
                     if (wp1.Type == "bridge" || wp2.Type == "bridge")
                         junctionR = Math.Max(junctionR, wp1.Radius * 1.8f);
-                    var sphere = SupportMesher.OrientedSphere(wp1.Position, junctionR, 4, meshSides);
+                    var sphere = SupportMesher.OrientedSphere(wp1.Position, junctionR, 4, effectivePillarSides);
                     meshParts.Add(sphere);
                     if (isManualRoute) manualMeshParts[id].Add(sphere);
                 }
@@ -1660,6 +1671,18 @@ public static class SupportEngineV2
                     .Select(p => (p.pinhead, routeLookup[p.id]))
                     .ToList(),
             interconnections);
+
+        // Set shape-specific Sides on slice elements so polygon cross-sections match mesh
+        if (pillarShapeSides > 0 || connShapeSides > 0)
+        {
+            foreach (var elem in sliceElements)
+            {
+                if (elem.Type is "pillar" or "junction" or "bridge" && pillarShapeSides > 0)
+                    elem.Sides = pillarShapeSides;
+                else if (elem.Type == "pinhead" && connShapeSides > 0)
+                    elem.Sides = connShapeSides;
+            }
+        }
 
         // Route mini-raft pads into sliceElements
         if (config.RaftMode == RaftMode.MiniRafts)

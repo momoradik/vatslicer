@@ -109,6 +109,9 @@ public sealed class SupportV2Controller : ControllerBase
                         TipDiameterMm = c.tipDiameterMm,
                         ShaftDiameterMm = c.shaftDiameterMm,
                         BaseDiameterMm = c.baseDiameterMm,
+                        TouchShape = c.touchShape,
+                        ConnectionShape = c.connectionShape,
+                        PillarShape = c.pillarShape,
                     }).ToList();
             }
             catch { /* ignore parse errors */ }
@@ -727,5 +730,6 @@ public sealed class SupportV2Controller : ControllerBase
 
     private record ManualContactDto(float x, float y, float z, float nx, float ny, float nz,
         float? tipDiameterMm = null, float? shaftDiameterMm = null, float? baseDiameterMm = null,
-        string? id = null);
+        string? id = null,
+        string? touchShape = null, string? connectionShape = null, string? pillarShape = null);
 }

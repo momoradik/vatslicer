@@ -67,7 +67,7 @@ public static class AnalyticalSupportSlicer
         /// <summary>"sphere", "pillar", "bridge", "pinhead", "pedestal", "interconnect", "fillet", "raft"</summary>
         public required string Type { get; init; }
         /// <summary>Number of polygon sides for cross-section. 0 or >= 24 = circle, 4 = cube/pyramid, 8 = cross.</summary>
-        public int Sides { get; init; }
+        public int Sides { get; set; }
         /// <summary>Rotation angle (radians) for polygon cross-sections.</summary>
         public float RotationRad { get; init; }
     }

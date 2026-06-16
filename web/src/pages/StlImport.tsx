@@ -237,6 +237,10 @@ interface SupportPoint {
   shaftDiameterMm: number
   baseDiameterMm: number
   type: 'light' | 'medium' | 'heavy'
+  // Per-support shape overrides (B6)
+  touchShape?: string
+  connectionShape?: string
+  pillarShape?: string
   // Live engine result (from computeSingleSupport)
   engineStatus?: string        // 'routed' | 'bundled' | 'collision' | 'uncoverable' | 'error'
   engineMeshBase64?: string    // real mesh STL from engine
@@ -1311,7 +1315,8 @@ export default function StlImport() {
           const [px, py, pz] = yUpToZUp(p.x, p.y, p.z)
           const [nx, ny, nz] = yUpToZUp(p.nx, p.ny, p.nz)
           return { id: p.id, x: px, y: py, z: pz, nx, ny, nz,
-            tipDiameterMm: p.tipDiameterMm, shaftDiameterMm: p.shaftDiameterMm, baseDiameterMm: p.baseDiameterMm }
+            tipDiameterMm: p.tipDiameterMm, shaftDiameterMm: p.shaftDiameterMm, baseDiameterMm: p.baseDiameterMm,
+            touchShape: p.touchShape, connectionShape: p.connectionShape, pillarShape: p.pillarShape }
         })))
       }
 
