@@ -155,9 +155,28 @@ function CrossSectionDiagram({ v }: { v: AdvancedSupportSettings }) {
           rx={1} className="fill-cyan-400/15 stroke-cyan-400/40" strokeWidth={0.8} />
       )}
 
+      {/* Tip angle arc — between tip taper edge and vertical */}
+      {(() => {
+        const arcR = Math.min(connLen * 0.6, 15)
+        const angleRad = (v.topTipAngleDeg ?? 45) * Math.PI / 180
+        // Arc from vertical (straight down from tip) to the taper edge
+        const arcStartX = cx + tipLR // right side of tip
+        const arcStartY = tipY
+        const vertEndX = arcStartX
+        const vertEndY = arcStartY + arcR
+        return angleRad > 0.05 ? (
+          <>
+            <line x1={arcStartX} y1={arcStartY} x2={vertEndX} y2={vertEndY}
+              className="stroke-amber-400/50" strokeWidth={0.5} strokeDasharray="2,1" />
+            <text x={arcStartX + 3} y={arcStartY + arcR * 0.6}
+              className="fill-amber-400" fontSize={6} fontWeight="bold">{v.topTipAngleDeg}°</text>
+          </>
+        ) : null
+      })()}
+
       {/* Dimension labels */}
       <text x={4} y={tipY + 4} className="fill-gray-500" fontSize={6}>{v.topContactDepthMm}mm</text>
-      <text x={4} y={(tipY + connEndY) / 2 + 3} className="fill-gray-500" fontSize={6}>{v.topTipUpperDiaMm}/{v.topTipLowerDiaMm} {v.topTipAngleDeg}°</text>
+      <text x={4} y={(tipY + connEndY) / 2 + 3} className="fill-gray-500" fontSize={6}>{v.topTipUpperDiaMm}/{v.topTipLowerDiaMm}</text>
       <text x={4} y={(connEndY + pillarEndY) / 2} className="fill-gray-500" fontSize={6}>{v.middlePillarDiaMm}mm</text>
       <text x={4} y={baseEndY - 2} className="fill-gray-500" fontSize={6}>{v.bottomBaseDiaMm}mm</text>
 
@@ -166,6 +185,27 @@ function CrossSectionDiagram({ v }: { v: AdvancedSupportSettings }) {
       <text x={W - 8} y={raftEndY + 10} className="fill-gray-600" fontSize={7} textAnchor="end">Plate</text>
     </svg>
   )
+}
+
+// ── Saved support profiles (STEP 3) ──
+
+export interface SavedSupportProfile {
+  id: string
+  name: string
+  settings: AdvancedSupportSettings
+}
+
+const PROFILES_KEY = 'vatslicer.supportProfiles'
+
+function loadProfiles(): SavedSupportProfile[] {
+  try {
+    const raw = localStorage.getItem(PROFILES_KEY)
+    return raw ? JSON.parse(raw) : []
+  } catch { return [] }
+}
+
+function saveProfiles(profiles: SavedSupportProfile[]) {
+  localStorage.setItem(PROFILES_KEY, JSON.stringify(profiles))
 }
 
 // ── Main Component ──
@@ -177,6 +217,7 @@ interface Props {
 
 export default function AdvancedSettingsPanel({ value, onChange }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>('top')
+  const [profiles, setProfiles] = useState<SavedSupportProfile[]>(loadProfiles)
   const disabled = value.sizingMode === 'auto'
 
   const set = <K extends keyof AdvancedSupportSettings>(key: K, val: AdvancedSupportSettings[K]) =>
@@ -219,6 +260,35 @@ export default function AdvancedSettingsPanel({ value, onChange }: Props) {
           <option value="heavy">Heavy</option>
         </select>
       </div>
+
+      {/* Saved profiles (STEP 3) */}
+      {profiles.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {profiles.map(p => (
+            <button key={p.id} type="button"
+              onClick={() => onChange({ ...p.settings, sizingMode: 'manual' })}
+              className="px-2 py-0.5 text-[9px] rounded bg-gray-800 border border-gray-700 text-gray-400 hover:border-teal-500 hover:text-teal-300 transition group relative">
+              {p.name}
+              <span onClick={e => { e.stopPropagation(); const updated = profiles.filter(x => x.id !== p.id); setProfiles(updated); saveProfiles(updated) }}
+                className="ml-1 text-gray-600 hover:text-red-400 cursor-pointer hidden group-hover:inline">&times;</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {!disabled && (
+        <button type="button"
+          onClick={() => {
+            const name = prompt('Profile name:')
+            if (!name) return
+            const newProfile: SavedSupportProfile = { id: Date.now().toString(), name, settings: { ...value } }
+            const updated = [...profiles, newProfile]
+            setProfiles(updated)
+            saveProfiles(updated)
+          }}
+          className="text-[9px] text-gray-500 hover:text-teal-400 transition">
+          + Save as profile
+        </button>
+      )}
 
       {/* C4: Live cross-section diagram */}
       {!disabled && (
