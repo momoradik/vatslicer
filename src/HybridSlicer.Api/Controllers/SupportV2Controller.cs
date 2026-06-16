@@ -182,7 +182,7 @@ public sealed class SupportV2Controller : ControllerBase
             PillarRadiusMm = pillarRadius,
             BaseRadiusMm = baseRadius,
             WideningFactor = wideningFactor,
-            EnableInterconnections = enableInterconnections || reinfMode != HybridSlicer.Infrastructure.Resin.Routing.ReinforcementMode.None,
+            EnableInterconnections = enableInterconnections && reinfMode != HybridSlicer.Infrastructure.Resin.Routing.ReinforcementMode.None,
             InterconnectDistMm = interconnectDistMm,
             EnableTreeSupports = enableTreeSupports,
             EnableHollowSupports = enableHollowSupports,

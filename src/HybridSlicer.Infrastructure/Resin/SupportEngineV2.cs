@@ -1393,9 +1393,36 @@ public static class SupportEngineV2
 
             Serilog.Log.Information("V2 Step 7c: {Count} final valid routes for interconnections", validRoutes.Count);
 
+            // For Triangular mode, cap MaxConnectionDistMm to clamp(1.5*medianSpacing, 8, 25)
+            // so braces only connect nearby pillars. Global uses the full config distance.
+            float effectiveMaxDist = config.InterconnectDistMm;
+            if (config.ReinforcementMode == ReinforcementMode.Triangular && pillarBases.Count >= 3)
+            {
+                var nnDists = new List<float>();
+                for (int i = 0; i < pillarBases.Count; i++)
+                {
+                    float minD = float.MaxValue;
+                    for (int j = 0; j < pillarBases.Count; j++)
+                    {
+                        if (i == j) continue;
+                        float d = Vector2.Distance(
+                            new Vector2(pillarBases[i].X, pillarBases[i].Y),
+                            new Vector2(pillarBases[j].X, pillarBases[j].Y));
+                        if (d < minD) minD = d;
+                    }
+                    if (minD < float.MaxValue) nnDists.Add(minD);
+                }
+                if (nnDists.Count > 0)
+                {
+                    nnDists.Sort();
+                    float medianSpacing = nnDists[nnDists.Count / 2];
+                    effectiveMaxDist = Math.Clamp(1.5f * medianSpacing, 8f, 25f);
+                }
+            }
+
             var icConfig = new InterconnectBuilder.InterconnectConfig
             {
-                MaxConnectionDistMm = config.InterconnectDistMm,
+                MaxConnectionDistMm = effectiveMaxDist,
                 ConnectionIntervalMm = config.InterconnectIntervalMm,
                 StrutRadiusMm = config.StrutRadiusMm,
                 Mode = config.ReinforcementMode,
