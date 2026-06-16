@@ -5,46 +5,35 @@ namespace HybridSlicer.Infrastructure.Resin.Routing;
 
 /// <summary>
 /// Merges nearby support TIPS into forked supports — one trunk with N short struts
-/// fanning to multiple contact points. The inverse of tree merging: forking merges
-/// tips at the top, tree merging merges trunks at the bottom.
+/// fanning to multiple contact points.
 ///
-/// Algorithm:
-/// 1. Cluster valid pinheads by XY proximity (ForkClusterRadiusMm).
-/// 2. For each cluster of 2..MaxTipsPerFork, compute a fork node: XY = centroid,
-///    Z = highest point where ALL struts stay within the self-supporting cone angle.
-/// 3. Collision-check each strut against the mesh.
-/// 4. Replace N individual pinhead→route entries with N tip-struts + 1 shared junction.
-///    Tip positions DO NOT MOVE.
+/// Algorithm (region-growing, not greedy first-pair):
+/// 1. Build spatial grid over valid pinhead CONTACT points.
+/// 2. For each unused tip (seed), region-grow: add nearest unused tip within
+///    ForkClusterRadiusMm, repeat until MaxTipsPerFork reached or no more neighbors.
+/// 3. For each cluster of 2+, compute fork node Z from critical angle constraint.
+/// 4. Collision-check each strut; reject entire cluster if any strut collides.
 /// </summary>
 public static class ForkBuilder
 {
     public sealed record ForkConfig
     {
-        /// <summary>Max XY distance between tips to consider forking (mm).</summary>
         public float ForkClusterRadiusMm { get; init; } = 4f;
-        /// <summary>Max number of tips per fork (2..N).</summary>
         public int MaxTipsPerFork { get; init; } = 4;
-        /// <summary>Critical self-supporting angle from vertical (degrees).</summary>
         public float CriticalAngleDeg { get; init; } = 45f;
     }
 
     public sealed class ForkResult
     {
-        /// <summary>Cluster index for each pinhead (-1 = not forked, 0+ = cluster id).</summary>
         public required int[] ClusterAssignment { get; init; }
-        /// <summary>For each cluster, the fork node position.</summary>
         public required Dictionary<int, Vector3> ForkNodes { get; init; }
-        /// <summary>For each cluster, the tip indices in the original pinhead list.</summary>
         public required Dictionary<int, List<int>> ClusterMembers { get; init; }
-        /// <summary>Max strut angle from vertical across all forks (degrees).</summary>
         public required float MaxStrutAngleDeg { get; init; }
-        /// <summary>Number of struts rejected by collision.</summary>
         public required int CollisionRejections { get; init; }
+        /// <summary>Histogram: index = tips-per-fork (2,3,4,...), value = count of clusters with that many tips.</summary>
+        public required int[] TipsPerForkHistogram { get; init; }
     }
 
-    /// <summary>
-    /// Analyze pinheads and find feasible fork clusters.
-    /// </summary>
     public static ForkResult FindForks(
         List<(string id, PinheadOptimizer.Pinhead pinhead)> pinheads,
         AabbBvh bvh,
@@ -57,64 +46,94 @@ public static class ForkBuilder
         var clusterMembers = new Dictionary<int, List<int>>();
         float maxAngle = 0;
         int collisionRejections = 0;
+        var histogram = new int[config.MaxTipsPerFork + 1]; // index = tip count
 
         float maxAngleRad = config.CriticalAngleDeg * MathF.PI / 180f;
-        float maxDist2 = config.ForkClusterRadiusMm * config.ForkClusterRadiusMm;
+        float maxDist = config.ForkClusterRadiusMm;
+        float maxDist2 = maxDist * maxDist;
 
-        // Collect valid pinheads with their junction points
+        // Collect valid pinheads — use CONTACT points for clustering (not junctions)
         var validIndices = new List<int>();
+        var contactPoints = new Vector3[n]; // XY of contact point per pinhead
         for (int i = 0; i < n; i++)
+        {
             if (pinheads[i].pinhead.IsValid)
+            {
                 validIndices.Add(i);
+                contactPoints[i] = pinheads[i].pinhead.ContactPoint;
+            }
+        }
 
-        // Greedy nearest-neighbor clustering
+        // Build spatial grid over contact points for fast neighbor queries
+        var grid = new SpatialGrid<int>(maxDist);
+        foreach (int i in validIndices)
+            grid.Insert(contactPoints[i], i);
+
         var used = new bool[n];
         int clusterId = 0;
 
-        for (int vi = 0; vi < validIndices.Count; vi++)
+        // Sort by Z descending so we seed from the highest tips (best fork candidates)
+        var sortedValid = validIndices.OrderByDescending(i => contactPoints[i].Z).ToList();
+
+        foreach (int seed in sortedValid)
         {
-            int i = validIndices[vi];
-            if (used[i]) continue;
+            if (used[seed]) continue;
 
-            var jp_i = pinheads[i].pinhead.JunctionPoint;
+            // Region-grow: start with seed, add nearest unused neighbor within radius
+            var cluster = new List<int> { seed };
+            var clusterCentroid = new Vector2(contactPoints[seed].X, contactPoints[seed].Y);
 
-            // Find nearby tips within cluster radius
-            var candidates = new List<int> { i };
-            for (int vj = vi + 1; vj < validIndices.Count; vj++)
+            while (cluster.Count < config.MaxTipsPerFork)
             {
-                int j = validIndices[vj];
-                if (used[j]) continue;
-                if (candidates.Count >= config.MaxTipsPerFork) break;
+                // Find nearest unused tip within maxDist of cluster centroid
+                int bestIdx = -1;
+                float bestDist = float.MaxValue;
 
-                var jp_j = pinheads[j].pinhead.JunctionPoint;
-                float dx = jp_i.X - jp_j.X;
-                float dy = jp_i.Y - jp_j.Y;
-                if (dx * dx + dy * dy <= maxDist2)
-                    candidates.Add(j);
+                var neighbors = grid.FindInRadius(
+                    new Vector3(clusterCentroid.X, clusterCentroid.Y, contactPoints[seed].Z),
+                    maxDist * 1.5f); // search slightly wider, filter by actual distance
+
+                foreach (var (idx, _) in neighbors)
+                {
+                    if (used[idx] || cluster.Contains(idx)) continue;
+                    // Distance from this tip to the cluster centroid
+                    float dx = contactPoints[idx].X - clusterCentroid.X;
+                    float dy = contactPoints[idx].Y - clusterCentroid.Y;
+                    float d2 = dx * dx + dy * dy;
+                    if (d2 <= maxDist2 && d2 < bestDist)
+                    {
+                        bestDist = d2;
+                        bestIdx = idx;
+                    }
+                }
+
+                if (bestIdx < 0) break; // no more neighbors within radius
+
+                cluster.Add(bestIdx);
+                // Update centroid
+                float sumX = 0, sumY = 0;
+                foreach (int ci in cluster) { sumX += contactPoints[ci].X; sumY += contactPoints[ci].Y; }
+                clusterCentroid = new Vector2(sumX / cluster.Count, sumY / cluster.Count);
             }
 
-            if (candidates.Count < 2) continue; // need at least 2 tips to fork
+            if (cluster.Count < 2) continue;
 
-            // Compute fork node: XY = centroid of junction points
+            // Compute fork node position
             float cx = 0, cy = 0;
             float minJunctionZ = float.MaxValue;
-            foreach (int idx in candidates)
+            foreach (int idx in cluster)
             {
                 var jp = pinheads[idx].pinhead.JunctionPoint;
-                cx += jp.X;
-                cy += jp.Y;
+                cx += jp.X; cy += jp.Y;
                 if (jp.Z < minJunctionZ) minJunctionZ = jp.Z;
             }
-            cx /= candidates.Count;
-            cy /= candidates.Count;
+            cx /= cluster.Count; cy /= cluster.Count;
 
-            // Compute fork node Z: highest Z where all struts stay within critical angle.
-            // For each tip, the strut from fork node to junction must have:
-            //   angle_from_vertical = atan2(xy_dist, z_drop) ≤ maxAngleRad
-            // So z_drop ≥ xy_dist / tan(maxAngleRad)
+            // Fork Z: highest point where all struts stay within critical angle
+            // requiredDrop = maxXYDist / tan(criticalAngle)
             float tanMax = MathF.Tan(maxAngleRad);
             float requiredDrop = 0;
-            foreach (int idx in candidates)
+            foreach (int idx in cluster)
             {
                 var jp = pinheads[idx].pinhead.JunctionPoint;
                 float xyDist = MathF.Sqrt((jp.X - cx) * (jp.X - cx) + (jp.Y - cy) * (jp.Y - cy));
@@ -122,25 +141,27 @@ public static class ForkBuilder
                 if (drop > requiredDrop) requiredDrop = drop;
             }
 
-            float forkZ = minJunctionZ - requiredDrop;
-            if (forkZ < 1.0f) continue; // fork node too close to plate
+            float forkZ = minJunctionZ - Math.Max(requiredDrop, 0.5f);
+            if (forkZ < 1.0f) continue;
 
             var forkNode = new Vector3(cx, cy, forkZ);
 
-            // Validate: check each strut angle and collision
+            // Trunk radius = sqrt(sum of tip radii squared)
+            float sumR2 = 0;
+            foreach (int idx in cluster)
+                sumR2 += pinheads[idx].pinhead.BackRadius * pinheads[idx].pinhead.BackRadius;
+            float trunkRadius = MathF.Sqrt(sumR2);
+
+            // Validate strut angles + collisions
             bool allValid = true;
             float clusterMaxAngle = 0;
-            foreach (int idx in candidates)
+            foreach (int idx in cluster)
             {
                 var jp = pinheads[idx].pinhead.JunctionPoint;
                 var strutDir = jp - forkNode;
                 float strutLen = strutDir.Length();
                 if (strutLen < 0.1f) continue;
 
-                // Angle from vertical (+Z)
-                float cosAngle = strutDir.Z / strutLen;
-                float angleDeg = MathF.Acos(MathF.Abs(cosAngle)) * 180f / MathF.PI;
-                // The strut goes UP from fork to junction, so angle from +Z
                 float angleFromVertical = MathF.Atan2(
                     MathF.Sqrt(strutDir.X * strutDir.X + strutDir.Y * strutDir.Y),
                     MathF.Abs(strutDir.Z)) * 180f / MathF.PI;
@@ -153,9 +174,8 @@ public static class ForkBuilder
                 if (angleFromVertical > clusterMaxAngle)
                     clusterMaxAngle = angleFromVertical;
 
-                // Collision check: beam-cast from fork node to junction
                 var dir = Vector3.Normalize(strutDir);
-                float clearance = bvh.BeamCast(forkNode, dir, 0.3f, 8, strutLen);
+                float clearance = bvh.BeamCast(forkNode, dir, trunkRadius * 0.5f, 8, strutLen);
                 if (clearance < strutLen - 0.1f)
                 {
                     collisionRejections++;
@@ -167,17 +187,26 @@ public static class ForkBuilder
             if (!allValid) continue;
 
             // Accept this fork
-            foreach (int idx in candidates)
+            foreach (int idx in cluster)
             {
                 assignment[idx] = clusterId;
                 used[idx] = true;
             }
             forkNodes[clusterId] = forkNode;
-            clusterMembers[clusterId] = candidates;
+            clusterMembers[clusterId] = cluster;
             if (clusterMaxAngle > maxAngle)
                 maxAngle = clusterMaxAngle;
+            if (cluster.Count <= config.MaxTipsPerFork)
+                histogram[cluster.Count]++;
             clusterId++;
         }
+
+        // Log histogram
+        var histParts = new List<string>();
+        for (int i = 2; i < histogram.Length; i++)
+            if (histogram[i] > 0) histParts.Add($"{i}-tip:{histogram[i]}");
+        if (histParts.Count > 0)
+            Serilog.Log.Information("V2 ForkBuilder histogram: {Hist}", string.Join(" ", histParts));
 
         return new ForkResult
         {
@@ -186,6 +215,7 @@ public static class ForkBuilder
             ClusterMembers = clusterMembers,
             MaxStrutAngleDeg = maxAngle,
             CollisionRejections = collisionRejections,
+            TipsPerForkHistogram = histogram,
         };
     }
 }

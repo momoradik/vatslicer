@@ -626,23 +626,23 @@ public static class SupportEngineV2
         ForkBuilder.ForkResult? forkResult = null;
         if (config.EnableForking && pinheads.Count >= 2)
         {
-            // Derive effective fork radius: spacing-relative (1.3× median) or absolute override
+            // Derive effective fork radius: spacing-relative or absolute override
             float effectiveForkRadius = config.ForkClusterRadiusMm;
             if (effectiveForkRadius <= 0.01f)
             {
-                // Compute median nearest-neighbor spacing from valid pinhead junctions
-                var validJunctions = pinheads.Where(p => p.pinhead.IsValid).Select(p => p.pinhead.JunctionPoint).ToList();
-                if (validJunctions.Count >= 2)
+                // FIX: Use CONTACT points (not junctions) — tips sit further apart than junctions
+                var validContacts = pinheads.Where(p => p.pinhead.IsValid).Select(p => p.pinhead.ContactPoint).ToList();
+                if (validContacts.Count >= 2)
                 {
                     var nnDists = new List<float>();
-                    for (int i = 0; i < validJunctions.Count; i++)
+                    for (int i = 0; i < validContacts.Count; i++)
                     {
                         float minD = float.MaxValue;
-                        for (int j = 0; j < validJunctions.Count; j++)
+                        for (int j = 0; j < validContacts.Count; j++)
                         {
                             if (i == j) continue;
-                            float dx = validJunctions[i].X - validJunctions[j].X;
-                            float dy = validJunctions[i].Y - validJunctions[j].Y;
+                            float dx = validContacts[i].X - validContacts[j].X;
+                            float dy = validContacts[i].Y - validContacts[j].Y;
                             float d = MathF.Sqrt(dx * dx + dy * dy);
                             if (d < minD) minD = d;
                         }
@@ -650,11 +650,15 @@ public static class SupportEngineV2
                     }
                     nnDists.Sort();
                     float medianSpacing = nnDists[nnDists.Count / 2];
-                    effectiveForkRadius = medianSpacing * config.ForkClusterRadiusMultiplier;
+                    // FIX: Scale multiplier based on MaxTipsPerFork so 3/4-tip clusters reach further
+                    float multiplier = config.ForkClusterRadiusMultiplier;
+                    if (config.MaxTipsPerFork >= 4) multiplier = Math.Max(multiplier, 2.6f);
+                    else if (config.MaxTipsPerFork >= 3) multiplier = Math.Max(multiplier, 2.0f);
+                    effectiveForkRadius = medianSpacing * multiplier;
                 }
                 else
                 {
-                    effectiveForkRadius = 4f; // fallback for very few tips
+                    effectiveForkRadius = 4f;
                 }
             }
 
