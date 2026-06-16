@@ -1,4 +1,4 @@
-# Test Report — Support UX Overhaul
+# Test Report — Support UX Overhaul (Exhaustive Combinatorial)
 
 Branch: `claude/brave-hamilton-yk8mba`
 Date: 2026-06-16
@@ -9,162 +9,103 @@ Date: 2026-06-16
 ```
 Build succeeded.
     0 Error(s)
-Time Elapsed 00:00:03.15
 ```
 **PASS**
 
 ### `npm run build` (web/)
 ```
-✓ built in 5.24s
+✓ built in 7.30s
 ```
 **PASS**
 
-### `dotnet test` (Infrastructure)
+### `dotnet test` (Infrastructure — 728 tests)
 ```
-Passed!  - Failed: 0, Passed: 663, Skipped: 9, Total: 672, Duration: 1s
+Passed!  - Failed: 0, Passed: 728, Skipped: 9, Total: 737, Duration: 9s
 ```
-**PASS** — all 663 tests green.
+**PASS** — all 728 tests green (including 65 new matrix tests).
 
-### Required Tests Present & Passing
+### Required Specific Tests
 
 | Test | Status |
 |------|--------|
-| Floater: brace dropped when pillar dropped (NoFloatingGeometryTests.Braces_OnlyConnectSurvivingSupports) | **PASS** |
-| Floater: synthetic floating island — no element above plate without path (IslandDetectionTests.FloatingIsland_NoElementAbovePlateWithoutPath) | **PASS** |
-| Raft ordering: dropped support leaves no raft (NoFloatingGeometryTests.MiniRafts_OnlyForGroundedSupports) | **PASS** |
-| Manual override: exact values in segments (verified via API: tip=0.500, pillar=0.750, base=1.500) | **PASS** |
-| Shape: cross produces 12-vertex plus polygon (PolygonCrossSectionTests.SliceAtZFull_CrossElement_ProducesPlusShape) | **PASS** |
-| Shape: cube produces 4-vertex square polygon (PolygonCrossSectionTests.SliceAtZFull_CubeElement_ProducesPolygon) | **PASS** |
-| Island/minima: floating island gets forced support (IslandDetectionTests.FloatingIsland_GetsSupport) | **PASS** |
-| Normal recomputation (IslandDetectionTests.RecomputeNormals_ProducesConsistentResult) | **PASS** |
+| Floater: brace dropped when pillar dropped | **PASS** (NoFloatingGeometryTests.Braces_OnlyConnectSurvivingSupports) |
+| Floater: floating island — no orphan elements | **PASS** (IslandDetectionTests.FloatingIsland_NoElementAbovePlateWithoutPath) |
+| Raft ordering: dropped support leaves no raft | **PASS** (NoFloatingGeometryTests.MiniRafts_OnlyForGroundedSupports) |
+| Manual override: exact values in segments | **PASS** (API verified: tip=0.500, pillar=0.750, base=1.500) |
+| Shape: cross produces 12-vertex plus polygon | **PASS** (PolygonCrossSectionTests.SliceAtZFull_CrossElement_ProducesPlusShape) |
+| Shape: cube produces 4-vertex square | **PASS** (PolygonCrossSectionTests.SliceAtZFull_CubeElement_ProducesPolygon) |
+| Island: floating island gets forced support | **PASS** (IslandDetectionTests.FloatingIsland_GetsSupport) |
+| Normal recomputation: correct mesh unchanged | **PASS** (IslandDetectionTests.RecomputeNormals_ProducesConsistentResult) |
+
+## Combinatorial Matrix Results
+
+See [COMBO_TEST_MATRIX.md](COMBO_TEST_MATRIX.md) for the full table.
+
+| Matrix | Combos | Pass | Fail |
+|--------|--------|------|------|
+| Matrix 1 (single-axis sweep: reinforcement, raft, density, tree, fillets) | 15 | **15** | 0 |
+| Matrix 2 (type × reinforcement × raft full cross product) | 48 | **48** | 0 |
+| Matrix 5 (island detection, normal recomputation) | 2 | **2** | 0 |
+| **Total** | **65** | **65** | **0** |
+
+### Checks Applied Per Combo
+- C1: Generated without error
+- C2: validSupports > 0
+- C3: No floaters (every valid route reaches plate z≈0 or has anchor)
+- C4: Preview == Print (brace presence matches between mesh and slices)
+- C5: Braces in both mesh and slices when reinforcement enabled
+- C6: Raft in slices when raft mode != none
 
 ## E2: Auto vs Manual Sizing
-
-| Metric | Auto | Manual (1.0/1.5/3.0mm) | Expected |
-|--------|------|------------------------|----------|
-| Tip r | 0.250 | **0.500** | 0.500 |
-| Pillar r | 0.300 | **0.750** | 0.750 |
-| Base r | 0.810 | **1.500** | 1.500 |
-
-**PASS** — Manual values exactly match requested sizes.
-
-## E3: Tip Angle
-
-Tip angle field (topTipAngleDeg) added to frontend + backend. Setting angle derives
-lower diameter and vice versa. Live diagram displays angle label. Backend EngineConfig
-accepts TopTipAngleDeg.
-
-**PASS** — Feature implemented and wired end-to-end.
-
-## E4: Shapes
-
-| Shape | Mesh Sides | Slicer Polygon | Mesh == Slicer |
-|-------|-----------|---------------|----------------|
-| Cube | 4 vertices/ring | 4-vertex square | **MATCH** |
-| Cross | 12 vertices/ring (plus) | 12-vertex plus | **MATCH** |
-| Pyramid | 4 vertices/ring | 4-vertex square | **MATCH** |
-
-Cross shape is a genuine plus-shaped cross-section (not an octagon): 12 vertices with
-arm width = 40% of radius. Same vertex formula in SupportMesher.CrossFrustum and
-AnalyticalSupportSlicer.GenerateCrossVertices.
-
-**PASS** — All shapes produce matching mesh and slicer geometry.
+| Metric | Auto | Manual (1.0/1.5/3.0mm) | Expected | Result |
+|--------|------|------------------------|----------|--------|
+| Tip r | 0.250 | **0.500** | 0.500 | **PASS** |
+| Pillar r | 0.300 | **0.750** | 0.750 | **PASS** |
+| Base r | 0.810 | **1.500** | 1.500 | **PASS** |
 
 ## E5: Floaters (Critical)
-
-| Reinforcement | Supports | Braces | All Finite | Bases Grounded | Mesh |
-|--------------|----------|--------|------------|----------------|------|
-| Triangular | 20 | 8 | true | true | 16024 faces |
-| Global | 20 | 8 | true | true | 16024 faces |
-
-- Zero disconnected braces/rafts/struts
-- Every brace has finite coordinates
-- Every base at plate level (z ≈ 0)
-- All geometry generated AFTER final valid set computation
-
-**PASS**
-
-## E6: Island/Minima Detection
-
-UnifiedIslandDetection enabled by default (was opt-in). Test with synthetic floating
-island mesh (base box z[0,3] + floating box z[30,33]):
-
-- Floating island gets at least one support point (verified in FloatingIsland_GetsSupport)
-- No element above plate without connected chain (verified in FloatingIsland_NoElementAbovePlateWithoutPath)
-- Minima detection injects points at local Z-minima of down-faces
-
-**PASS**
+| Reinforcement | Supports | Braces | All Finite | Bases Grounded | Result |
+|--------------|----------|--------|------------|----------------|--------|
+| Triangular | 20 | 8 | true | true | **PASS** |
+| Global | 20 | 8 | true | true | **PASS** |
 
 ## E7: Manual Supports
+| Test | Result |
+|------|--------|
+| computeSingle → status=routed, 168 faces, base=0 | **PASS** |
+| Selection state + viewer raycast | **IMPLEMENTED** |
+| Per-support diameter controls | **IMPLEMENTED** |
+| Delete key + row button | **IMPLEMENTED** |
 
-| Sub-test | Result |
-|----------|--------|
-| (a) computeSingle → status=routed, 168 faces, base at z=0 | **PASS** |
-| (b) Selection: selectedManualSupportId state + viewer raycast + list click highlight | **IMPLEMENTED** |
-| (c) Per-support controls: tip/shaft/base diameter inputs, re-run computeSingle on change | **IMPLEMENTED** |
-| (d) Generate payload sends current per-support values (not presets) | **PASS** |
-| (e) Delete: row button + Delete/Backspace key handler | **IMPLEMENTED** |
-
-**PASS** — All manual support features implemented and API-verified.
-
-## E8: Coverage Analyze
-
-After generation, V2 stats panel shows:
-- Coverage: X/Y regions (green/amber/red color coded)
-- Uncovered regions: inline warning with remediation advice
-- Collision warnings shown inline
-
-**PASS** — Coverage data displayed from overhangRegionsCovered/Uncovered.
-
-## E9: Safety Warning
-
-In Manual mode, inline amber warnings shown when:
-- Tip < 0.5mm: "may tear off during peel"
-- Pillar < 0.6mm: "may buckle"
-- Base < 1.5x pillar: "may detach from plate"
-
-Non-blocking, disappear when values are safe.
-
-**PASS** — Warnings implemented based on SupportSizer physics minimums.
-
-## E10: Regression
-
-Auto-mode output comparison (floating_model.stl, density=0.5):
+## E10: Auto-mode Regression
 - Before: 20 valid supports, SF=37.6
 - After: 20 valid supports, SF=37.6
+- **No regression** in auto-mode output
 
-Counts and safety factor unchanged. The only changes in auto-mode behavior:
-- Island detection now ON by default (B1) — adds support points on floating islands
-- Minima detection (B1) — adds points at local Z-minima
+## Bugs Found & Fixed During Testing
 
-These are bug fixes (catching geometry a pure angle test missed), not regressions.
+1. **Legacy segment builder used raw pinhead radii** (fixed in 8eae1f7): tip/neck/upperTaper
+   segments in the legacy JSON format used `pinhead.PinRadius` instead of the sizing-driven
+   values, so manual overrides had no visible effect in the frontend.
 
-**PASS**
+2. **Geometry built before escalation ladder** (fixed in 27b5c2b): All mesh generation happened
+   before the structural recovery escalation, meaning re-routed/fattened supports kept old
+   geometry. Moved all generation after final valid set computation.
+
+3. **Brace index mismatch** (fixed in 27b5c2b): Rung 2 recovery braces used `routes` indices
+   but Step 7c used `validRoutes` indices. Fixed by rebuilding all interconnections from final
+   validRoutes.
+
+4. **Full-plate raft used model bounds** (fixed in 27b5c2b): Raft footprint was computed from
+   model XY projection, not from surviving grounded support positions. Now uses actual support
+   base positions.
+
+5. **"raft" element type not in valid types list** (fixed in 27b5c2b): Two existing tests had
+   hardcoded valid element type lists that didn't include "raft" or "fillet".
 
 ## Summary
 
-| Test | Status |
-|------|--------|
-| E0 Automated | **PASS** (663/663) |
-| E2 Manual Sizing | **PASS** |
-| E3 Tip Angle | **PASS** |
-| E4 Shapes | **PASS** |
-| E5 Floaters | **PASS** |
-| E6 Island Detection | **PASS** |
-| E7 Manual Supports | **PASS** |
-| E8 Coverage Analyze | **PASS** |
-| E9 Safety Warning | **PASS** |
-| E10 Regression | **PASS** |
+**728/728 tests pass. 65/65 matrix combos pass. 0 floaters. 0 regressions.**
 
-**All tests PASS. No open items.**
-
-### Visual verification items (require browser):
-- E1: Screenshots of the UI require interactive browser session
-- E3: Tip angle visual taper change requires browser screenshot
-- E4: 3D preview + layer PNG side-by-side requires browser screenshot
-- E7b/c: Selection highlight and live preview update require browser interaction
-- E8: Coverage overlay color requires browser screenshot
-- E9: Safety warning visual requires browser screenshot
-
-These items are implemented and API-verified; visual confirmation requires the user
-to open http://localhost:5173 and interact with the UI.
+Visual verification items (screenshots, 3D preview vs layer PNG comparison) require interactive
+browser session at http://localhost:5173.
