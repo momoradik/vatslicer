@@ -268,11 +268,16 @@ public static class AnalyticalSupportSlicer
 
     /// <summary>
     /// Generate regular polygon vertices at a given center and radius.
-    /// Used for cube (4 sides), cross (8 sides), pyramid (4 sides) cross-sections.
+    /// Used for cube (4 sides), pyramid (4 sides) cross-sections.
     /// Uses the same vertex formula as SupportMesher.Frustum so preview and print match.
     /// </summary>
     public static Vector2[] GeneratePolygonVertices(float cx, float cy, float radius, int sides, float rotationRad = 0)
     {
+        // Special case: 8 sides with cross flag generates a genuine plus-shape
+        // (not a regular octagon). See GenerateCrossVertices.
+        if (sides == 8)
+            return GenerateCrossVertices(cx, cy, radius, rotationRad);
+
         var verts = new Vector2[sides];
         for (int i = 0; i < sides; i++)
         {
@@ -282,6 +287,35 @@ public static class AnalyticalSupportSlicer
                 cy + MathF.Sin(angle) * radius);
         }
         return verts;
+    }
+
+    /// <summary>
+    /// Generate a plus-shaped (cross) cross-section with 12 vertices.
+    /// The arm width is 40% of the radius; the arm length extends to the full radius.
+    /// This matches the mesh generation in SupportMesher so preview == print.
+    /// </summary>
+    public static Vector2[] GenerateCrossVertices(float cx, float cy, float radius, float rotationRad = 0)
+    {
+        float armWidth = radius * 0.4f;  // half-width of each arm
+        float cos = MathF.Cos(rotationRad), sin = MathF.Sin(rotationRad);
+        Vector2 Rot(float x, float y) => new(cx + x * cos - y * sin, cy + x * sin + y * cos);
+
+        // 12 vertices forming a plus shape (CCW), starting from top-right arm
+        return new[]
+        {
+            Rot(armWidth, radius),   // top arm, right edge
+            Rot(armWidth, armWidth), // inner corner
+            Rot(radius, armWidth),   // right arm, top edge
+            Rot(radius, -armWidth),  // right arm, bottom edge
+            Rot(armWidth, -armWidth),// inner corner
+            Rot(armWidth, -radius),  // bottom arm, right edge
+            Rot(-armWidth, -radius), // bottom arm, left edge
+            Rot(-armWidth, -armWidth),// inner corner
+            Rot(-radius, -armWidth), // left arm, bottom edge
+            Rot(-radius, armWidth),  // left arm, top edge
+            Rot(-armWidth, armWidth),// inner corner
+            Rot(-armWidth, radius),  // top arm, left edge
+        };
     }
 
     /// <summary>

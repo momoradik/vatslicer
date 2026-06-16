@@ -21,18 +21,27 @@ public class PolygonCrossSectionTests
     }
 
     [Fact]
-    public void GeneratePolygonVertices_Octagon_Returns8Vertices()
+    public void GeneratePolygonVertices_Cross_Returns12PlusVertices()
     {
+        // 8 sides triggers the plus-shaped cross generator (12 vertices)
         var verts = AnalyticalSupportSlicer.GeneratePolygonVertices(5, 3, 2.0f, 8);
-        verts.Length.Should().Be(8);
+        verts.Length.Should().Be(12);
 
+        // Vertices should form a plus shape — some at full radius (arm tips),
+        // some at inner radius (arm junctions). Not all at the same distance.
+        float minDist = float.MaxValue, maxDist = 0;
         foreach (var v in verts)
         {
             float dx = v.X - 5f;
             float dy = v.Y - 3f;
             float dist = MathF.Sqrt(dx * dx + dy * dy);
-            dist.Should().BeApproximately(2.0f, 0.001f);
+            minDist = Math.Min(minDist, dist);
+            maxDist = Math.Max(maxDist, dist);
         }
+        // Plus shape has both inner corners (arm width) and outer tips (full radius)
+        minDist.Should().BeLessThan(maxDist, "plus shape should have varying distances");
+        // Plus shape arm tips: max distance is radius (full extension along axis)
+        maxDist.Should().BeApproximately(2.0f, 0.2f, "arm tips should be near full radius");
     }
 
     [Fact]
@@ -86,7 +95,7 @@ public class PolygonCrossSectionTests
     }
 
     [Fact]
-    public void SliceAtZFull_CrossElement_ProducesOctagon()
+    public void SliceAtZFull_CrossElement_ProducesPlusShape()
     {
         var elements = new List<AnalyticalSupportSlicer.SupportElement>
         {
@@ -102,7 +111,8 @@ public class PolygonCrossSectionTests
         var (circles, polygons) = AnalyticalSupportSlicer.SliceAtZFull(elements, 5f);
         circles.Should().BeEmpty();
         polygons.Should().HaveCount(1);
-        polygons[0].Vertices.Length.Should().Be(8);
+        // Cross shape produces a 12-vertex plus-shaped polygon (not a regular octagon)
+        polygons[0].Vertices.Length.Should().Be(12);
     }
 
     [Fact]

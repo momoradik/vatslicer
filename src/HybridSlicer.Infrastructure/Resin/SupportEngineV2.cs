@@ -264,6 +264,7 @@ public static class SupportEngineV2
         public float? TopContactDepthMm { get; init; }
         public float? TopTipUpperDiaMm { get; init; }
         public float? TopTipLowerDiaMm { get; init; }
+        public float? TopTipAngleDeg { get; init; }
         public SupportShape TopConnectionShape { get; init; } = SupportShape.Cone;
         public float? TopConnectionLengthMm { get; init; }
 

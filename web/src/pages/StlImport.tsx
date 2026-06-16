@@ -1301,6 +1301,7 @@ export default function StlImport() {
         fd.append('topContactDepthMm', String(adv.topContactDepthMm))
         fd.append('topTipUpperDiaMm', String(adv.topTipUpperDiaMm))
         fd.append('topTipLowerDiaMm', String(adv.topTipLowerDiaMm))
+        fd.append('topTipAngleDeg', String(adv.topTipAngleDeg))
         fd.append('topConnectionLengthMm', String(adv.topConnectionLengthMm))
         fd.append('middlePillarDiaMm', String(adv.middlePillarDiaMm))
         fd.append('bottomBaseDiaMm', String(adv.bottomBaseDiaMm))
@@ -2399,6 +2400,28 @@ export default function StlImport() {
                               <span className="text-gray-500">Time</span>
                               <span className="text-gray-400">{selectedPrep.v2Stats.elapsedMs}ms (V2)</span>
                             </div>
+                            {/* D5: Coverage analyze */}
+                            <div className="flex justify-between">
+                              <span className="text-gray-500">Coverage</span>
+                              <span className={selectedPrep.v2Stats.coverageOk >= selectedPrep.v2Stats.coverageTotal
+                                ? 'text-green-400' : selectedPrep.v2Stats.coverageOk > 0 ? 'text-amber-400' : 'text-red-400'}>
+                                {selectedPrep.v2Stats.coverageOk}/{selectedPrep.v2Stats.coverageTotal} regions
+                              </span>
+                            </div>
+                            {selectedPrep.v2Stats.coverageOk < selectedPrep.v2Stats.coverageTotal && (
+                              <div className="mt-0.5 px-1 py-0.5 rounded bg-red-900/20 border border-red-800/30">
+                                <span className="text-[8px] text-red-400">
+                                  {selectedPrep.v2Stats.coverageTotal - selectedPrep.v2Stats.coverageOk} uncovered region(s) — add manual supports or increase density
+                                </span>
+                              </div>
+                            )}
+                            {selectedPrep.v2Stats.collisions > 0 && (
+                              <div className="mt-0.5 px-1 py-0.5 rounded bg-amber-900/20 border border-amber-800/30">
+                                <span className="text-[8px] text-amber-400">
+                                  {selectedPrep.v2Stats.collisions} collision(s) detected
+                                </span>
+                              </div>
+                            )}
                           </div>
                         )}
                         {selectedPrep.stale && (

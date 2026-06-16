@@ -30,6 +30,11 @@ public static class SupportMesher
         var mesh = new IndexedTriangleSet();
         if (height < 1e-6f) return mesh;
 
+        // Cross shape (sides==8): generate a genuine plus-shaped cross-section
+        // using 12 vertices per ring, matching AnalyticalSupportSlicer.GenerateCrossVertices
+        if (sides == 8)
+            return CrossFrustum(rTop, rBottom, height);
+
         // Generate top and bottom rings
         var topRing = new int[sides];
         var botRing = new int[sides];
@@ -268,6 +273,70 @@ public static class SupportMesher
     {
         var mesh = Frustum(rTop, rBottom, height, sides);
         mesh.Transform(Quaternion.Identity, position - new Vector3(0, 0, 0)); // position at base
+        return mesh;
+    }
+
+    // ── Cross-shaped frustum (plus cross-section) ─────────────────────
+
+    /// <summary>
+    /// Generate a frustum with a plus-shaped (cross) cross-section.
+    /// 12 vertices per ring forming a + pattern. Arm width = 40% of radius.
+    /// Uses the same vertex formula as AnalyticalSupportSlicer.GenerateCrossVertices.
+    /// </summary>
+    private static IndexedTriangleSet CrossFrustum(float rTop, float rBottom, float height)
+    {
+        var mesh = new IndexedTriangleSet();
+        const int N = 12;
+        float armFrac = 0.4f;
+
+        Vector3[] CrossRing(float r, float y)
+        {
+            float aw = r * armFrac;
+            return new[]
+            {
+                new Vector3(aw, y, r),    new Vector3(aw, y, aw),
+                new Vector3(r, y, aw),    new Vector3(r, y, -aw),
+                new Vector3(aw, y, -aw),  new Vector3(aw, y, -r),
+                new Vector3(-aw, y, -r),  new Vector3(-aw, y, -aw),
+                new Vector3(-r, y, -aw),  new Vector3(-r, y, aw),
+                new Vector3(-aw, y, aw),  new Vector3(-aw, y, r),
+            };
+        }
+
+        var topVerts = CrossRing(rTop, height);
+        var botVerts = CrossRing(rBottom, 0);
+        var topRing = new int[N];
+        var botRing = new int[N];
+        for (int i = 0; i < N; i++)
+        {
+            topRing[i] = mesh.AddVertex(topVerts[i]);
+            botRing[i] = mesh.AddVertex(botVerts[i]);
+        }
+
+        // Side faces
+        for (int i = 0; i < N; i++)
+        {
+            int next = (i + 1) % N;
+            mesh.AddFace(topRing[i], botRing[i], botRing[next]);
+            mesh.AddFace(topRing[i], botRing[next], topRing[next]);
+        }
+
+        // Top cap
+        if (rTop > 1e-4f)
+        {
+            int tc = mesh.AddVertex(new Vector3(0, height, 0));
+            for (int i = 0; i < N; i++)
+                mesh.AddFace(tc, topRing[(i + 1) % N], topRing[i]);
+        }
+
+        // Bottom cap
+        if (rBottom > 1e-4f)
+        {
+            int bc = mesh.AddVertex(new Vector3(0, 0, 0));
+            for (int i = 0; i < N; i++)
+                mesh.AddFace(bc, botRing[(i + 1) % N], botRing[i]);
+        }
+
         return mesh;
     }
 

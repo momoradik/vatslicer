@@ -26,6 +26,7 @@ export interface AdvancedSupportSettings {
   topContactDepthMm: number
   topTipUpperDiaMm: number
   topTipLowerDiaMm: number
+  topTipAngleDeg: number
   topConnectionShape: SupportShapeName
   topConnectionLengthMm: number
   middlePillarDiaMm: number
@@ -37,21 +38,21 @@ export interface AdvancedSupportSettings {
 
 const PRESET_VALUES: Record<Exclude<SupportPresetName, 'custom'>, Omit<AdvancedSupportSettings, 'sizingMode' | 'preset'>> = {
   light: {
-    topTouchShape: 'sphere', topContactDepthMm: 0.2, topTipUpperDiaMm: 0.4, topTipLowerDiaMm: 0.3,
+    topTouchShape: 'sphere', topContactDepthMm: 0.2, topTipUpperDiaMm: 0.4, topTipLowerDiaMm: 0.3, topTipAngleDeg: 45,
     topConnectionShape: 'cone', topConnectionLengthMm: 1.0,
     middlePillarDiaMm: 0.6, middlePillarShape: 'cylinder',
     bottomBaseDiaMm: 2.0, bottomBaseThicknessMm: 0.8,
     raftThicknessMm: 0.3,
   },
   medium: {
-    topTouchShape: 'sphere', topContactDepthMm: 0.3, topTipUpperDiaMm: 0.6, topTipLowerDiaMm: 0.4,
+    topTouchShape: 'sphere', topContactDepthMm: 0.3, topTipUpperDiaMm: 0.6, topTipLowerDiaMm: 0.4, topTipAngleDeg: 45,
     topConnectionShape: 'cone', topConnectionLengthMm: 1.5,
     middlePillarDiaMm: 1.0, middlePillarShape: 'cylinder',
     bottomBaseDiaMm: 3.0, bottomBaseThicknessMm: 1.0,
     raftThicknessMm: 0.5,
   },
   heavy: {
-    topTouchShape: 'sphere', topContactDepthMm: 0.4, topTipUpperDiaMm: 1.0, topTipLowerDiaMm: 0.6,
+    topTouchShape: 'sphere', topContactDepthMm: 0.4, topTipUpperDiaMm: 1.0, topTipLowerDiaMm: 0.6, topTipAngleDeg: 45,
     topConnectionShape: 'cone', topConnectionLengthMm: 2.0,
     middlePillarDiaMm: 1.6, middlePillarShape: 'cylinder',
     bottomBaseDiaMm: 4.0, bottomBaseThicknessMm: 1.5,
@@ -156,7 +157,7 @@ function CrossSectionDiagram({ v }: { v: AdvancedSupportSettings }) {
 
       {/* Dimension labels */}
       <text x={4} y={tipY + 4} className="fill-gray-500" fontSize={6}>{v.topContactDepthMm}mm</text>
-      <text x={4} y={(tipY + connEndY) / 2 + 3} className="fill-gray-500" fontSize={6}>{v.topTipUpperDiaMm}/{v.topTipLowerDiaMm}</text>
+      <text x={4} y={(tipY + connEndY) / 2 + 3} className="fill-gray-500" fontSize={6}>{v.topTipUpperDiaMm}/{v.topTipLowerDiaMm} {v.topTipAngleDeg}°</text>
       <text x={4} y={(connEndY + pillarEndY) / 2} className="fill-gray-500" fontSize={6}>{v.middlePillarDiaMm}mm</text>
       <text x={4} y={baseEndY - 2} className="fill-gray-500" fontSize={6}>{v.bottomBaseDiaMm}mm</text>
 
@@ -260,8 +261,23 @@ export default function AdvancedSettingsPanel({ value, onChange }: Props) {
             disabled={disabled} onChange={v => set('topTipUpperDiaMm', v)}
             tooltip="Diameter at the tip-model contact. Smaller = easier removal. 0.3-1.0mm typical." />
           <NumField label="Tip Lower Dia" unit="mm" value={value.topTipLowerDiaMm} min={0.1} max={5} step={0.1}
-            disabled={disabled} onChange={v => set('topTipLowerDiaMm', v)}
-            tooltip="Diameter at the bottom of the tip taper. 0.3-0.6mm typical." />
+            disabled={disabled} onChange={v => {
+              // Linked: derive angle from lower dia + connection length + upper dia
+              const halfDelta = (value.topTipUpperDiaMm - v) / 2
+              const angle = value.topConnectionLengthMm > 0
+                ? Math.round(Math.atan2(halfDelta, value.topConnectionLengthMm) * 180 / Math.PI)
+                : value.topTipAngleDeg
+              onChange({ ...value, topTipLowerDiaMm: v, topTipAngleDeg: Math.max(5, Math.min(85, angle)), preset: 'custom' })
+            }}
+            tooltip="Diameter at the bottom of the tip taper. Linked to tip angle. 0.3-0.6mm typical." />
+          <NumField label="Tip Angle" unit="°" value={value.topTipAngleDeg} min={5} max={85} step={1}
+            disabled={disabled} onChange={v => {
+              // Linked: derive lower dia from angle + connection length + upper dia
+              const halfDelta = Math.tan(v * Math.PI / 180) * value.topConnectionLengthMm
+              const lowerDia = Math.max(0.1, Math.round((value.topTipUpperDiaMm - halfDelta * 2) * 10) / 10)
+              onChange({ ...value, topTipAngleDeg: v, topTipLowerDiaMm: Math.max(0.1, lowerDia), preset: 'custom' })
+            }}
+            tooltip="Taper angle of the tip cone. Linked to tip lower diameter. 30-60° typical." />
           {/* C2: Connection shape cards */}
           <div className="text-[9px] text-gray-500 mb-1 mt-2">Connection Shape</div>
           <div className="grid grid-cols-3 gap-1">
@@ -308,6 +324,26 @@ export default function AdvancedSettingsPanel({ value, onChange }: Props) {
             tooltip="Raft pad thickness under each support base. 0.2-1.0mm typical." />
         </>}
       </div>
+
+      {/* D6: Safety warnings when manual values are below recommended minimums */}
+      {!disabled && (() => {
+        const warnings: string[] = []
+        // Physics minimum: tip radius >= 0.25mm (SupportSizer.R_TIP_MIN), so diameter >= 0.5mm
+        if (value.topTipUpperDiaMm < 0.5) warnings.push(`Tip ${value.topTipUpperDiaMm}mm is below recommended minimum (0.5mm) — may tear off during peel`)
+        // Physics minimum: pillar radius >= 0.3mm, so diameter >= 0.6mm
+        if (value.middlePillarDiaMm < 0.6) warnings.push(`Pillar ${value.middlePillarDiaMm}mm is below recommended minimum (0.6mm) — may buckle`)
+        // Base should be at least 2x pillar for adhesion
+        if (value.bottomBaseDiaMm < value.middlePillarDiaMm * 1.5) warnings.push(`Base ${value.bottomBaseDiaMm}mm is small relative to pillar — may detach from plate`)
+        return warnings.length > 0 ? (
+          <div className="space-y-0.5">
+            {warnings.map((w, i) => (
+              <div key={i} className="text-[8px] px-2 py-1 rounded bg-amber-900/20 border border-amber-800/30 text-amber-400">
+                {w}
+              </div>
+            ))}
+          </div>
+        ) : null
+      })()}
 
       {disabled && (
         <div className="text-[9px] text-gray-600 italic bg-gray-800/30 rounded-md px-2 py-1.5">

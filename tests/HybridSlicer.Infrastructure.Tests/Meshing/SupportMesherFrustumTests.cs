@@ -9,7 +9,6 @@ public class SupportMesherFrustumTests
     [Theory]
     [InlineData(4)]
     [InlineData(6)]
-    [InlineData(8)]
     [InlineData(12)]
     [InlineData(24)]
     [InlineData(48)]
@@ -21,9 +20,18 @@ public class SupportMesherFrustumTests
     }
 
     [Fact]
+    public void Frustum_CrossShape_Produces48Faces()
+    {
+        // sides=8 triggers the plus-shaped cross frustum with 12 vertices per ring
+        var mesh = SupportMesher.Frustum(1f, 2f, 5f, 8);
+        // 12*2 (side quads) + 12 (top fan) + 12 (bottom fan) = 48
+        mesh.FaceCount.Should().Be(48);
+    }
+
+    [Fact]
     public void Frustum_HeightMatchesVertices()
     {
-        var mesh = SupportMesher.Frustum(1f, 1f, 10f, 8);
+        var mesh = SupportMesher.Frustum(1f, 1f, 10f, 12);
         var minY = mesh.Vertices.Min(v => v.Y);
         var maxY = mesh.Vertices.Max(v => v.Y);
         (maxY - minY).Should().BeApproximately(10f, 0.01f);
@@ -32,7 +40,7 @@ public class SupportMesherFrustumTests
     [Fact]
     public void Frustum_TopRadiusMatchesVertices()
     {
-        var mesh = SupportMesher.Frustum(3f, 1f, 5f, 8);
+        var mesh = SupportMesher.Frustum(3f, 1f, 5f, 12);
         // Top ring vertices are at Y=5 (height), radius=3
         var topVerts = mesh.Vertices.Where(v => MathF.Abs(v.Y - 5f) < 0.01f).ToList();
         if (topVerts.Count > 0)
@@ -45,7 +53,7 @@ public class SupportMesherFrustumTests
     [Fact]
     public void Frustum_BottomRadiusMatchesVertices()
     {
-        var mesh = SupportMesher.Frustum(1f, 5f, 10f, 8);
+        var mesh = SupportMesher.Frustum(1f, 5f, 10f, 12);
         // Bottom ring vertices at Y=0, radius=5
         var botVerts = mesh.Vertices.Where(v => MathF.Abs(v.Y) < 0.01f).ToList();
         if (botVerts.Count > 0)
