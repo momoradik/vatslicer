@@ -1641,6 +1641,74 @@ public static class SupportEngineV2
             meshParts.Add(SupportMesher.OrientedSphere(conn.PointB, braceJR, 3, braceSides));
         }
 
+        // ── Line contact ribs: connect consecutive tips on the same edge ──
+        // For each line-contact group, sort tips by edge param, build thin rib
+        // frustums between consecutive VALID tips just under the overhang surface.
+        var lineRibElements = new List<AnalyticalSupportSlicer.SupportElement>();
+        {
+            // Group line-contact points by group ID
+            var lineGroups = new Dictionary<int, List<(string id, Vector3 pos, Vector3 normal, float t)>>();
+            foreach (var pt in pointResult.Points)
+            {
+                if (pt.LineContactGroupId == null) continue;
+                int gid = pt.LineContactGroupId.Value;
+                if (!lineGroups.ContainsKey(gid)) lineGroups[gid] = new();
+                lineGroups[gid].Add((pt.Id, pt.Position, pt.Normal, pt.LineContactParam));
+            }
+
+            float ribEpsilon = 0.2f; // offset below surface
+            int ribsGenerated = 0;
+
+            foreach (var (gid, tips) in lineGroups)
+            {
+                if (tips.Count < 2) continue;
+
+                // Sort by edge param
+                var sorted = tips.OrderBy(t => t.t).ToList();
+
+                // Connect consecutive tips that are both in finalValidIds
+                for (int i = 0; i < sorted.Count - 1; i++)
+                {
+                    if (!validIds.Contains(sorted[i].id)) continue;
+                    if (!validIds.Contains(sorted[i + 1].id)) continue;
+
+                    var p1 = sorted[i];
+                    var p2 = sorted[i + 1];
+
+                    // Get tip radius from sizing (or use a thin default)
+                    float tipR1 = 0.25f, tipR2 = 0.25f;
+                    if (sizingLookup.TryGetValue(p1.id, out var s1)) tipR1 = s1.TipRadius;
+                    if (sizingLookup.TryGetValue(p2.id, out var s2)) tipR2 = s2.TipRadius;
+
+                    float ribRadius = Math.Clamp(0.5f * Math.Min(tipR1, tipR2), 0.15f, 0.35f);
+
+                    // Rib sits just below the surface (offset along normal)
+                    var avgNormal = Vector3.Normalize(p1.normal + p2.normal);
+                    if (float.IsNaN(avgNormal.X)) avgNormal = new Vector3(0, 0, -1);
+                    var ribA = p1.pos + avgNormal * ribEpsilon;
+                    var ribB = p2.pos + avgNormal * ribEpsilon;
+
+                    // Mesh rib
+                    var ribMesh = SupportMesher.OrientedFrustum(ribA, ribB, ribRadius, ribRadius, 6);
+                    meshParts.Add(ribMesh);
+                    ribsGenerated++;
+
+                    // Slice element for print
+                    lineRibElements.Add(new AnalyticalSupportSlicer.SupportElement
+                    {
+                        PointA = ribA,
+                        PointB = ribB,
+                        RadiusA = ribRadius,
+                        RadiusB = ribRadius,
+                        Type = "linerib",
+                    });
+                }
+            }
+
+            if (ribsGenerated > 0)
+                Serilog.Log.Information("V2 Line contact ribs: {Count} rib segments generated", ribsGenerated);
+        }
+
         // Final mesh merge
         var combined = new IndexedTriangleSet();
         foreach (var part in meshParts) combined.Merge(part);
@@ -1730,19 +1798,19 @@ public static class SupportEngineV2
             }
         }
 
+        // Add line contact rib segments to slice elements (preview == print)
+        sliceElements.AddRange(lineRibElements);
+
         // ── Final invariant pass: assert every slice element connects to z≈0 ──
-        // Walk all non-raft/non-interconnect/non-pinhead elements and verify they
-        // belong to a grounded support. Drop orphans and log a warning.
         {
             int orphans = 0;
             var groundedRouteIds = new HashSet<string>(
                 validRoutes.Where(r => r.route.ReachesGround || r.route.AnchorPoint.HasValue)
                     .Select(r => r.id));
-            // Remove slice elements that belong to routes not in the grounded set
             int beforeCount = sliceElements.Count;
             sliceElements = sliceElements.Where(elem =>
             {
-                if (elem.Type is "raft" or "interconnect") return true;
+                if (elem.Type is "raft" or "interconnect" or "linerib") return true;
                 // Pinhead elements are tied to specific supports via position matching
                 float minZ = Math.Min(elem.PointA.Z, elem.PointB.Z);
                 if (minZ <= 1.0f) return true; // at plate level — grounded

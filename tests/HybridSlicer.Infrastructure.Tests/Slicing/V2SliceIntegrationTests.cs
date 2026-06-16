@@ -115,7 +115,7 @@ public class V2SliceIntegrationTests
     public void SliceElements_TypesAreValid()
     {
         var result = GenerateSupports();
-        var validTypes = new[] { "pinhead", "pillar", "bridge", "base", "junction", "anchor", "interconnect", "raft", "fillet" };
+        var validTypes = new[] { "pinhead", "pillar", "bridge", "base", "junction", "anchor", "interconnect", "raft", "fillet", "linerib" };
 
         foreach (var e in result.SliceElements)
         {

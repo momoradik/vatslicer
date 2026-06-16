@@ -34,6 +34,10 @@ public sealed class SupportPointGenerator
         public float? ManualTipRadiusMm { get; init; }
         public float? ManualPillarRadiusMm { get; init; }
         public float? ManualBaseRadiusMm { get; init; }
+        /// <summary>Line contact group ID — tips on the same edge share a group. null = not a line contact tip.</summary>
+        public int? LineContactGroupId { get; init; }
+        /// <summary>Position along the edge (0..1) for ordering rib segments.</summary>
+        public float LineContactParam { get; init; }
     }
 
     public sealed class GenerationConfig
@@ -360,18 +364,19 @@ public sealed class SupportPointGenerator
                 edgeSegments.Add((ea, eb, avgN));
             }
 
-            // Sample tips along each edge segment
+            // Sample tips along each edge segment — tag with group ID and edge param
+            int lineGroupId = 0;
             foreach (var (ea, eb, avgN) in edgeSegments)
             {
                 float edgeLen = Vector3.Distance(ea, eb);
                 int nSamples = Math.Max(2, (int)MathF.Ceiling(edgeLen / lineSpacing));
+                int currentGroup = lineGroupId++;
 
                 for (int si = 0; si < nSamples; si++)
                 {
                     float t = nSamples > 1 ? (float)si / (nSamples - 1) : 0.5f;
                     var pos = Vector3.Lerp(ea, eb, t);
 
-                    // Skip if already covered by existing point
                     if (grid.ExistsInRadius(pos, lineSpacing * 0.6f)) continue;
 
                     var force = ForceEstimator.Estimate(
@@ -390,6 +395,8 @@ public sealed class SupportPointGenerator
                         Priority = 0.9f,
                         RecommendedWeight = force.Weight,
                         SafetyFactor = force.SafetyFactor,
+                        LineContactGroupId = currentGroup,
+                        LineContactParam = t,
                     });
                 }
             }
