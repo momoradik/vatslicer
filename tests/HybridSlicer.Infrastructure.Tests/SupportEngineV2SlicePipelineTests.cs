@@ -48,7 +48,7 @@ public class SupportEngineV2SlicePipelineTests
     public void Pipeline_SliceElements_AllHaveValidType()
     {
         var r = Generate();
-        var validTypes = new HashSet<string> { "pinhead", "pillar", "bridge", "base", "junction", "anchor", "interconnect" };
+        var validTypes = new HashSet<string> { "pinhead", "pillar", "bridge", "base", "junction", "anchor", "interconnect", "raft", "fillet" };
         foreach (var e in r.SliceElements)
             validTypes.Should().Contain(e.Type);
     }
