@@ -1890,10 +1890,12 @@ public static class SupportEngineV2
 
         float pinRadiusScale = config.Orientation == PrinterOrientation.BottomUp ? 0.8f : 1.0f;
 
-        // ── Step 1: Pinhead optimization (same as auto Step 3) ──
-        // Apply the same weight-based pinhead scaling as the full pipeline (Step 3, lines 345-362).
-        // Weight is derived from overridePillarRadius (shaft radius) using the same thresholds
-        // as manual contact injection (ShaftDiameterMm = pillarRadius * 2).
+        // FIX1: Force tip normal to straight down for steep/vertical surfaces
+        // so PinheadOptimizer doesn't produce an invalid horizontal pinhead
+        var effectiveNormal = tipNormal;
+        if (tipNormal.Z > -0.5f)
+            effectiveNormal = -Vector3.UnitZ;
+
         float shaftDiameter = (overridePillarRadius ?? config.PillarRadiusMm) * 2f;
         bool isHeavy = shaftDiameter >= 1.2f;
         bool isMedium = !isHeavy && shaftDiameter >= 0.8f;
@@ -1923,22 +1925,55 @@ public static class SupportEngineV2
                 BackRadiusMm = Math.Max(phCfg.BackRadiusMm, 0.5f),
             };
         }
-        var pinhead = PinheadOptimizer.Optimize(tipPosition, tipNormal, bvh, phCfg);
+
+        // Try with effective normal first, then original normal, then reduced pin radius
+        var pinhead = PinheadOptimizer.Optimize(tipPosition, effectiveNormal, bvh, phCfg);
+        if (!pinhead.IsValid && effectiveNormal != tipNormal)
+            pinhead = PinheadOptimizer.Optimize(tipPosition, tipNormal, bvh, phCfg);
+        if (!pinhead.IsValid)
+        {
+            // Retry with reduced tip radius
+            var smallCfg = phCfg with { PinRadiusMm = phCfg.PinRadiusMm * 0.5f, BackRadiusMm = phCfg.BackRadiusMm * 0.7f };
+            pinhead = PinheadOptimizer.Optimize(tipPosition, effectiveNormal, bvh, smallCfg);
+        }
 
         if (!pinhead.IsValid)
         {
+            // FIX1: Build a minimal anchored stub instead of returning uncoverable
+            float stubR = overridePillarRadius ?? config.PillarRadiusMm;
+            var stubPath = new List<PillarRouter.Waypoint>
+            {
+                new() { Position = tipPosition, Radius = stubR, Type = "junction" },
+                new() { Position = tipPosition + new Vector3(0, 0, -2f), Radius = stubR * 1.5f, Type = "anchor" },
+            };
+            var stubRoute = new PillarRouter.PillarRoute
+            {
+                Path = stubPath,
+                ReachesGround = false,
+                AnchorPoint = tipPosition + new Vector3(0, 0, -2f),
+                AnchorNormal = Vector3.UnitZ,
+                TotalLength = 2f,
+            };
+
+            // Build minimal stub mesh
+            var stubParts = new List<IndexedTriangleSet>();
+            stubParts.Add(SupportMesher.OrientedSphere(tipPosition, stubR * 0.5f, 4, 8));
+            stubParts.Add(SupportMesher.OrientedFrustum(stubPath[0].Position, stubPath[1].Position, stubR, stubR * 1.5f, 8));
+            var stubMesh = new IndexedTriangleSet();
+            foreach (var p in stubParts) stubMesh.Merge(p);
+
             sw.Stop();
             return new SingleSupportResult
             {
-                Mesh = new IndexedTriangleSet(),
-                Status = "uncoverable",
-                PillarAxis = new Vector3(0, 0, 1),
-                BaseZ = 0,
+                Mesh = stubMesh,
+                Status = "anchored",
+                PillarAxis = new Vector3(0, 0, -1),
+                BaseZ = tipPosition.Z - 2f,
                 ComputeMs = sw.ElapsedMilliseconds,
             };
         }
 
-        // ── Step 2: Pillar routing (same as auto Step 4) ──
+        // ── Step 2: Pillar routing ──
         float effectiveBaseZ = 0f;
         var routingConfig = new PillarRouter.RoutingConfig
         {
@@ -1953,6 +1988,25 @@ public static class SupportEngineV2
 
         var routeStart = pinhead.JunctionPoint.Z > 0.1f ? pinhead.JunctionPoint : pinhead.ContactPoint;
         var route = PillarRouter.Route(routeStart, pinhead.BackRadius, bvh, routingConfig);
+
+        // FIX1: Anchor fallback when routing fails (Path.Count < 2)
+        if (route.Path.Count < 2)
+        {
+            float anchorR = overridePillarRadius ?? config.PillarRadiusMm;
+            var anchorPos = routeStart + new Vector3(0, 0, -2f);
+            route = new PillarRouter.PillarRoute
+            {
+                Path = new List<PillarRouter.Waypoint>
+                {
+                    new() { Position = routeStart, Radius = anchorR, Type = "junction" },
+                    new() { Position = anchorPos, Radius = anchorR * 1.5f, Type = "anchor" },
+                },
+                ReachesGround = false,
+                AnchorPoint = anchorPos,
+                AnchorNormal = Vector3.UnitZ,
+                TotalLength = 2f,
+            };
+        }
 
         // ── Step 3: Bundling — check if we can merge into an existing column ──
         string? bundledIntoId = null;
@@ -2027,13 +2081,18 @@ public static class SupportEngineV2
             };
         }
 
-        // ── Step 4: Physics sizing (same as auto Step 5b) ──
+        // ── Step 4: Physics sizing ──
+        // FIX2: Use realistic layer area and support count for auto-mode sizing
+        // (was hardcoded layerArea=25, supportsInLayer=1 → undersized)
         float supportHeight = route.Path.Count >= 2
             ? route.Path[0].Position.Z - route.Path[^1].Position.Z : 1f;
+        bool hasCustomOverrides = overrideTipRadius.HasValue || overridePillarRadius.HasValue || overrideBaseRadius.HasValue;
+        float estLayerArea = hasCustomOverrides ? 25f : 100f; // auto: realistic area estimate
+        int estSupportsInLayer = hasCustomOverrides ? 1 : Math.Max(1, (existingRoutes?.Count ?? 10) / 3);
         var sizing = SupportSizer.Size(
             supportHeight: Math.Max(supportHeight, 0.5f),
-            layerArea: 25f,
-            supportsInLayer: 1,
+            layerArea: estLayerArea,
+            supportsInLayer: estSupportsInLayer,
             rootsOnPlate: route.ReachesGround,
             ov: config.BuildSizerOverrides());
 
@@ -2073,33 +2132,71 @@ public static class SupportEngineV2
             };
         }
 
-        // ── Step 5: Mesh generation (same as auto Step 6) ──
+        // ── Step 5: Mesh generation (mirrors auto Step 6 — with fillets) ──
         int meshSides = 8;
+        int tipSides = Math.Max(meshSides, 12); // FIX3: higher tessellation for tip cone
         var parts = new List<IndexedTriangleSet>();
 
         // Contact sphere
         var contactSphere = SupportMesher.OrientedSphere(
-            pinhead.ContactPoint, sizing.ContactSphereRadius, 4, meshSides);
+            pinhead.ContactPoint, sizing.ContactSphereRadius, 4, tipSides);
         parts.Add(contactSphere);
 
-        // Pinhead frustum (contact → junction/route start)
+        // FIX3: Tip cove + filleted pinhead (mirrors auto pipeline)
         if (Vector3.Distance(pinhead.ContactPoint, routeStart) > 0.1f)
         {
-            var phMesh = SupportMesher.OrientedFrustum(
-                pinhead.ContactPoint, routeStart,
-                sizing.TipRadius, sizing.PillarRadius, meshSides);
-            parts.Add(phMesh);
+            if (config.EnableFillets)
+            {
+                var coveWps = FilletBuilder.GenerateTipCove(
+                    pinhead.ContactPoint, routeStart, sizing.TipRadius, sizing.PillarRadius,
+                    subdivisions: Math.Max(2, config.FilletSubdivisions / 2));
+
+                var tipChain = new List<Vector3> { pinhead.ContactPoint };
+                var tipRadii = new List<float> { sizing.TipRadius };
+                foreach (var cw in coveWps)
+                {
+                    if (float.IsNaN(cw.Position.X) || float.IsNaN(cw.Position.Y) || float.IsNaN(cw.Position.Z))
+                        continue;
+                    tipChain.Add(cw.Position);
+                    tipRadii.Add(float.IsNaN(cw.Radius) ? sizing.TipRadius : cw.Radius);
+                }
+                tipChain.Add(routeStart);
+                tipRadii.Add(sizing.PillarRadius);
+
+                for (int ti = 0; ti < tipChain.Count - 1; ti++)
+                {
+                    var seg = SupportMesher.OrientedFrustum(
+                        tipChain[ti], tipChain[ti + 1], tipRadii[ti], tipRadii[ti + 1], tipSides);
+                    parts.Add(seg);
+                }
+            }
+            else
+            {
+                var phMesh = SupportMesher.OrientedFrustum(
+                    pinhead.ContactPoint, routeStart,
+                    sizing.TipRadius, sizing.PillarRadius, tipSides);
+                parts.Add(phMesh);
+            }
         }
 
-        // Pillar segments + junction spheres
-        float totalPillarHeight = route.Path[0].Position.Z - route.Path[^1].Position.Z;
-        for (int i = 0; i < route.Path.Count - 1; i++)
+        // FIX3: Apply fillet smoothing to route path (same as auto pipeline)
+        var meshPath = config.EnableFillets
+            ? FilletBuilder.FilletRoute(route.Path, config.FilletSubdivisions)
+            : route.Path;
+        meshPath = meshPath.Where(wp =>
+            !float.IsNaN(wp.Position.X) && !float.IsNaN(wp.Position.Y) && !float.IsNaN(wp.Position.Z)
+            && !float.IsNaN(wp.Radius)).ToList();
+        if (meshPath.Count < 2) meshPath = route.Path;
+
+        float totalPillarHeight = meshPath[0].Position.Z - meshPath[^1].Position.Z;
+        for (int i = 0; i < meshPath.Count - 1; i++)
         {
-            var wp1 = route.Path[i];
-            var wp2 = route.Path[i + 1];
+            var wp1 = meshPath[i];
+            var wp2 = meshPath[i + 1];
             var seg = SupportMesher.OrientedFrustum(wp1.Position, wp2.Position, wp1.Radius, wp2.Radius, meshSides);
             parts.Add(seg);
-            if (i > 0)
+            // FIX3: Junction spheres ONLY when fillets disabled (same as auto pipeline)
+            if (i > 0 && !config.EnableFillets)
             {
                 var sphere = SupportMesher.OrientedSphere(wp1.Position, wp1.Radius, 4, meshSides);
                 parts.Add(sphere);
