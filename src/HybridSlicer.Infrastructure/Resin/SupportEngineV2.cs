@@ -1739,7 +1739,7 @@ public static class SupportEngineV2
         }
 
         // ── Step 9: Build legacy format — only supports with complete load path ─
-        var legacySupports = BuildLegacySupports(pinheads, validRoutes);
+        var legacySupports = BuildLegacySupports(pinheads, validRoutes, sizingLookup);
         var legacyCrossBraces = BuildLegacyCrossBraces(interconnections, validRoutes);
 
         // ── Stats ────────────────────────────────────────────────────────
@@ -2070,7 +2070,8 @@ public static class SupportEngineV2
 
     private static List<AdvancedSupportEngine.AdvancedSupport> BuildLegacySupports(
         List<(string id, PinheadOptimizer.Pinhead pinhead)> pinheads,
-        List<(string id, PillarRouter.PillarRoute route)> routes)
+        List<(string id, PillarRouter.PillarRoute route)> routes,
+        Dictionary<string, SupportSizer.SupportSizing>? sizingLookup = null)
     {
         var legacyPreset = AdvancedSupportEngine.MediumPreset;
         var result = new List<AdvancedSupportEngine.AdvancedSupport>();
@@ -2083,8 +2084,16 @@ public static class SupportEngineV2
 
             var segments = new List<AdvancedSupportEngine.SupportSegment>();
 
-            // Tip (contact → pin center) — use physics-sized tip radius
+            // Use physics/manual-overridden radii from sizing lookup when available
             float tipR = pinhead.PinRadius;
+            float pillarR = pinhead.BackRadius;
+            if (sizingLookup != null && sizingLookup.TryGetValue(id, out var sizing))
+            {
+                tipR = sizing.TipRadius;
+                pillarR = sizing.PillarRadius;
+            }
+
+            // Tip (contact → pin center)
             segments.Add(new AdvancedSupportEngine.SupportSegment
             {
                 Part = "tip",
@@ -2096,16 +2105,16 @@ public static class SupportEngineV2
             segments.Add(new AdvancedSupportEngine.SupportSegment
             {
                 Part = "neck",
-                X1 = pinhead.PinCenter.X, Y1 = pinhead.PinCenter.Y, Z1 = pinhead.PinCenter.Z, R1 = pinhead.PinRadius,
-                X2 = pinhead.BackCenter.X, Y2 = pinhead.BackCenter.Y, Z2 = pinhead.BackCenter.Z, R2 = pinhead.BackRadius,
+                X1 = pinhead.PinCenter.X, Y1 = pinhead.PinCenter.Y, Z1 = pinhead.PinCenter.Z, R1 = tipR,
+                X2 = pinhead.BackCenter.X, Y2 = pinhead.BackCenter.Y, Z2 = pinhead.BackCenter.Z, R2 = pillarR,
             });
 
             // Upper taper (back center → junction)
             segments.Add(new AdvancedSupportEngine.SupportSegment
             {
                 Part = "upperTaper",
-                X1 = pinhead.BackCenter.X, Y1 = pinhead.BackCenter.Y, Z1 = pinhead.BackCenter.Z, R1 = pinhead.BackRadius,
-                X2 = pinhead.JunctionPoint.X, Y2 = pinhead.JunctionPoint.Y, Z2 = pinhead.JunctionPoint.Z, R2 = pinhead.BackRadius,
+                X1 = pinhead.BackCenter.X, Y1 = pinhead.BackCenter.Y, Z1 = pinhead.BackCenter.Z, R1 = pillarR,
+                X2 = pinhead.JunctionPoint.X, Y2 = pinhead.JunctionPoint.Y, Z2 = pinhead.JunctionPoint.Z, R2 = pillarR,
             });
 
             // Route waypoints
