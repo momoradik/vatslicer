@@ -2457,7 +2457,25 @@ export default function StlImport() {
                           const result = await supportV2Api.autoOrient(fd)
                           if (result.orientations.length > 0) {
                             const best = result.orientations[0]
-                            alert(`Best orientation: ${best.description}\nOverhang: ${best.overhangAreaMm2.toFixed(0)}mm²\nEst. supports: ${best.estimatedSupports}`)
+                            // Convert quaternion to Euler angles (ZYX order)
+                            const { rotationX: qx, rotationY: qy, rotationZ: qz, rotationW: qw } = best
+                            const sinrCosp = 2 * (qw * qx + qy * qz)
+                            const cosrCosp = 1 - 2 * (qx * qx + qy * qy)
+                            const eulerX = Math.atan2(sinrCosp, cosrCosp) * 180 / Math.PI
+                            const sinp = 2 * (qw * qy - qz * qx)
+                            const eulerY = (Math.abs(sinp) >= 1 ? Math.sign(sinp) * 90 : Math.asin(sinp) * 180 / Math.PI)
+                            const sinyCosp = 2 * (qw * qz + qx * qy)
+                            const cosyCosp = 1 - 2 * (qy * qy + qz * qz)
+                            const eulerZ = Math.atan2(sinyCosp, cosyCosp) * 180 / Math.PI
+
+                            if (selected.id) {
+                              pushUndo(selected.id, selected.transform)
+                              handleTransformChange(selected.id, {
+                                ...selected.transform,
+                                rotX: eulerX, rotY: eulerY, rotZ: eulerZ,
+                              })
+                            }
+                            console.log(`[AutoOrient] ${best.description}: overhang=${best.overhangAreaMm2.toFixed(0)}mm², supports≈${best.estimatedSupports}`)
                           }
                         } catch (err) { console.error('Auto-orient failed:', err) }
                       }}
