@@ -562,6 +562,7 @@ public static class SupportEngineV2
             WidthMm = config.HeadWidthMm,
             PenetrationMm = config.PenetrationMm,
             CollisionRays = adaptiveRays,
+            // Bitstack set per-support in the parallel loop (after bitstack is built)
         };
 
         float normalZThreshold = -MathF.Cos(config.OverhangAngleDeg * MathF.PI / 180f);
@@ -594,7 +595,7 @@ public static class SupportEngineV2
         System.Threading.Tasks.Parallel.For(0, pointResult.Points.Count, i =>
         {
             var pt = pointResult.Points[i];
-            var phCfg = pinheadConfig;
+            var phCfg = pinheadConfig with { Bitstack = occupancyBitstack };
             if (pt.RecommendedWeight == ForceEstimator.SupportWeight.Heavy)
             {
                 phCfg = phCfg with

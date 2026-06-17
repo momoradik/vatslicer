@@ -56,6 +56,8 @@ public static class PinheadOptimizer
         public float MinClearanceMm { get; init; } = 0.1f;
         /// <summary>Max Nelder-Mead iterations. Default 60. Fast engine uses 15.</summary>
         public int MaxNelderMeadIterations { get; init; } = 60;
+        /// <summary>When set, use bitstack for collision checks instead of BVH (fast engine).</summary>
+        public Spatial.OccupancyBitstack? Bitstack { get; init; }
     }
 
     // ── Constants for Nelder-Mead ──────────────────────────────────────
@@ -301,6 +303,10 @@ public static class PinheadOptimizer
     /// </summary>
     private static Pinhead EvaluatePinhead(Vector3 contact, Vector3 dir, PinheadConfig config, AabbBvh bvh)
     {
+        // FAST PATH: if bitstack available, use O(1) occupancy checks instead of BVH
+        if (config.Bitstack != null)
+            return EvaluatePinheadFast(contact, dir, config);
+
         float rPin = config.PinRadiusMm;
         float rBack = config.BackRadiusMm;
         float width = config.WidthMm;
@@ -385,6 +391,51 @@ public static class PinheadOptimizer
         bool isValid = minClearance > clearanceReq;
 
         return MakePinhead(contact, dir, pinCenter, backCenter, junction, config, minClearance, isValid);
+    }
+
+    /// <summary>
+    /// Fast pinhead evaluation using OccupancyBitstack instead of BVH.
+    /// Checks N sample points along the pinhead path for occupancy — O(1) each.
+    /// </summary>
+    private static Pinhead EvaluatePinheadFast(Vector3 contact, Vector3 dir, PinheadConfig config)
+    {
+        float rPin = config.PinRadiusMm;
+        float rBack = config.BackRadiusMm;
+        float width = config.WidthMm;
+        float pen = config.PenetrationMm;
+        float totalLen = rPin + width + rBack;
+
+        var pinCenter = contact + dir * (rPin - pen);
+        var backCenter = contact + dir * (totalLen - rBack - pen);
+        var junction = contact + dir * (totalLen - pen);
+        var bitstack = config.Bitstack!;
+
+        // Reject if junction is below plate
+        if (junction.Z < -0.5f)
+            return MakePinhead(contact, dir, pinCenter, backCenter, junction, config, float.MinValue, false);
+
+        // Check 4 sample points along the path for bitstack occupancy
+        // (fewer samples than BVH path since bitstack is coarse)
+        bool collision = false;
+        for (int i = 1; i < 4; i++) // skip i=0 (contact point is ON the surface)
+        {
+            float t = (float)i / 3f;
+            var sample = Vector3.Lerp(pinCenter, junction, t);
+            if (bitstack.IsOccupied(sample))
+            {
+                collision = true;
+                break;
+            }
+        }
+
+        // Also check junction point
+        if (!collision && bitstack.IsOccupied(junction))
+            collision = true;
+
+        float clearance = collision ? -1f : 1f;
+        bool isValid = !collision;
+
+        return MakePinhead(contact, dir, pinCenter, backCenter, junction, config, clearance, isValid);
     }
 
     private static Pinhead MakePinhead(Vector3 contact, Vector3 dir, Vector3 pinCenter,
