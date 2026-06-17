@@ -103,6 +103,24 @@ public static class AnalyticalSupportSlicer
                 Type = "pinhead",
             });
 
+            // FIX: If route.Path[0] doesn't match JunctionPoint (e.g. after fillet),
+            // emit a connecting element to close the gap.
+            if (route.Path.Count > 0)
+            {
+                float gapDist = Vector3.Distance(pinhead.JunctionPoint, route.Path[0].Position);
+                if (gapDist > 0.01f)
+                {
+                    elements.Add(new SupportElement
+                    {
+                        PointA = pinhead.JunctionPoint,
+                        PointB = route.Path[0].Position,
+                        RadiusA = pinhead.BackRadius,
+                        RadiusB = route.Path[0].Radius,
+                        Type = "junction",
+                    });
+                }
+            }
+
             // Route waypoints
             for (int i = 0; i < route.Path.Count - 1; i++)
             {

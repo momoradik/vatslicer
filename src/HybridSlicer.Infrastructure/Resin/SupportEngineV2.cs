@@ -1543,14 +1543,24 @@ public static class SupportEngineV2
             meshParts.Add(contactSphere);
             if (isManualSupport) { if (!manualMeshParts.ContainsKey(id)) manualMeshParts[id] = new(); manualMeshParts[id].Add(contactSphere); }
 
+            // FIX: Connect contact sphere to ContactPoint with a frustum so the sphere
+            // is NOT an isolated floating piece. This closes the sphere→tip gap.
+            if (Vector3.Distance(sphereCenter, pinhead.ContactPoint) > 0.01f)
+            {
+                var sphereLink = SupportMesher.OrientedFrustum(
+                    sphereCenter, pinhead.ContactPoint,
+                    sizing.ContactSphereRadius * 0.5f, sizing.TipRadius, effectiveConnSides);
+                meshParts.Add(sphereLink);
+                if (isManualSupport) manualMeshParts[id].Add(sphereLink);
+            }
+
             // A1: SINGLE SOURCE — use pinhead.JunctionPoint for BOTH routing and mesh gen.
-            // Previously mesh gen used a synthesized offset point that differed from the
-            // routing start, causing tip-pillar gaps/kinks on tilted supports.
             var routeStart = pinhead.JunctionPoint;
 
-            if (Vector3.Distance(pinhead.ContactPoint, routeStart) > 0.1f)
+            // FIX: ALWAYS emit the tip chain from ContactPoint to JunctionPoint, even when short.
+            // Previously skipped when distance < 0.1mm, leaving the contact sphere isolated.
             {
-                if (config.EnableFillets)
+                if (config.EnableFillets && Vector3.Distance(pinhead.ContactPoint, routeStart) > 0.1f)
                 {
                     var coveWps = FilletBuilder.GenerateTipCove(
                         pinhead.ContactPoint, routeStart, sizing.TipRadius, sizing.PillarRadius,
@@ -1560,7 +1570,6 @@ public static class SupportEngineV2
                     var tipRadii = new List<float> { sizing.TipRadius };
                     foreach (var cw in coveWps)
                     {
-                        // A4: Skip NaN waypoints from fillet builder — fall back to linear
                         if (float.IsNaN(cw.Position.X) || float.IsNaN(cw.Position.Y) || float.IsNaN(cw.Position.Z))
                             continue;
                         tipChain.Add(cw.Position);
@@ -1579,11 +1588,27 @@ public static class SupportEngineV2
                 }
                 else
                 {
+                    // Direct frustum ContactPoint → JunctionPoint (no fillet, or too short for fillet)
                     var phMesh = SupportMesher.OrientedFrustum(
                         pinhead.ContactPoint, routeStart,
                         sizing.TipRadius, sizing.PillarRadius, effectiveConnSides);
                     meshParts.Add(phMesh);
                     if (isManualSupport) manualMeshParts[id].Add(phMesh);
+                }
+            }
+
+            // FIX: If route.Path[0].Position != JunctionPoint, emit a connecting frustum.
+            // This closes the tip→pillar gap that causes floating tips.
+            if (routeLookup.TryGetValue(id, out var idRoute) && idRoute.Path.Count > 0)
+            {
+                float gapDist = Vector3.Distance(routeStart, idRoute.Path[0].Position);
+                if (gapDist > 0.01f)
+                {
+                    var gapFrustum = SupportMesher.OrientedFrustum(
+                        routeStart, idRoute.Path[0].Position,
+                        sizing.PillarRadius, idRoute.Path[0].Radius, effectivePillarSides);
+                    meshParts.Add(gapFrustum);
+                    if (isManualSupport) manualMeshParts[id].Add(gapFrustum);
                 }
             }
         }

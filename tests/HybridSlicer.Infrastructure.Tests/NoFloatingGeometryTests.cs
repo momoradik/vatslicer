@@ -89,6 +89,70 @@ public class NoFloatingGeometryTests
         }
     }
 
+    /// <summary>
+    /// FIX: Test that EVERY slice element (including pinheads and contact tips)
+    /// is transitively connected to the build plate. Uses union-find to build
+    /// connected components from shared endpoints (within 1mm tolerance).
+    /// A floating tip that shares no endpoint with any pillar will fail.
+    /// </summary>
+    [Fact]
+    public void AllElements_IncludingTips_TransitivelyReachPlate()
+    {
+        var mesh = CreateFloatingCube(20f, 15f);
+        var result = SupportEngineV2.Generate(mesh, new SupportEngineV2.EngineConfig
+        {
+            EnableInterconnections = true,
+            EnableFillets = true,
+            RaftMode = RaftMode.MiniRafts,
+            EnableMiniRafts = true,
+        });
+
+        if (result.ValidSupports == 0 || result.SliceElements.Count == 0) return;
+
+        // Collect all endpoints
+        var elements = result.SliceElements;
+        int n = elements.Count;
+        var parent = Enumerable.Range(0, n).ToArray();
+        int Find(int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+        void Union(int a, int b) { parent[Find(a)] = Find(b); }
+
+        // Union elements that share endpoints (within 1mm tolerance)
+        const float TOL = 1.0f;
+        for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++)
+        {
+            var ei = elements[i]; var ej = elements[j];
+            if (Vector3.Distance(ei.PointA, ej.PointA) < TOL ||
+                Vector3.Distance(ei.PointA, ej.PointB) < TOL ||
+                Vector3.Distance(ei.PointB, ej.PointA) < TOL ||
+                Vector3.Distance(ei.PointB, ej.PointB) < TOL)
+            {
+                Union(i, j);
+            }
+        }
+
+        // Find which components touch the plate (z <= 1.0)
+        var groundedRoots = new HashSet<int>();
+        for (int i = 0; i < n; i++)
+        {
+            float minZ = Math.Min(elements[i].PointA.Z, elements[i].PointB.Z);
+            if (minZ <= 1.0f) groundedRoots.Add(Find(i));
+        }
+
+        // Every element should be in a grounded component (except raft/interconnect which are always ok)
+        int disconnected = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (elements[i].Type is "raft" or "linerib") continue;
+            if (!groundedRoots.Contains(Find(i)))
+                disconnected++;
+        }
+
+        disconnected.Should().Be(0,
+            $"all slice elements (including pinhead tips) must transitively connect to the plate. " +
+            $"Found {disconnected} disconnected elements out of {n}");
+    }
+
     [Fact]
     public void Braces_OnlyConnectSurvivingSupports()
     {
