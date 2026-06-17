@@ -526,12 +526,16 @@ public static class SupportEngineV2
 
         // ── Step 3: Optimize pinheads ────────────────────────────────────
         // Adaptive collision rays: fewer for large meshes
-        int adaptiveRays = mesh.TriangleCount > 3000 ? 4 : Math.Min(config.CollisionRays, 8);
+        // Fast engine: use 2 rays (minimal collision check, rely on post-route filter)
+        int adaptiveRays = config.UseFastSupportEngine ? 2
+            : mesh.TriangleCount > 3000 ? 4
+            : Math.Min(config.CollisionRays, 8);
 
         var pinheadConfig = new PinheadOptimizer.PinheadConfig
         {
             PinRadiusMm = config.PinRadiusMm * pinRadiusScale,
             BackRadiusMm = config.BackRadiusMm,
+            MaxNelderMeadIterations = config.UseFastSupportEngine ? 15 : 60,
             WidthMm = config.HeadWidthMm,
             PenetrationMm = config.PenetrationMm,
             CollisionRays = adaptiveRays,

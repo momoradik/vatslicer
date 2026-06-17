@@ -54,6 +54,8 @@ public static class PinheadOptimizer
         public float MaxBridgeSlope { get; init; } = MathF.PI / 4f;
         public int CollisionRays { get; init; } = 16;
         public float MinClearanceMm { get; init; } = 0.1f;
+        /// <summary>Max Nelder-Mead iterations. Default 60. Fast engine uses 15.</summary>
+        public int MaxNelderMeadIterations { get; init; } = 60;
     }
 
     // ── Constants for Nelder-Mead ──────────────────────────────────────
@@ -175,7 +177,8 @@ public static class PinheadOptimizer
         }
 
         // Iterate
-        for (int iter = 0; iter < NM_MAX_ITERATIONS; iter++)
+        int maxIter = config.MaxNelderMeadIterations > 0 ? config.MaxNelderMeadIterations : NM_MAX_ITERATIONS;
+        for (int iter = 0; iter < maxIter; iter++)
         {
             // Sort: values[0] ≤ values[1] ≤ values[2] (best → worst)
             SortSimplex(simplex, values, pinheads);
