@@ -466,7 +466,9 @@ export default function StlImport() {
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault()
-        // Trigger save handled by saveProject
+      }
+      if (e.key === 'a' && !e.ctrlKey && !e.metaKey && !(e.target instanceof HTMLInputElement) && !(e.target instanceof HTMLTextAreaElement)) {
+        setAnalyzeMode(p => !p)
       }
     }
     window.addEventListener('keydown', handler)
