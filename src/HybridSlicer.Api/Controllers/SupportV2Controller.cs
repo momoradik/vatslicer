@@ -696,6 +696,31 @@ public sealed class SupportV2Controller : ControllerBase
         });
     }
 
+    /// <summary>Predict island/floating geometry risks before slicing.</summary>
+    [HttpPost("island-check")]
+    [RequestSizeLimit(200_000_000)]
+    public async Task<IActionResult> IslandCheck(
+        [FromForm] IFormFile stlFile,
+        [FromForm] float overhangAngleDeg = 45f,
+        CancellationToken ct = default)
+    {
+        if (stlFile is null) return BadRequest("STL required.");
+        byte[] data; using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
+        var mesh = StlMesh.FromFile(data, stlFile.FileName);
+        var result = HybridSlicer.Infrastructure.Resin.Analysis.IslandPredictor.Predict(mesh, overhangAngleDeg);
+        return Ok(new
+        {
+            riskCount = result.Risks.Count,
+            highRiskCount = result.HighRiskCount,
+            lowestUnsupportedZ = result.LowestUnsupportedZ,
+            risks = result.Risks.Select(r => new
+            {
+                zMm = r.ZMm, areaMm2 = r.AreaMm2, risk = r.Risk,
+                x = r.Centroid.X, y = r.Centroid.Y, z = r.Centroid.Z,
+            }),
+        });
+    }
+
     /// <summary>Check for thin walls below minimum printable thickness.</summary>
     [HttpPost("thin-wall-check")]
     [RequestSizeLimit(200_000_000)]
