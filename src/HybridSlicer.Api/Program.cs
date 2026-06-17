@@ -52,10 +52,15 @@ try
     {
         c.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo
         {
-            Title   = "Fabrium API",
+            Title   = "VATSlicer API",
             Version = "v1",
-            Description = "Hybrid 3D-printing + CNC manufacturing platform API"
+            Description = "Industrial VPP/MSLA resin slicer with physics-driven support generation, " +
+                          "50+ analysis engines, 8 export formats, ceramic predistortion pipeline."
         });
+        // Include XML doc comments from controllers
+        var xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
+        var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+        if (File.Exists(xmlPath)) c.IncludeXmlComments(xmlPath);
     });
 
     // CORS — allow local Vite dev server and any production origins in config
