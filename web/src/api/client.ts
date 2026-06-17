@@ -283,6 +283,18 @@ export const supportV2Api = {
     }>('/support-v2/suction-check', fd, {
       headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000,
     }).then(r => r.data),
+  /** Comprehensive model analysis — all checks in one call */
+  analyze: (fd: FormData) =>
+    http.post<{
+      triangleCount: number; volumeMm3: number; surfaceAreaMm2: number
+      meshValid: boolean; meshWarnings: number
+      islandRisks: number; highRiskIslands: number
+      suctionWarnings: number; thinWalls: number; minWallMm: number
+      maxPeelForceN: number; highStressLayers: number
+      overallStatus: string; issues: string[]; elapsedMs: number
+    }>('/support-v2/analyze', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120000,
+    }).then(r => r.data),
   /** Predict island/floating geometry risks */
   islandCheck: (fd: FormData) =>
     http.post<{
