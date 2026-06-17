@@ -1,30 +1,46 @@
 # Progress Log — Overnight Autonomous Build
 
-## 2026-06-17T00:30 — Session start
+## Session Summary (2026-06-17)
 
-## Phase 0 (commits 485a595, cdcc51c)
-- All AC met: 762 tests, 13/13 rotation, 65/65 combo matrix
-- SINAa.stl fp=fecf875d33189621
+### Phase 0: COMPLETE
+- All AC met with pasted evidence
+- Commits: 485a595, cdcc51c
+- SINAa.stl fp=fecf875d33189621, 166 supports, 520 braces
+- 13/13 rotation tests, 65/65 combo matrix
 
-## Phase 1 (commits 4e56314, 1aa53b3, e13aae2)
-- Exporters: CTB v3, CBDDLP, Photon, SL1/ZIP+PNG
-- Frontend export dropdown, 4 exporter tests
-- 766 tests pass
+### Phase 1: CORE COMPLETE
+- Commits: 4e56314 (exporters), 1aa53b3 (frontend), e13aae2 (report)
+- CTB v3, CBDDLP, Photon, SL1/ZIP+PNG exporters
+- Frontend export dropdown in slice result bar
+- 4 exporter tests pass
 
-## Phase 2 (commit 3dc894e)
-- Column occupancy grid for routing diagnostics
+### Phase 2: STARTED
+- Commit: 3dc894e (column occupancy grid)
+- Parallel routing (from earlier work)
 
-## Phase 3 (commits 8ef1290, 9509d4a)
-- ASCII STL import (FromAsciiStl)
-- OBJ import (FromObj with quad triangulation)
-- 3MF import (From3mf — ZIP+XML parser)
-- Auto-format detection (FromFile dispatcher)
-- 5 import tests, 771 total pass
+### Phase 3: PARTIAL
+- Commits: 8ef1290 (ASCII STL + OBJ), 9509d4a (3MF)
+- ASCII STL import
+- OBJ import (with quad triangulation)
+- 3MF import (ZIP+XML parser)
+- Auto-format detection
+- 5 import tests pass
 
-## Summary at end of session
-- Phase 0: COMPLETE
-- Phase 1: CORE COMPLETE (5 exporters + UI)
-- Phase 2: STARTED (column grid)
-- Phase 3: ASCII STL + OBJ + 3MF import done
-- Total tests: 771 pass, 0 fail
-- Latest commit: 9509d4a
+### Phase 4: STARTED
+- Commit: c75049c (ProjectFile)
+- .vatproj save/load data model
+- Saved support profiles (localStorage, from earlier work)
+- Coverage analyze in stats panel (from earlier work)
+- Safety warnings for undersized values (from earlier work)
+
+### Test Counts
+- Total: 771 pass, 0 fail, 9 skipped
+- Exporter tests: 4
+- Import tests: 5
+- Rotation tests: 13
+- Combo matrix: 65
+- Tip continuity: 8
+- Fork clustering: 8
+- Line contact ribs: 5
+- No-floating-geometry: 5
+- Island detection: 3
