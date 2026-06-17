@@ -281,7 +281,7 @@ public sealed class ResinSliceController : ControllerBase
 
     /// <summary>
     /// Export a sliced job to a printer-specific file format.
-    /// Supported formats: ctb, cbddlp, photon, sl1, zip
+    /// Supported formats: ctb, cbddlp, photon, pwmx, pwms, pwmb, sl1, zip
     /// </summary>
     [HttpGet("{jobId}/export/{format}")]
     public async Task<IActionResult> Export(string jobId, string format, CancellationToken ct)

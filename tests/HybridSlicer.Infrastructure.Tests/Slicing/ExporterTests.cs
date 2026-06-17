@@ -108,12 +108,55 @@ public class ExporterTests
     }
 
     [Fact]
+    public void PwmxExporter_ProducesValidFile()
+    {
+        var config = CreateTestConfig(3);
+        var layers = Enumerable.Range(0, 3)
+            .Select(_ => CreateTestLayerPng(config.ResolutionX, config.ResolutionY))
+            .ToList();
+
+        var exporter = new PwmxExporter("pwmx");
+        using var ms = new MemoryStream();
+        exporter.Export(config, layers, ms);
+
+        ms.Length.Should().BeGreaterThan(100, "PWMX file should have header + sections + data");
+
+        // Verify ANYCUBIC header marker
+        ms.Position = 0;
+        var headerBytes = new byte[12];
+        ms.Read(headerBytes, 0, 12);
+        System.Text.Encoding.ASCII.GetString(headerBytes, 0, 8).Should().Be("ANYCUBIC", "PWMX header mark");
+    }
+
+    [Theory]
+    [InlineData("pwmx")]
+    [InlineData("pwms")]
+    [InlineData("pwmb")]
+    public void PwmxVariants_AllProduce(string variant)
+    {
+        var config = CreateTestConfig(2);
+        var layers = Enumerable.Range(0, 2)
+            .Select(_ => CreateTestLayerPng(config.ResolutionX, config.ResolutionY))
+            .ToList();
+
+        var exporter = new PwmxExporter(variant);
+        exporter.FileExtension.Should().Be($".{variant}");
+
+        using var ms = new MemoryStream();
+        exporter.Export(config, layers, ms);
+        ms.Length.Should().BeGreaterThan(50);
+    }
+
+    [Fact]
     public void Factory_ReturnsCorrectExporters()
     {
         SliceExporterFactory.GetExporter("ctb").Should().BeOfType<CtbExporter>();
         SliceExporterFactory.GetExporter("sl1").Should().BeOfType<ZipPngExporter>();
         SliceExporterFactory.GetExporter("cbddlp").Should().BeOfType<PhotonExporter>();
         SliceExporterFactory.GetExporter("photon").Should().BeOfType<PhotonExporter>();
+        SliceExporterFactory.GetExporter("pwmx").Should().BeOfType<PwmxExporter>();
+        SliceExporterFactory.GetExporter("pwms").Should().BeOfType<PwmxExporter>();
+        SliceExporterFactory.GetExporter("pwmb").Should().BeOfType<PwmxExporter>();
         SliceExporterFactory.GetExporter("zip").Should().BeOfType<ZipPngExporter>();
         SliceExporterFactory.GetExporter("unknown").Should().BeNull();
     }

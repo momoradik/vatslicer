@@ -365,11 +365,14 @@ export default function PrinterConfig() {
               <Field label="Export Format">
                 <SelectInput value={editState.exportFormat ?? 'ctb'} onChange={v => patch('exportFormat', v)}
                   options={[
-                    { value: 'ctb', label: '.ctb (ChiTuBox)' },
-                    { value: 'pwmx', label: '.pwmx (Anycubic Photon)' },
-                    { value: 'sl1s', label: '.sl1s (Prusa SL1)' },
-                    { value: 'vdt', label: '.vdt (VoxelDance)' },
-                    { value: 'image-sequence', label: 'Image Sequence + JSON' },
+                    { value: 'ctb', label: '.ctb (ChiTuBox CTB v3)' },
+                    { value: 'cbddlp', label: '.cbddlp (Anycubic CBDDLP)' },
+                    { value: 'photon', label: '.photon (Anycubic Photon)' },
+                    { value: 'pwmx', label: '.pwmx (Photon Mono X)' },
+                    { value: 'pwms', label: '.pwms (Photon Mono SE)' },
+                    { value: 'pwmb', label: '.pwmb (Photon Mono)' },
+                    { value: 'sl1', label: '.sl1 (Prusa SL1 ZIP+PNG)' },
+                    { value: 'zip', label: '.zip (Generic ZIP+PNG)' },
                   ]} />
               </Field>
             </Section>
