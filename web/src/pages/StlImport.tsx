@@ -431,14 +431,26 @@ let _savedSupportEnabled = false
 let _savedSupportType: 'normal' | 'tree' = 'normal'
 let _savedSupportPlacement: 'buildplate' | 'everywhere' = 'buildplate'
 
-// ── Undo stack ────────────────────────────────────────────────────────────────
+// ── Undo/Redo stack ──────────────────────────────────────────────────────────
 
-interface UndoEntry { modelId: string; transform: ModelTransform }
-let _undoStack: UndoEntry[] = []
+type UndoAction =
+  | { type: 'transform'; modelId: string; transform: ModelTransform }
+  | { type: 'addSupport'; modelId: string; pointId: string }
+  | { type: 'deleteSupport'; modelId: string; pointId: string; point: any }
+
+let _undoStack: UndoAction[] = []
+let _redoStack: UndoAction[] = []
 
 const pushUndo = (modelId: string, transform: ModelTransform) => {
-  _undoStack.push({ modelId, transform: { ...transform } })
+  _undoStack.push({ type: 'transform', modelId, transform: { ...transform } })
   if (_undoStack.length > 50) _undoStack.shift()
+  _redoStack = [] // new action clears redo
+}
+
+const pushUndoAction = (action: UndoAction) => {
+  _undoStack.push(action)
+  if (_undoStack.length > 50) _undoStack.shift()
+  _redoStack = []
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -456,15 +468,54 @@ export default function StlImport() {
   const [wireframeMode, setWireframeMode] = useState(false)
   const [drainHoles, setDrainHoles] = useState<{ x: number; y: number; z: number; reason: string; trapVolumeMm3: number }[]>([])
 
-  // ── Keyboard shortcuts (Ctrl+Z undo, Ctrl+S save project) ──
+  // ── Keyboard shortcuts (Ctrl+Z undo, Ctrl+Shift+Z redo, Ctrl+S save, A analyze) ──
+  const applyUndoAction = useCallback((action: UndoAction, reverse: boolean) => {
+    if (action.type === 'transform') {
+      setModels(prev => {
+        const model = prev.find(m => m.id === action.modelId)
+        if (model) {
+          // Push current state to opposite stack
+          const currentTransform = { ...model.transform }
+          const reverseAction: UndoAction = { type: 'transform', modelId: action.modelId, transform: currentTransform }
+          if (reverse) _undoStack.push(reverseAction); else _redoStack.push(reverseAction)
+        }
+        return prev.map(m => m.id === action.modelId ? { ...m, transform: action.transform } : m)
+      })
+    } else if (action.type === 'addSupport') {
+      // Undo add = delete the support
+      setModels(prev => prev.map(m => {
+        if (m.id !== action.modelId) return m
+        const point = m.manualSupports.points.find(p => p.id === action.pointId)
+        if (point) {
+          const reverseAction: UndoAction = { type: 'deleteSupport', modelId: action.modelId, pointId: action.pointId, point: { ...point } }
+          if (reverse) _undoStack.push(reverseAction); else _redoStack.push(reverseAction)
+        }
+        return { ...m, manualSupports: { ...m.manualSupports, points: m.manualSupports.points.filter(p => p.id !== action.pointId) } }
+      }))
+    } else if (action.type === 'deleteSupport') {
+      // Undo delete = re-add the support
+      setModels(prev => prev.map(m => {
+        if (m.id !== action.modelId) return m
+        const reverseAction: UndoAction = { type: 'addSupport', modelId: action.modelId, pointId: action.pointId }
+        if (reverse) _undoStack.push(reverseAction); else _redoStack.push(reverseAction)
+        return { ...m, manualSupports: { ...m.manualSupports, points: [...m.manualSupports.points, action.point] } }
+      }))
+    }
+  }, [])
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // Ctrl+Z = undo
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
         e.preventDefault()
-        const entry = _undoStack.pop()
-        if (entry) {
-          setModels(prev => prev.map(m => m.id === entry.modelId ? { ...m, transform: entry.transform } : m))
-        }
+        const action = _undoStack.pop()
+        if (action) applyUndoAction(action, false)
+      }
+      // Ctrl+Shift+Z = redo
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Z' && e.shiftKey) {
+        e.preventDefault()
+        const action = _redoStack.pop()
+        if (action) applyUndoAction(action, true)
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault()
@@ -739,9 +790,9 @@ export default function StlImport() {
   }
 
   const undo = () => {
-    const entry = _undoStack.pop()
-    if (!entry) return
-    updateModels(prev => prev.map(m => m.id === entry.modelId ? { ...m, transform: entry.transform } : m))
+    const action = _undoStack.pop()
+    if (!action) return
+    applyUndoAction(action, false)
   }
 
   // ── Slice action ───────────────────────────────────────────────────────────
@@ -812,6 +863,9 @@ export default function StlImport() {
     const pr = SUPPORT_PRESETS[supportTipType] ?? SUPPORT_PRESETS['medium']
     const pointId = mkId()
     const point: SupportPoint = { id: pointId, x, y, z, nx, ny, nz, faceIndex, baryU, baryV, tipDiameterMm: pr.pin * 2, shaftDiameterMm: pr.pillar * 2, baseDiameterMm: pr.base * 2, type: supportTipType, provisional: true }
+
+    // Track for undo
+    pushUndoAction({ type: 'addSupport', modelId: selectedId, pointId })
 
     // Add immediately with placeholder (marker sphere shows right away)
     updateModels(prev => prev.map(m =>
@@ -937,6 +991,11 @@ export default function StlImport() {
 
   const deleteSupportPoint = (pointId: string) => {
     if (!selectedId) return
+    // Save deleted point for undo
+    const model = models.find(m => m.id === selectedId)
+    const deletedPoint = model?.manualSupports.points.find(p => p.id === pointId)
+    if (deletedPoint) pushUndoAction({ type: 'deleteSupport', modelId: selectedId, pointId, point: { ...deletedPoint } })
+
     updateModels(prev => prev.map(m =>
       m.id === selectedId ? { ...m, manualSupports: { ...m.manualSupports, points: m.manualSupports.points.filter(p => p.id !== pointId) } } : m
     ))
