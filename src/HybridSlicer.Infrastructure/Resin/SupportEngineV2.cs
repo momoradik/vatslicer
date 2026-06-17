@@ -237,6 +237,11 @@ public static class SupportEngineV2
 
         public int Seed { get; init; } = 42;
 
+        /// <summary>Resin category for adhesion calibration (e.g. "Standard", "ABS-Like", "Ceramic").</summary>
+        public string? ResinCategory { get; init; }
+        /// <summary>Film type for adhesion calibration (e.g. "FEP", "nFEP").</summary>
+        public string? FilmType { get; init; }
+
         // (User transforms are baked into vertices by the frontend — no rotation/scale params needed)
 
         // Auto-orientation
@@ -1014,11 +1019,15 @@ public static class SupportEngineV2
                 var pt = pointLookup.TryGetValue(id, out var ptVal) ? ptVal : (SupportPointGenerator.SupportPoint?)null;
                 if (pt != null) supportArea = Math.Max(pt.OverhangArea, 10f);
 
+                // Use calibrated P_ADH if resin category is specified
+                float pAdh = Analysis.AdhesionCalibration.GetPAdh(config.ResinCategory, config.FilmType);
+
                 var sizing = SupportSizer.Size(
                     supportHeight: Math.Max(height, 0.5f),
                     layerArea: supportArea,
                     supportsInLayer: Math.Max(1, totalSupports / 3), // approximate sharing
                     rootsOnPlate: route.ReachesGround,
+                    pAdh: pAdh,
                     ov: globalOverrides);
 
                 // Per-support manual diameter overrides (from interactive placement) win over globals

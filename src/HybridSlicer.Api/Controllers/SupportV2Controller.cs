@@ -229,6 +229,17 @@ public sealed class SupportV2Controller : ControllerBase
             BottomBaseDiaMm = bottomBaseDiaMm,
             BottomBaseThicknessMm = bottomBaseThicknessMm,
             RaftCustomThicknessMm = raftCustomThicknessMm,
+            // Adhesion calibration
+            ResinCategory = materialPreset switch
+            {
+                "standard" => "Standard",
+                "abs-like" or "abs" => "ABS-Like",
+                "flexible" => "Flexible",
+                "castable" or "wax" => "Castable",
+                "ceramic" => "Ceramic",
+                "water-washable" => "Water-Washable",
+                _ => null,
+            },
         });
         }
         catch (OperationCanceledException)
