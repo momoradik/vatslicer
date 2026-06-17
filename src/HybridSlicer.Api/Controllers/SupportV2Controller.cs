@@ -710,6 +710,18 @@ public sealed class SupportV2Controller : ControllerBase
         return Ok(report);
     }
 
+    /// <summary>Get post-processing instructions for a print job.</summary>
+    [HttpGet("post-process")]
+    public IActionResult PostProcess(
+        [FromQuery] string resinType = "standard",
+        [FromQuery] bool hasSupports = true,
+        [FromQuery] bool isHollow = false)
+    {
+        var plan = HybridSlicer.Infrastructure.Resin.Analysis.PostProcessingAdvisor.Generate(
+            resinType, hasSupports, isHollow);
+        return Ok(plan);
+    }
+
     /// <summary>Predict island/floating geometry risks before slicing.</summary>
     [HttpPost("island-check")]
     [RequestSizeLimit(200_000_000)]
