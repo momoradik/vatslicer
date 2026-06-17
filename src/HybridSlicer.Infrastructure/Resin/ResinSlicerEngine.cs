@@ -191,9 +191,19 @@ public sealed class ResinSlicerEngine
         if (doHollow)
             _log.LogInformation("Hollowing enabled: wall={WallMm}mm", req.HollowWallThicknessMm);
 
+        // Top-down printers with recoater: log recoater timing
+        bool hasRecoater = !bottomUp && printer.HasRecoater;
+        if (hasRecoater)
+            _log.LogInformation("Recoater: type={Type}, speed={Speed}mm/s, clearance={Clear}mm, direction={Dir}",
+                printer.RecoaterType, printer.RecoaterSpeedMmPerS, printer.RecoaterClearanceMm, printer.RecoaterDirection);
+
         for (int i = 0; i < layerCount; i++)
         {
-            float z = mesh.Min.Z + (i + 0.5f) * layerHeight;
+            // Top-down: slice from top to bottom (reversed Z order)
+            // Bottom-up: slice from bottom to top (standard)
+            float z = bottomUp
+                ? mesh.Min.Z + (i + 0.5f) * layerHeight
+                : mesh.Max.Z - (i + 0.5f) * layerHeight;
 
             var polygons = MeshCrossSectionEngine.CrossSection(mesh, z);
 
@@ -315,6 +325,14 @@ public sealed class ResinSlicerEngine
             + restAfterLift + restAfterRetract + printer.LightOffDelayMs / 1000.0;
 
         double totalTimeSec = bottomLayerCount * bottomLayerTime + (layerCount - bottomLayerCount) * normalLayerTime;
+
+        // Add recoater travel time for top-down printers
+        if (hasRecoater && printer.RecoaterSpeedMmPerS > 0)
+        {
+            double recoaterSweepDist = printer.RecoaterDirection == "Y" ? buildD : buildW;
+            double recoaterTimePerLayer = recoaterSweepDist / printer.RecoaterSpeedMmPerS;
+            totalTimeSec += layerCount * recoaterTimePerLayer;
+        }
 
         // Volume-based estimates
         double resinVolumeMl = totalVolumeMm3 / 1000.0;
