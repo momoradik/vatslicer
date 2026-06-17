@@ -129,3 +129,23 @@ public sealed class PrepToolsController : ControllerBase
         });
     }
 }
+
+    /// <summary>Get print history and resin usage stats.</summary>
+    [HttpGet("print-history")]
+    public IActionResult GetPrintHistory()
+    {
+        var tracker = new HybridSlicer.Infrastructure.Resin.Analysis.PrintHistoryTracker();
+        var history = tracker.GetHistory();
+        return Ok(new
+        {
+            totalPrints = history.TotalPrints,
+            totalResinMl = history.TotalResinMl,
+            totalCostUsd = history.TotalCostUsd,
+            totalPrintTimeMinutes = history.TotalPrintTimeMinutes,
+            recentPrints = history.Records.TakeLast(10).Reverse().Select(r => new
+            {
+                r.JobId, r.ModelName, r.PrintedAt, r.ResinVolumeMl, r.ResinCostUsd,
+                r.PrintTimeMinutes, r.LayerCount, r.ExportFormat, r.PrinterName,
+            }),
+        });
+    }
