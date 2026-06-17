@@ -1,5 +1,6 @@
 using HybridSlicer.Application.Interfaces.Repositories;
 using HybridSlicer.Infrastructure.Resin;
+using HybridSlicer.Infrastructure.Resin.Analysis;
 using Microsoft.AspNetCore.Mvc;
 
 namespace HybridSlicer.Api.Controllers;
@@ -29,6 +30,41 @@ public sealed class PrepToolsController : ControllerBase
             h.X, h.Y, h.Z, h.DiameterMm, h.DepthMm, h.NormalX, h.NormalY, h.NormalZ
         }) });
     }
+
+    /// <summary>Auto-arrange multiple parts on the build plate.</summary>
+    [HttpPost("nest")]
+    public IActionResult Nest(
+        [FromBody] NestRequest request)
+    {
+        var parts = request.Parts.Select(p => new BuildPlateNester.PartFootprint
+        {
+            Id = p.Id, WidthMm = p.WidthMm, DepthMm = p.DepthMm,
+        }).ToList();
+
+        var result = BuildPlateNester.Arrange(parts, new BuildPlateNester.NestConfig
+        {
+            PlateWidthMm = request.PlateWidthMm,
+            PlateDepthMm = request.PlateDepthMm,
+            PartGapMm = request.PartGapMm,
+            PlateMarginMm = request.PlateMarginMm,
+        });
+
+        return Ok(new
+        {
+            placements = result.Placements.Select(p => new { p.Id, p.CenterX, p.CenterY, p.Rotated90 }),
+            overflow = result.Overflow,
+            utilization = result.Utilization,
+        });
+    }
+
+    public sealed record NestRequest(
+        List<NestPartDto> Parts,
+        float PlateWidthMm = 192f,
+        float PlateDepthMm = 120f,
+        float PartGapMm = 2f,
+        float PlateMarginMm = 3f);
+
+    public sealed record NestPartDto(string Id, float WidthMm, float DepthMm);
 
     /// <summary>Run support optimization with recoater/tall-thin analysis.</summary>
     [HttpPost("optimize-supports")]
