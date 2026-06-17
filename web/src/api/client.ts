@@ -275,6 +275,14 @@ export const supportV2Api = {
     }>('/support-v2/drain-holes', fd, {
       headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000,
     }).then(r => r.data),
+  /** Check for suction cup geometry */
+  suctionCheck: (fd: FormData) =>
+    http.post<{
+      warningCount: number
+      warnings: { x: number; y: number; z: number; depthMm: number; areaRatio: number; severity: string; description: string }[]
+    }>('/support-v2/suction-check', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000,
+    }).then(r => r.data),
 }
 
 // ── Prep Tools (drain holes, support optimization) ───────────────────

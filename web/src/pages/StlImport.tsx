@@ -2533,6 +2533,23 @@ export default function StlImport() {
                         className="flex-1 text-[9px] py-1.5 rounded bg-cyan-900/30 text-cyan-400 hover:bg-cyan-900/50 transition">
                         Drain Holes
                       </button>
+                      <button onClick={async () => {
+                        if (!selected) return
+                        try {
+                          const resp = await fetch(selected.url)
+                          const blob = await resp.blob()
+                          const fd = new FormData()
+                          fd.append('stlFile', blob, selected.fileName)
+                          const result = await supportV2Api.suctionCheck(fd)
+                          if (result.warnings.length > 0)
+                            console.log(`[Suction] ${result.warnings.length} warnings:`, result.warnings.map(w => w.description))
+                          else
+                            console.log('[Suction] No suction cup risks detected')
+                        } catch (err) { console.error('Suction check failed:', err) }
+                      }}
+                        className="flex-1 text-[9px] py-1.5 rounded bg-red-900/30 text-red-400 hover:bg-red-900/50 transition">
+                        Suction
+                      </button>
                     </div>
 
                     {/* Drain hole warnings */}
