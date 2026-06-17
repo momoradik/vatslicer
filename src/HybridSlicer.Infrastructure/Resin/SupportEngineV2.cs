@@ -547,6 +547,16 @@ public static class SupportEngineV2
         const int MAX_RETRIES = 4;
         float retryRadius = config.MinSpacingMm * 0.8f;
 
+        // Task 1: Build OccupancyBitstack BEFORE pinhead optimization (fast engine uses it for pinhead fast-path)
+        Spatial.OccupancyBitstack? occupancyBitstack = null;
+        if (config.UseFastSupportEngine)
+        {
+            var bitstackSw = System.Diagnostics.Stopwatch.StartNew();
+            occupancyBitstack = Spatial.OccupancyBitstack.Build(mesh, cellSize: 0.3f, layerHeight: 0.05f);
+            Serilog.Log.Information("V2 OccupancyBitstack: {Ms}ms ({Cx}x{Cy} cells, {Lz} layers)",
+                bitstackSw.ElapsedMilliseconds, occupancyBitstack.CellsX, occupancyBitstack.CellsY, occupancyBitstack.Layers);
+        }
+
         // Parallelize pinhead optimization — each support is independent, BVH is read-only.
         // This is output-identical: same inputs, same deterministic optimizer, just parallel.
         var pinheadResults = new (string id, PinheadOptimizer.Pinhead pinhead)[pointResult.Points.Count];
@@ -574,7 +584,39 @@ public static class SupportEngineV2
                 };
             }
 
-            var pinhead = PinheadOptimizer.Optimize(pt.Position, pt.Normal, bvh, phCfg);
+            PinheadOptimizer.Pinhead pinhead;
+
+            // FAST ENGINE: skip Nelder-Mead for simple downward-facing overhangs
+            // where the column is clear. Use surface normal directly (1 evaluation vs 60+ iterations).
+            bool useFastPinhead = config.UseFastSupportEngine && occupancyBitstack != null
+                && pt.Normal.Z < -0.5f // downward-facing
+                && occupancyBitstack.ColumnClearToPlate(pt.Position, phCfg.BackRadiusMm);
+
+            if (useFastPinhead)
+            {
+                // Direct evaluation with straight-down direction (no Nelder-Mead search)
+                var downDir = new Vector3(0, 0, -1);
+                float totalLen = phCfg.PinRadiusMm + phCfg.WidthMm + phCfg.BackRadiusMm;
+                float pen = phCfg.PenetrationMm;
+                pinhead = new PinheadOptimizer.Pinhead
+                {
+                    IsValid = true,
+                    ContactPoint = pt.Position,
+                    PinCenter = pt.Position + downDir * (phCfg.PinRadiusMm - pen),
+                    BackCenter = pt.Position + downDir * (totalLen - phCfg.BackRadiusMm - pen),
+                    JunctionPoint = pt.Position + downDir * (totalLen - pen),
+                    Direction = downDir,
+                    PinRadius = phCfg.PinRadiusMm,
+                    BackRadius = phCfg.BackRadiusMm,
+                    Width = phCfg.WidthMm,
+                    Clearance = 10f, // known clear from bitstack
+                    NeedsAnchor = false,
+                };
+            }
+            else
+            {
+                pinhead = PinheadOptimizer.Optimize(pt.Position, pt.Normal, bvh, phCfg);
+            }
 
             bool isManual = manualPointIds.Contains(pt.Id);
 
@@ -717,16 +759,6 @@ public static class SupportEngineV2
             }
         }
         Serilog.Log.Information("V2 Column grid: {Cells} cells for {Tris} triangles", columnMaxZ.Count, mesh.TriangleCount);
-
-        // Task 1: Build OccupancyBitstack for fast column clearance (when UseFastSupportEngine)
-        Spatial.OccupancyBitstack? occupancyBitstack = null;
-        if (config.UseFastSupportEngine)
-        {
-            var bitstackSw = System.Diagnostics.Stopwatch.StartNew();
-            occupancyBitstack = Spatial.OccupancyBitstack.Build(mesh, cellSize: 0.3f, layerHeight: 0.05f);
-            Serilog.Log.Information("V2 OccupancyBitstack: {Ms}ms ({Cx}x{Cy} cells, {Lz} layers)",
-                bitstackSw.ElapsedMilliseconds, occupancyBitstack.CellsX, occupancyBitstack.CellsY, occupancyBitstack.Layers);
-        }
 
         var routes = new List<(string id, PillarRouter.PillarRoute route)>();
         // Build lookup for point weight recommendations
