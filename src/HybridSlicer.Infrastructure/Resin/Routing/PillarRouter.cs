@@ -394,6 +394,18 @@ public static class PillarRouter
         return waypoints;
     }
 
+    /// <summary>
+    /// Fast path: build a straight vertical route without BVH collision checks.
+    /// Used by the column occupancy accelerator when the XY column is known to be clear.
+    /// </summary>
+    public static PillarRoute FastVerticalRoute(Vector3 junctionPoint, float junctionRadius, RoutingConfig config)
+    {
+        var path = new List<Waypoint>();
+        path.Add(new Waypoint { Position = junctionPoint, Radius = junctionRadius, Type = "junction" });
+        path.AddRange(BuildVerticalPillar(junctionPoint, junctionRadius, config));
+        return new PillarRoute { Path = path, ReachesGround = true, TotalLength = junctionPoint.Z - config.BaseZ };
+    }
+
     private static float ComputePathLength(List<Waypoint> path)
     {
         float len = 0;

@@ -765,6 +765,7 @@ public static class SupportEngineV2
         var routingCandidates = pinheads.Where(p => p.pinhead.IsValid && !forkedPinheadIds.Contains(p.id)).ToList();
 
         float spacing0 = config.MinSpacingMm + (config.MaxSpacingMm - config.MinSpacingMm) * (1f - config.DensityFactor);
+        int fastPathCount = 0;
 
         Parallel.ForEach(routingCandidates, (item) =>
         {
@@ -806,7 +807,33 @@ public static class SupportEngineV2
             float startRadius = Math.Max(pinhead.BackRadius, rCfg.PillarRadiusMm);
             var routeStart = pinhead.JunctionPoint;
 
-            var route = PillarRouter.Route(routeStart, startRadius, bvh, rCfg);
+            // Phase 2 fast path: column occupancy check.
+            // If no model geometry exists below the junction in its XY column,
+            // skip the expensive beam-cast routing and go straight down.
+            PillarRouter.PillarRoute route;
+            {
+                int cx = (int)MathF.Floor(routeStart.X / columnCellSize);
+                int cy = (int)MathF.Floor(routeStart.Y / columnCellSize);
+                float colMaxZ = 0f;
+                // Check the pillar's column plus adjacent cells (for radius coverage)
+                for (int dx2 = -1; dx2 <= 1; dx2++)
+                for (int dy2 = -1; dy2 <= 1; dy2++)
+                {
+                    if (columnMaxZ.TryGetValue((cx + dx2, cy + dy2), out var z2) && z2 > colMaxZ)
+                        colMaxZ = z2;
+                }
+
+                // If junction starts above all geometry in the column → direct descent
+                if (routeStart.Z > colMaxZ + 1.0f)
+                {
+                    route = PillarRouter.FastVerticalRoute(routeStart, startRadius, rCfg);
+                    Interlocked.Increment(ref fastPathCount);
+                }
+                else
+                {
+                    route = PillarRouter.Route(routeStart, startRadius, bvh, rCfg);
+                }
+            }
 
             if (!route.ReachesGround && manualPointIds.Contains(id))
             {
@@ -835,6 +862,8 @@ public static class SupportEngineV2
 
         // Re-sort by ID for deterministic output order
         routes.AddRange(routeBag.OrderBy(r => r.id));
+        Serilog.Log.Information("V2 Step 4 Routing: {Ms}ms ({Total} routes, {Fast} fast-path, {Full} full-path)",
+            stepSw.ElapsedMilliseconds, routeBag.Count, fastPathCount, routeBag.Count - fastPathCount);
 
         // Post-routing collision filter: penetration-depth based, not binary hit.
         //
