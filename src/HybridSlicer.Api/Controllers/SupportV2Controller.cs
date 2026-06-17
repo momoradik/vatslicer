@@ -710,6 +710,35 @@ public sealed class SupportV2Controller : ControllerBase
         return Ok(report);
     }
 
+    /// <summary>Generate comprehensive print job report with all analysis engines.</summary>
+    [HttpPost("full-report")]
+    [RequestSizeLimit(200_000_000)]
+    public async Task<IActionResult> FullReport(
+        [FromForm] IFormFile stlFile,
+        [FromForm] string resinType = "standard",
+        [FromForm] int supportCount = 0,
+        CancellationToken ct = default)
+    {
+        if (stlFile is null) return BadRequest("STL required.");
+        byte[] data; using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
+        var mesh = StlMesh.FromFile(data, stlFile.FileName);
+        var report = HybridSlicer.Infrastructure.Resin.Analysis.PrintJobReportGenerator.Generate(mesh, resinType, supportCount);
+        return Ok(new
+        {
+            score = report.Score.Total,
+            grade = report.Score.Grade,
+            verdict = report.Risk.Verdict,
+            triangles = report.Analysis.TriangleCount,
+            volumeMm3 = report.Analysis.VolumeMm3,
+            overhangPct = report.Overhangs.OverhangPct,
+            finishQuality = report.Finish.AvgQualityScore,
+            issueCount = report.Analysis.Issues.Count,
+            issues = report.Analysis.Issues,
+            postProcessSteps = report.PostProcess.Steps.Count,
+            elapsedMs = report.TotalElapsedMs,
+        });
+    }
+
     /// <summary>Get post-processing instructions for a print job.</summary>
     [HttpGet("post-process")]
     public IActionResult PostProcess(
