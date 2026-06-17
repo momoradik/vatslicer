@@ -1453,6 +1453,32 @@ export default function StlImport() {
         })))
       }
 
+      // Convert paint-enforcer regions to dense contact points
+      const enforcerRegions = targetModel.manualSupports?.paintedRegions?.filter(r => r.mode === 'enforcer') ?? []
+      if (enforcerRegions.length > 0) {
+        const enforcerContacts: any[] = []
+        for (const region of enforcerRegions) {
+          // Sample points in a grid within the painted sphere
+          const spacing = 2.0 // mm between generated contacts
+          const r = region.radiusMm
+          for (let dx = -r; dx <= r; dx += spacing) {
+            for (let dy = -r; dy <= r; dy += spacing) {
+              if (dx * dx + dy * dy > r * r) continue
+              const [px, py, pz] = yUpToZUp(region.cx + dx, region.cy + dy, region.cz)
+              enforcerContacts.push({
+                id: `enforcer-${region.id}-${dx.toFixed(0)}-${dy.toFixed(0)}`,
+                x: px, y: py, z: pz, nx: 0, ny: 0, nz: -1,
+              })
+            }
+          }
+        }
+        if (enforcerContacts.length > 0) {
+          // Merge with existing manual contacts
+          const existing = manualPts.length > 0 ? JSON.parse(fd.get('manualContacts') as string ?? '[]') : []
+          fd.set('manualContacts', JSON.stringify([...existing, ...enforcerContacts]))
+        }
+      }
+
       // V2 engine only — no legacy fallback
       const v2Result = await supportV2Api.generate(fd)
       const v2Stats: V2Stats = {
