@@ -561,7 +561,9 @@ public static class SupportEngineV2
         if (config.UseFastSupportEngine)
         {
             var bitstackSw = System.Diagnostics.Stopwatch.StartNew();
-            occupancyBitstack = Spatial.OccupancyBitstack.Build(mesh, cellSize: 0.3f, layerHeight: 0.05f);
+            // COARSE grid: cellSize ≈ pillarRadius, Z step ≈ analysis layer height (not print layer)
+            // At 0.4mm cell / 0.5mm Z → tens of MB, fully cache-resident
+            occupancyBitstack = Spatial.OccupancyBitstack.Build(mesh, cellSize: 0.4f, layerHeight: 0.5f);
             Serilog.Log.Information("V2 OccupancyBitstack: {Ms}ms ({Cx}x{Cy} cells, {Lz} layers)",
                 bitstackSw.ElapsedMilliseconds, occupancyBitstack.CellsX, occupancyBitstack.CellsY, occupancyBitstack.Layers);
         }
