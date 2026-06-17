@@ -84,16 +84,26 @@ public static class InterconnectBuilder
         // Track connection count per pillar for structural requirements
         var connectionCount = new int[n];
 
-        // Find neighbor pairs sorted by distance
+        // Filter: only brace pillars taller than ReinforcementStartHeightMm
+        // to prevent floating braces on short (e.g. line-contact) supports.
+        var tallEnough = new bool[n];
+        for (int i = 0; i < n; i++)
+            tallEnough[i] = (pillarTops[i] - pillarBases[i].Z) >= config.ReinforcementStartHeightMm;
+
+        // Find neighbor pairs sorted by distance (both must be tall enough)
         var pairs = new List<(int a, int b, float dist)>();
         for (int i = 0; i < n; i++)
-        for (int j = i + 1; j < n; j++)
         {
-            float dist = Vector2.Distance(
-                new Vector2(pillarBases[i].X, pillarBases[i].Y),
-                new Vector2(pillarBases[j].X, pillarBases[j].Y));
-            if (dist > 0.5f && dist <= config.MaxConnectionDistMm)
-                pairs.Add((i, j, dist));
+            if (!tallEnough[i]) continue;
+            for (int j = i + 1; j < n; j++)
+            {
+                if (!tallEnough[j]) continue;
+                float dist = Vector2.Distance(
+                    new Vector2(pillarBases[i].X, pillarBases[i].Y),
+                    new Vector2(pillarBases[j].X, pillarBases[j].Y));
+                if (dist > 0.5f && dist <= config.MaxConnectionDistMm)
+                    pairs.Add((i, j, dist));
+            }
         }
         pairs.Sort((a, b) => a.dist.CompareTo(b.dist));
 
