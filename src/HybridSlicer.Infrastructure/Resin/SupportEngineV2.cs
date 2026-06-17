@@ -968,32 +968,38 @@ public static class SupportEngineV2
         int removedByCollision = 0;
         routes = routes.Where(r =>
         {
-            // Manual supports are NEVER rejected by collision — the user placed them intentionally.
-            // They'll still get collision STATUS in the single-support preview, but the full pipeline
-            // keeps them and lets the mesh generator produce geometry for them.
             if (manualPointIds.Contains(r.id)) return true;
 
             var path = r.route.Path;
+
+            // FAST ENGINE: use bitstack occupancy for collision check (O(1) per waypoint)
+            if (config.UseFastSupportEngine && occupancyBitstack != null)
+            {
+                for (int wi = 0; wi < path.Count; wi++)
+                {
+                    var wp = path[wi];
+                    if (wp.Type == "base" || wp.Type == "junction") continue;
+                    if (occupancyBitstack.IsOccupied(wp.Position))
+                    {
+                        removedByCollision++;
+                        return false;
+                    }
+                }
+                return true;
+            }
+
             for (int wi = 0; wi < path.Count; wi++)
             {
                 var wp = path[wi];
                 if (wp.Type == "base") continue;
 
-                // Check 1: signed-distance with direction check (replaces IsInside)
-                // Only kill if the waypoint is on the WRONG side of the surface
-                // (buried inside the shell wall). A waypoint below an overhang
-                // surface is in open air and valid even if close to the surface.
                 var cp = bvh.ClosestPoint(wp.Position);
                 if (cp.HasValue && cp.Value.Distance < wp.Radius)
                 {
-                    // Check which side: dot product of (waypoint - surface) with surface normal
-                    // Positive = waypoint is on the outward (model) side = buried
-                    // Negative = waypoint is on the support side = open air = OK
                     var toWaypoint = wp.Position - cp.Value.Point;
                     float side = Vector3.Dot(toWaypoint, cp.Value.Normal);
                     if (side > 0 && cp.Value.Distance < GRAZE_TOLERANCE)
                     {
-                        // Waypoint is on the model side AND very close → buried
                         removedByCollision++;
                         return false;
                     }
