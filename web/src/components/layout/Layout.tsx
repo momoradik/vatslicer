@@ -3,10 +3,14 @@ import { useRef, useEffect, useState } from 'react'
 import Sidebar from './Sidebar'
 import Header from './Header'
 import KeyboardShortcuts from '../KeyboardShortcuts'
+import OnboardingWizard from '../OnboardingWizard'
+
+const ONBOARDING_KEY = 'vatslicer.onboardingComplete'
 
 export default function Layout() {
   const location = useLocation()
   const [transitioning, setTransitioning] = useState(false)
+  const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem(ONBOARDING_KEY))
   const prevPath = useRef(location.pathname)
 
   useEffect(() => {
@@ -28,6 +32,12 @@ export default function Layout() {
         </main>
       </div>
       <KeyboardShortcuts />
+      {showOnboarding && (
+        <OnboardingWizard onComplete={() => {
+          localStorage.setItem(ONBOARDING_KEY, '1')
+          setShowOnboarding(false)
+        }} />
+      )}
     </div>
   )
 }
