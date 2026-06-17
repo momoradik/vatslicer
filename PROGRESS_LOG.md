@@ -1,24 +1,24 @@
 # VATSlicer — Overnight Build Session 2
 
-## 107 commits, 1027+ tests, Phases 0-6
+## 113 commits, 1051 tests, 30+ analysis engines
 
-25+ analysis engines, 8 export formats, 10+ API endpoints, 15+ UI features.
 All builds green (dotnet + npm), zero test failures.
+Test count 843 → 1051 (208 new tests added).
 
-### Analysis Suite (25+ engines)
+### Analysis Engine Suite (30+)
 ComprehensiveModelAnalyzer, PrintabilityScorer, FailureRiskAssessor,
-SuctionCupDetector, IslandPredictor, ThinWallDetector,
-BedAdhesionEstimator, PeelForceProfiler, AdaptiveLiftOptimizer,
+PrintReadinessChecker, SuctionCupDetector, IslandPredictor,
+ThinWallDetector, BedAdhesionEstimator, PeelForceProfiler,
+AdaptiveLiftOptimizer, SmartExposureOptimizer, LiftSequenceGenerator,
 ExposureCompensator, TemperatureCompensator, ShrinkageCompensator,
-XYCompensationProcessor, PixelBleedCompensator, SmartExposureOptimizer,
-ModelWeightEstimator, PrintTimeBreakdown, PrintTimeEstimator,
-FepLifeEstimator, SurfaceFinishPredictor, LayerTransitionAnalyzer,
+XYCompensationProcessor, PixelBleedCompensator,
+ModelWeightEstimator, SupportMaterialEstimator, PrintCostCalculator,
+PrintTimeBreakdown, PrintTimeEstimator, FepLifeEstimator,
+SurfaceFinishPredictor, OverhangAreaCalculator, LayerTransitionAnalyzer,
 CrossSectionAreaCalculator, ResinTrapVolumeIntegrator, ResinUsageForecaster,
 SupportDensityMapper, CenterOfGravityCalculator,
-BuildPlateUtilization, ModelCollisionChecker,
+BuildPlateUtilization, ModelCollisionChecker, AntiAliasingQualityEstimator,
 SupportRemovalEstimator, ResinCompatibilityChecker,
 BatchProcessor, ExposureTestPatternGenerator,
 LayerDiffGenerator, PrintHistoryTracker, AdhesionCalibration,
 BuildPlateNester
-
-### Final: 1027+ tests, 0 failures, 107 commits
