@@ -548,7 +548,7 @@ public static class SupportEngineV2
         // If a point fails pinhead or routing, retry at 3-4 nearby positions
         // on the overhang surface. The region's coverage requirement is the
         // unit of work, not the individual point.
-        const int MAX_RETRIES = 4;
+        int MAX_RETRIES = config.UseFastSupportEngine ? 1 : 4;
         float retryRadius = config.MinSpacingMm * 0.8f;
 
         // Task 1: Build OccupancyBitstack BEFORE pinhead optimization (fast engine uses it for pinhead fast-path)
