@@ -21,8 +21,26 @@ public enum SupportPreset { Custom, Light, Medium, Heavy }
 /// <summary>Touch shape at the tip-model contact point.</summary>
 public enum TouchShape { Sphere, Skate, None }
 
-/// <summary>Cross-section shape for pillars, connections, and bases.</summary>
-public enum SupportShape { Cone, Cylinder, Cube, Cross, Pyramid }
+/// <summary>Cross-section shape for pillars, connections, and bases.
+/// Bottom shapes per ChiTuBox: Skate, Cone, Cube, Cylinder, Prism.</summary>
+public enum SupportShape { Cone, Cylinder, Cube, Cross, Pyramid, Prism, Skate }
+
+/// <summary>
+/// Support topology type (ChiTuBox/Lychee taxonomy).
+/// </summary>
+public enum SupportTopology
+{
+    /// <summary>Standard vertical pillar to build plate.</summary>
+    Vertical,
+    /// <summary>Single-segment connector to another support's mid-body.</summary>
+    Branch,
+    /// <summary>Two-segment: top forks two segments above the stem.</summary>
+    Joint,
+    /// <summary>Branches off one main stem (tree support).</summary>
+    Tree,
+    /// <summary>Both ends land on model surfaces — for small gaps (ChiTuBox Small Pillar).</summary>
+    SmallPillar,
+}
 
 /// <summary>Maps a SupportShape to the number of polygon sides for meshing/slicing.</summary>
 public static class SupportShapeHelper

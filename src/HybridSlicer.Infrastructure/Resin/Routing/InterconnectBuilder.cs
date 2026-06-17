@@ -3,16 +3,21 @@ using HybridSlicer.Infrastructure.Resin.Spatial;
 
 namespace HybridSlicer.Infrastructure.Resin.Routing;
 
-/// <summary>Reinforcement mode for support-to-support connections.</summary>
+/// <summary>
+/// Reinforcement mode for support-to-support connections (ChiTuBox semantics).
+/// </summary>
 public enum ReinforcementMode
 {
     /// <summary>No interconnections.</summary>
     None,
-    /// <summary>Existing pairwise bracing (ladder on every pair within distance).</summary>
+    /// <summary>Pairwise bracing — ladder on every pair within distance.</summary>
     Pairwise,
-    /// <summary>Triangulated bracing — Delaunay edges only, closed triangles for rigidity.</summary>
+    /// <summary>Triangular Reinforcement (TR, ChiTuBox): auto-connect ADJACENT columns
+    /// into stable TRIANGLES (local rigid triangulation only, capped edge length).</summary>
     Triangular,
-    /// <summary>Full triangulated network — all Delaunay edges across the entire pillar set.</summary>
+    /// <summary>Global Reinforcement (GR, ChiTuBox): inter-connect ALL adjacent columns
+    /// into a MESH OF SMALL TRIANGLES — denser, spans the whole field. Must be visibly
+    /// more connected than Triangular.</summary>
     Global,
 }
 
@@ -291,7 +296,13 @@ public static class InterconnectBuilder
                 return dist <= config.MaxConnectionDistMm;
             }).ToList();
 
-        int maxTotalBraces = Math.Max(n * 3, 50);
+        // Global gets more braces: higher total cap and denser Z interval
+        int maxTotalBraces = config.Mode == ReinforcementMode.Global
+            ? Math.Max(n * 6, 100)  // GR: 6 braces per pillar max
+            : Math.Max(n * 3, 50);  // TR: 3 braces per pillar max
+        float effectiveInterval = config.Mode == ReinforcementMode.Global
+            ? config.ConnectionIntervalMm * 0.6f  // GR: 40% denser Z spacing
+            : config.ConnectionIntervalMm;
 
         // Place braces along each Delaunay edge at Z intervals
         foreach (var (li, lj) in filteredEdges)
@@ -319,10 +330,10 @@ public static class InterconnectBuilder
             }
 
             float overlap = maxZ - minZ;
-            int pairMax = Math.Min(config.MaxConnectionsPerPair, Math.Max(1, (int)(overlap / config.ConnectionIntervalMm)));
+            int pairMax = Math.Min(config.MaxConnectionsPerPair, Math.Max(1, (int)(overlap / effectiveInterval)));
             int placed = 0;
 
-            for (float z = minZ + config.ConnectionIntervalMm; z < maxZ && placed < pairMax; z += config.ConnectionIntervalMm)
+            for (float z = minZ + effectiveInterval; z < maxZ && placed < pairMax; z += effectiveInterval)
             {
                 var (ptA, ptB, _, _) = ComputeBraceEndpoints(
                     ri, z, rj, z, pillarBases, pillarRadii, pillarPaths);
