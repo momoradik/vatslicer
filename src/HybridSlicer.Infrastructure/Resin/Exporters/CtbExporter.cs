@@ -39,7 +39,10 @@ public sealed class CtbExporter : ISliceExporter
         int printParamsSize = 48;     // PrintParams (12 fields × 4 bytes)
         int slicerInfoOffset = printParamsOffset + printParamsSize;
         int slicerInfoSize = 80;      // SlicerInfo (20 fields × 4 bytes)
-        int layerTableOffset = slicerInfoOffset + slicerInfoSize;
+        // Machine name string sits between slicer info and layer table
+        var earlyMachineNameBytes = Encoding.UTF8.GetBytes(config.MachineName ?? "VATSlicer");
+        int machineNameSize = earlyMachineNameBytes.Length;
+        int layerTableOffset = slicerInfoOffset + slicerInfoSize + machineNameSize;
         int layerDefSize = 36;        // per-layer definition (9 fields × 4 bytes)
         int layerTableSize = layerDefSize * layerCount;
         int layerDataOffset = layerTableOffset + layerTableSize;
@@ -70,19 +73,34 @@ public sealed class CtbExporter : ISliceExporter
         bw.Write(config.AntiAliasingLevel);               // 88: AA level
         bw.Write(0u);                                     // 92: padding
 
+        // Estimate volume from total RLE data size (rough: white pixels × pixel area × layer height)
+        float pixelAreaMm2 = (config.BedWidthMm / config.ResolutionX) * (config.BedDepthMm / config.ResolutionY);
+        float estVolumeMl = 0;
+        foreach (var rle in encodedLayers)
+        {
+            int whitePixels = 0;
+            foreach (byte b in rle) { if ((b & 0x80) != 0) whitePixels += b & 0x7F; }
+            estVolumeMl += whitePixels * pixelAreaMm2 * config.LayerHeightMm;
+        }
+        estVolumeMl /= 1000f; // mm3 → ml
+
         // ── PrintParams (48 bytes) ──
         bw.Write(config.BottomLiftDistanceMm);            // 0: bottom lift distance
         bw.Write(config.BottomLiftSpeedMmPerMin / 60f);   // 4: bottom lift speed mm/s
         bw.Write(config.LiftDistanceMm);                  // 8: lift distance
         bw.Write(config.LiftSpeedMmPerMin / 60f);         // 12: lift speed mm/s
         bw.Write(config.RetractSpeedMmPerMin / 60f);      // 16: retract speed mm/s
-        bw.Write(0f);                                     // 20: volume ml (not computed)
+        bw.Write(estVolumeMl);                             // 20: volume ml
         bw.Write(config.AntiAliasingLevel);               // 24: AA level
-        bw.Write(0f);                                     // 28: weight g
-        bw.Write(0f);                                     // 32: cost
-        bw.Write(0f);                                     // 36: bottom retract speed
+        bw.Write(estVolumeMl * 1.1f);                     // 28: weight g (~1.1g/ml resin)
+        bw.Write(estVolumeMl * 0.05f);                    // 32: cost (~$0.05/ml)
+        bw.Write(config.RetractSpeedMmPerMin / 60f);      // 36: bottom retract speed
         bw.Write(0u);                                     // 40: padding
         bw.Write(0u);                                     // 44: padding
+
+        // Machine name string (appended after slicer info)
+        var machineNameBytes = Encoding.UTF8.GetBytes(config.MachineName ?? "VATSlicer");
+        int machineNameOffset = slicerInfoOffset + 80; // right after slicer info
 
         // ── SlicerInfo (80 bytes) ──
         bw.Write(config.BottomLiftDistanceMm);            // 0
@@ -90,21 +108,24 @@ public sealed class CtbExporter : ISliceExporter
         bw.Write(config.LiftDistanceMm);                  // 8
         bw.Write(config.LiftSpeedMmPerMin / 60f);         // 12
         bw.Write(config.RetractSpeedMmPerMin / 60f);      // 16
-        bw.Write(0f);                                     // 20
-        bw.Write(0f);                                     // 24
-        bw.Write(0f);                                     // 28
-        bw.Write(0f);                                     // 32
-        bw.Write(0f);                                     // 36
-        bw.Write(0u);                                     // 40: machine name offset (TODO)
-        bw.Write(0u);                                     // 44: machine name size
-        bw.Write(0u);                                     // 48: encryption key
+        bw.Write(0f);                                     // 20: rest time after retract
+        bw.Write(0f);                                     // 24: rest time after lift
+        bw.Write(0f);                                     // 28: rest time before lift
+        bw.Write(0f);                                     // 32: bottom rest time
+        bw.Write(0f);                                     // 36: bottom rest time after lift
+        bw.Write((uint)machineNameOffset);                // 40: machine name offset
+        bw.Write((uint)machineNameBytes.Length);           // 44: machine name size
+        bw.Write(0u);                                     // 48: encryption key (0 = no encryption)
         bw.Write(0u);                                     // 52: per-layer settings offset
-        bw.Write(0u);                                     // 56
-        bw.Write(0u);                                     // 60
-        bw.Write(0u);                                     // 64
-        bw.Write(0u);                                     // 68
-        bw.Write(0u);                                     // 72
-        bw.Write(0u);                                     // 76
+        bw.Write(0u);                                     // 56: mystery id
+        bw.Write(0u);                                     // 60: anti-alias level
+        bw.Write(0u);                                     // 64: software version
+        bw.Write(0u);                                     // 68: rest time after retract
+        bw.Write(0u);                                     // 72: rest time after lift
+        bw.Write(0u);                                     // 76: transition layer count
+
+        // ── Machine Name String ──
+        bw.Write(machineNameBytes);
 
         // ── Layer Table + Data ──
         int currentDataOffset = layerDataOffset;
