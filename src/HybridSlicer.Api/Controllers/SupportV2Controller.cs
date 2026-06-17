@@ -696,6 +696,28 @@ public sealed class SupportV2Controller : ControllerBase
         });
     }
 
+    /// <summary>Compute per-layer peel force profile.</summary>
+    [HttpPost("peel-force")]
+    [RequestSizeLimit(200_000_000)]
+    public async Task<IActionResult> PeelForce(
+        [FromForm] IFormFile stlFile,
+        [FromForm] float layerHeightMm = 0.05f,
+        CancellationToken ct = default)
+    {
+        if (stlFile is null) return BadRequest("STL required.");
+        byte[] data; using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
+        var mesh = StlMesh.FromFile(data, stlFile.FileName);
+        var profile = HybridSlicer.Infrastructure.Resin.Analysis.PeelForceProfiler.Compute(mesh, layerHeightMm);
+        return Ok(new
+        {
+            maxPeelForceN = profile.MaxPeelForceN,
+            maxPeelForceZ = profile.MaxPeelForceZ,
+            avgPeelForceN = profile.AvgPeelForceN,
+            highStressLayers = profile.HighStressLayers,
+            totalLayers = profile.Layers.Count,
+        });
+    }
+
     /// <summary>Detect suction cup geometry that risks print failure.</summary>
     [HttpPost("suction-check")]
     [RequestSizeLimit(200_000_000)]
