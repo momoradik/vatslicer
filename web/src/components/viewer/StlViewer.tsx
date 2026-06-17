@@ -113,6 +113,10 @@ interface Props {
   // Raft/Skirt visualization
   raftData?: { type: string; minX: number; minY: number; maxX: number; maxY: number; thicknessMm: number } | null
   skirtData?: { minX: number; minY: number; maxX: number; maxY: number; layers: number; distanceMm: number; widthMm: number } | null
+  /** Analyze mode: color mesh faces by overhang angle (red/yellow/green) */
+  analyzeMode?: boolean
+  /** Overhang angle threshold in degrees (default 45) */
+  analyzeAngleDeg?: number
 }
 
 // ── Coordinate-space helpers ──────────────────────────────────────────────────
@@ -216,6 +220,8 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     orientationCommitted,
     raftData,
     skirtData,
+    analyzeMode,
+    analyzeAngleDeg = 45,
   },
   ref,
 ) {
@@ -290,6 +296,90 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
   const paintAll = useCallback(() => {
     for (const id of meshMapRef.current.keys()) paintMesh(id)
   }, [paintMesh])
+
+  // ── Analyze mode: per-vertex overhang coloring ──────────────────────────
+  useEffect(() => {
+    for (const [_id, data] of meshMapRef.current) {
+      const geo = data.mesh.geometry
+      const mat = data.mesh.material as THREE.MeshPhongMaterial
+
+      if (analyzeMode) {
+        // Compute per-face colors based on face normal Z component
+        // In Three.js Y-up space: face normal Y < threshold → overhang
+        geo.computeVertexNormals()
+        const normals = geo.getAttribute('normal')
+        if (!normals) continue
+
+        const colors = new Float32Array(normals.count * 3)
+        const threshold = -Math.cos((analyzeAngleDeg) * Math.PI / 180) // Y component threshold
+
+        const idx = geo.getIndex()
+        if (idx) {
+          // Indexed geometry: compute per-face normal and assign to all 3 vertices
+          // Since flatShading is used, we compute face normals from positions
+          const pos = geo.getAttribute('position')
+          const faceColors = new Map<number, [number, number, number]>()
+          for (let i = 0; i < idx.count; i += 3) {
+            const ai = idx.getX(i), bi = idx.getX(i+1), ci = idx.getX(i+2)
+            const ax = pos.getX(ai), ay = pos.getY(ai), az = pos.getZ(ai)
+            const bx = pos.getX(bi), by = pos.getY(bi), bz = pos.getZ(bi)
+            const cx2 = pos.getX(ci), cy = pos.getY(ci), cz = pos.getZ(ci)
+            // Face normal via cross product
+            const e1x = bx-ax, e1y = by-ay, e1z = bz-az
+            const e2x = cx2-ax, e2y = cy-ay, e2z = cz-az
+            let ny = e1z*e2x - e1x*e2z // cross Y component
+            const len = Math.sqrt((e1y*e2z-e1z*e2y)**2 + ny**2 + (e1x*e2y-e1y*e2x)**2)
+            ny = len > 1e-6 ? ny / len : 0
+
+            let r: number, g: number, b: number
+            if (ny < threshold) { r = 0.9; g = 0.15; b = 0.15 } // red: steep overhang
+            else if (ny < threshold * 0.5) { r = 0.9; g = 0.7; b = 0.1 } // yellow: moderate
+            else { r = 0.15; g = 0.7; b = 0.3 } // green: safe
+
+            for (const vi of [ai, bi, ci]) {
+              const existing = faceColors.get(vi)
+              if (!existing || r > existing[0]) faceColors.set(vi, [r, g, b])
+            }
+          }
+          for (const [vi, [r, g, b]] of faceColors) {
+            colors[vi*3] = r; colors[vi*3+1] = g; colors[vi*3+2] = b
+          }
+        } else {
+          // Non-indexed: every 3 vertices = one face
+          const pos = geo.getAttribute('position')
+          for (let i = 0; i < pos.count; i += 3) {
+            const e1x = pos.getX(i+1)-pos.getX(i), e1y = pos.getY(i+1)-pos.getY(i), e1z = pos.getZ(i+1)-pos.getZ(i)
+            const e2x = pos.getX(i+2)-pos.getX(i), e2y = pos.getY(i+2)-pos.getY(i), e2z = pos.getZ(i+2)-pos.getZ(i)
+            let ny = e1z*e2x - e1x*e2z
+            const len = Math.sqrt((e1y*e2z-e1z*e2y)**2 + ny**2 + (e1x*e2y-e1y*e2x)**2)
+            ny = len > 1e-6 ? ny / len : 0
+
+            let r: number, g: number, b: number
+            if (ny < threshold) { r = 0.9; g = 0.15; b = 0.15 }
+            else if (ny < threshold * 0.5) { r = 0.9; g = 0.7; b = 0.1 }
+            else { r = 0.15; g = 0.7; b = 0.3 }
+
+            for (let j = 0; j < 3; j++) {
+              colors[(i+j)*3] = r; colors[(i+j)*3+1] = g; colors[(i+j)*3+2] = b
+            }
+          }
+        }
+
+        geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+        mat.vertexColors = true
+        mat.color.setHex(0xffffff) // let vertex colors through
+        mat.needsUpdate = true
+      } else {
+        // Remove vertex colors
+        if (geo.hasAttribute('color')) {
+          geo.deleteAttribute('color')
+          mat.vertexColors = false
+          mat.needsUpdate = true
+        }
+        paintAll()
+      }
+    }
+  }, [analyzeMode, analyzeAngleDeg, paintAll])
 
   const checkAllBounds = useCallback(() => {
     for (const [id, data] of meshMapRef.current) {

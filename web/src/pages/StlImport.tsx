@@ -452,6 +452,7 @@ export default function StlImport() {
   const [uniformScale, setUniformScale] = useState(true)
   const [spacing, setSpacing]         = useState(_savedSpacing)
   const [showSettings, setShowSettings] = useState(false)
+  const [analyzeMode, setAnalyzeMode] = useState(false)
 
   // ── Job-level support state (driven by active print profile, overridable) ──
   const [jobSupportEnabled, setJobSupportEnabled] = useState(() => _savedSupportEnabled)
@@ -1976,13 +1977,26 @@ export default function StlImport() {
                   onPaintRegionAdd={(mode, cx, cy, cz) => addPaintedRegion(mode, cx, cy, cz)}
                   raftData={selectedPrep.raft}
                   skirtData={selectedPrep.skirt}
+                  analyzeMode={analyzeMode}
                 />
-                <label className="absolute bottom-3 right-3 cursor-pointer text-xs px-3 py-1.5 rounded-lg
-                                  bg-gray-800/80 hover:bg-gray-700/90 text-gray-400 hover:text-gray-200
-                                  transition backdrop-blur-sm border border-gray-700/50">
-                  + Add Model
-                  <input type="file" accept=".stl,.obj,.3mf" multiple className="hidden" onChange={handleFileInput} />
-                </label>
+                {/* Viewer toolbar */}
+                <div className="absolute bottom-3 right-3 flex items-center gap-2">
+                  <button
+                    onClick={() => setAnalyzeMode(p => !p)}
+                    className={`text-xs px-3 py-1.5 rounded-lg transition backdrop-blur-sm border
+                      ${analyzeMode
+                        ? 'bg-teal-500/20 text-teal-300 border-teal-500/40'
+                        : 'bg-gray-800/80 hover:bg-gray-700/90 text-gray-400 hover:text-gray-200 border-gray-700/50'}`}
+                  >
+                    {analyzeMode ? 'Analyze ON' : 'Analyze'}
+                  </button>
+                  <label className="cursor-pointer text-xs px-3 py-1.5 rounded-lg
+                                    bg-gray-800/80 hover:bg-gray-700/90 text-gray-400 hover:text-gray-200
+                                    transition backdrop-blur-sm border border-gray-700/50">
+                    + Add Model
+                    <input type="file" accept=".stl,.obj,.3mf" multiple className="hidden" onChange={handleFileInput} />
+                  </label>
+                </div>
               </>
             ) : (
               <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-500 gap-3 select-none">
