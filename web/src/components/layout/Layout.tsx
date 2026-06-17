@@ -2,6 +2,7 @@ import { Outlet, useLocation } from 'react-router-dom'
 import { useRef, useEffect, useState } from 'react'
 import Sidebar from './Sidebar'
 import Header from './Header'
+import KeyboardShortcuts from '../KeyboardShortcuts'
 
 export default function Layout() {
   const location = useLocation()
@@ -26,6 +27,7 @@ export default function Layout() {
           <Outlet />
         </main>
       </div>
+      <KeyboardShortcuts />
     </div>
   )
 }
