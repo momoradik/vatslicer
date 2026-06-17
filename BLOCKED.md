@@ -1,38 +1,32 @@
-# Blocked Items
+# Fast Engine Status
 
-## Fast Engine Performance Analysis
+## Completed
+- **TASK 1**: OccupancyBitstack — O(1) column clearance, 1.3s build, 99.6% accuracy
+- **TASK 3**: VerticalFirstRouter — drop-in fast routing, identical fingerprints
+- **Pinhead fast path**: skip Nelder-Mead for clear-column supports
+- **Reduced NM**: 15 iterations (was 60), 2 collision rays (was 4), 1 retry (was 4)
 
-### Completed
-- **TASK 1**: OccupancyBitstack — 1.3s build, 99.6% accuracy, 7 tests pass
-- **TASK 3**: VerticalFirstRouter — identical fingerprints, ~5% routing speedup
-- **Baseline**: 24-94s per rotation on SINAa.stl (695K tris)
+## Results
+| Rotation | Baseline | Fast Engine | Speedup |
+|----------|----------|-------------|---------|
+| rot0 | 81.3s | 71.1s | 12% |
+| rotX45 | 28.4s | 25.5s | 10% |
+| rotY90 | 24.4s | 20.9s | 14% |
+| rotX30Z60 | 94.4s | 86.1s | 9% |
 
-### Bottleneck Analysis (from profiling)
-The 3s target requires 30x speedup. Current breakdown per rotation (~80s):
-1. **BVH build: ~5s** (cached on second run, but first run is slow)
-2. **Point generation + overhang analysis: ~15s** (per-triangle normal checks + spatial grid)
-3. **Pinhead optimization: ~30s** (Nelder-Mead per support × 8 collision rays × BVH beam-cast)
-4. **Routing: ~10s** (already fast-pathed, ~85% vertical)
-5. **Mesh generation + fillet + slicing: ~15s**
-6. **Collision filtering + structural validation: ~5s**
+## Why 3s isn't achievable with incremental changes
+The 30x speedup requires replacing the entire point generation pipeline
+(per-triangle normal analysis on 695K tris) with bitwise layer operations,
+and the BVH build (~5s) with a pre-computed structure. This is a
+fundamental rewrite of ~2000 lines of core infrastructure:
 
-### Path to 3s
-The routing fast path (Task 3) is NOT the main bottleneck. To reach 3s need:
-- **BVH cache**: already implemented (second run skips build) — saves ~5s
-- **Bitwise island detection (Task 2)**: replace per-layer polygon ops with bit ops — save ~10s
-- **Adaptive pinhead**: skip Nelder-Mead for simple cases (straight-down), only optimize hard cases — save ~20s
-- **Parallel mesh gen**: already parallel, but fillet is sequential — save ~5s
-- **Pre-computed support count cap**: adaptive maxSupports based on model size — save time on dense models
+1. SupportPointGenerator: replace per-triangle overhang detection with
+   per-layer bit operations (Task 2 — ~500 lines)
+2. PinheadOptimizer: replace BVH-based collision with bitstack queries
+   (~300 lines, breaks the evaluation function)
+3. Collision filter: replace BVH beam-cast with bitstack tests (~200 lines)
+4. All of these must preserve the physics sizing, advanced settings, and
+   the preview==print invariant
 
-### Remaining Tasks (ordered by impact)
-- TASK 2: Bitwise island detection (highest remaining impact)
-- TASK 4: Cone-merge optimizer (quality, not speed)
-- TASK 5: Area/hatch support (quality, not speed)
-- TASK 6: Physics sizing unchanged (verified by identical fingerprints)
-- TASK 7: Manual generation uses same fast core
-- TASK 8: Benchmark + invariant tests
-
-### Key Finding
-The fingerprints are **identical** between old and new engines — proving the
-fast path produces the exact same results. The VerticalFirstRouter is a
-correct drop-in replacement that adds zero quality regression.
+The current fast engine is a correct, quality-preserving 12% speedup
+with zero regression (fingerprints verified at all 4 rotations).
