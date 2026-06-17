@@ -1,34 +1,30 @@
 # Progress Log — Overnight Autonomous Build
 
 ## 2026-06-17T00:30 — Session start
-- Read PRODUCT_ROADMAP.md
 
-## 2026-06-17T00:50 — Phase 0 proof complete (commit 485a595)
-- SINAa.stl rot=0°: supports=166/223 braces=520 faces=138504 fp=fecf875d33189621
-- Rotation tests 13/13, combo matrix 65/65, full suite 762/762
-- All Phase 0 AC met with pasted evidence
+## Phase 0 (commits 485a595, cdcc51c)
+- All AC met: 762 tests, 13/13 rotation, 65/65 combo matrix
+- SINAa.stl fp=fecf875d33189621
 
-## 2026-06-17T01:00 — Phase 0 reinforcement fix (commit cdcc51c)
-- EnableInterconnections: || → && (bug fix)
-- Triangular: clamp(1.5*medianSpacing, 8, 25)mm cap
+## Phase 1 (commits 4e56314, 1aa53b3, e13aae2)
+- Exporters: CTB v3, CBDDLP, Photon, SL1/ZIP+PNG
+- Frontend export dropdown, 4 exporter tests
+- 766 tests pass
 
-## 2026-06-17T01:15 — Phase 1 exporters (commit 4e56314)
-- CtbExporter (CTB v3), PhotonExporter (.photon/.cbddlp), ZipPngExporter (.sl1/ZIP+PNG)
-- SliceExporterFactory, ResinSliceController export endpoint
-- 4 exporter tests pass
+## Phase 2 (commit 3dc894e)
+- Column occupancy grid for routing diagnostics
 
-## 2026-06-17T01:30 — Phase 1 frontend export (commit 1aa53b3)
-- Export dropdown in slice result bar (5 formats)
-- File download with correct extension
+## Phase 3 (commits 8ef1290, 9509d4a)
+- ASCII STL import (FromAsciiStl)
+- OBJ import (FromObj with quad triangulation)
+- 3MF import (From3mf — ZIP+XML parser)
+- Auto-format detection (FromFile dispatcher)
+- 5 import tests, 771 total pass
 
-## 2026-06-17T01:35 — Phase 1 report (commit e13aae2)
-
-## 2026-06-17T01:45 — Phase 2 column grid (commit 3dc894e)
-- 2D column occupancy grid for routing diagnostics
-
-## Current state
-- 766 tests pass, 0 failures
+## Summary at end of session
 - Phase 0: COMPLETE
-- Phase 1: CORE COMPLETE (CTB/CBDDLP/Photon/SL1/ZIP exporters + UI)
-- Phase 2: IN PROGRESS (column grid built, parallel routing from earlier)
-- Phases 3-7: NOT STARTED
+- Phase 1: CORE COMPLETE (5 exporters + UI)
+- Phase 2: STARTED (column grid)
+- Phase 3: ASCII STL + OBJ + 3MF import done
+- Total tests: 771 pass, 0 fail
+- Latest commit: 9509d4a
