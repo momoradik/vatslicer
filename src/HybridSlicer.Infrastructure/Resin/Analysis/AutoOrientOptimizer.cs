@@ -194,21 +194,46 @@ public static class AutoOrientOptimizer
         float modelHeight = maxZ - minZ;
         if (modelHeight < 0.01f) modelHeight = 0.01f;
 
+        // Estimate max cross-section area (proxy for peel force)
+        // Sample a few Z heights and compute approximate XY footprint
+        float maxCrossSectionArea = 0;
+        int sampleLayers = Math.Min(10, Math.Max(1, (int)(modelHeight / layerHeight)));
+        for (int li = 0; li < sampleLayers; li++)
+        {
+            float sampleZ = minZ + (li + 0.5f) * modelHeight / sampleLayers;
+            float layerArea = 0;
+            for (int t2 = 0; t2 < mesh.TriangleCount; t2++)
+            {
+                var rv0 = Vector3.Transform(mesh.Vertices[t2 * 3], rotation);
+                var rv1 = Vector3.Transform(mesh.Vertices[t2 * 3 + 1], rotation);
+                var rv2 = Vector3.Transform(mesh.Vertices[t2 * 3 + 2], rotation);
+                float tMinZ = MathF.Min(rv0.Z, MathF.Min(rv1.Z, rv2.Z));
+                float tMaxZ = MathF.Max(rv0.Z, MathF.Max(rv1.Z, rv2.Z));
+                if (tMinZ <= sampleZ && tMaxZ >= sampleZ)
+                {
+                    float ax = rv1.X - rv0.X, ay = rv1.Y - rv0.Y;
+                    float bx = rv2.X - rv0.X, by = rv2.Y - rv0.Y;
+                    layerArea += MathF.Abs(ax * by - ay * bx) * 0.5f;
+                }
+            }
+            if (layerArea > maxCrossSectionArea) maxCrossSectionArea = layerArea;
+        }
+
         // Estimate support count: overhangArea / (spacing^2)
         float spacingSq = DefaultSupportSpacingMm * DefaultSupportSpacingMm;
         int estimatedSupports = (int)MathF.Ceiling(overhangArea / spacingSq);
 
-        // Estimate support volume: each support is a frustum from overhang down to base
-        // Approximate as cylinder: V = pi * r^2 * h, with r ~ 0.5mm pillar, avg height ~ modelHeight/2
+        // Estimate support volume
         float avgSupportHeight = modelHeight * 0.5f;
         float pillarRadius = 0.5f;
         float perSupportVolume = MathF.PI * pillarRadius * pillarRadius * avgSupportHeight;
         float totalVolumeMm3 = estimatedSupports * perSupportVolume;
         float supportVolumeMl = totalVolumeMm3 / 1000f;
 
-        // Score: weighted combination of overhang area and model height
-        // Prefer orientations with low overhang AND low height (faster print, shorter supports)
-        float score = overhangArea * 1.0f + modelHeight * 0.5f;
+        // Peel-aware score: overhang area + model height + max cross-section area
+        // Max cross-section drives peel force — orientations that reduce this are preferred
+        float peelForceTerm = maxCrossSectionArea * 0.01f; // scale to same order as overhang area
+        float score = overhangArea * 1.0f + modelHeight * 0.5f + peelForceTerm;
 
         return new OrientResult
         {
