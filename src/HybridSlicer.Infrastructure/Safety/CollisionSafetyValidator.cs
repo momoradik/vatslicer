@@ -29,19 +29,13 @@ public sealed class CollisionSafetyValidator : ISafetyValidator
 
         var moves = ParseMoves(request.CncGCode);
 
-        // CuraEngine is always invoked with machine_center_is_zero=true, so the
-        // coordinate origin is at the bed centre: X ∈ [-width/2, +width/2], Y ∈ [-depth/2, +depth/2].
-        // MachineMaxX/Y carry the full bed dimension, so the valid range is ±half.
-        var halfX = request.MachineMaxX / 2.0;
-        var halfY = request.MachineMaxY / 2.0;
-
         foreach (var move in moves)
         {
-            // 1. Axis envelope check (centre-is-zero: symmetric about origin for X and Y)
-            if (move.X < -halfX || move.X > halfX)
-                issues.Add($"X={move.X:F4} exceeds machine envelope [{-halfX}, {halfX}].");
-            if (move.Y < -halfY || move.Y > halfY)
-                issues.Add($"Y={move.Y:F4} exceeds machine envelope [{-halfY}, {halfY}].");
+            // 1. Axis envelope check: CNC coordinates are in machine space [0, Max]
+            if (move.X < 0 || move.X > request.MachineMaxX)
+                issues.Add($"X={move.X:F4} exceeds machine envelope [0, {request.MachineMaxX}].");
+            if (move.Y < 0 || move.Y > request.MachineMaxY)
+                issues.Add($"Y={move.Y:F4} exceeds machine envelope [0, {request.MachineMaxY}].");
             if (move.Z < 0 || move.Z > request.MachineMaxZ)
                 issues.Add($"Z={move.Z:F4} exceeds machine envelope [0, {request.MachineMaxZ}].");
 
