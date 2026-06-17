@@ -1895,6 +1895,31 @@ export default function StlImport() {
           <span>{sliceResult.resolutionX}x{sliceResult.resolutionY} px</span>
           <span>{sliceResult.estimatedPrintTimeMin.toFixed(1)} min est.</span>
           <span className="text-green-500">{sliceResult.elapsedMs}ms</span>
+          {/* Export button */}
+          <select
+            onChange={async (e) => {
+              const fmt = e.target.value
+              if (!fmt || !sliceResult?.jobId) return
+              try {
+                const blob = await resinSliceApi.exportJob(sliceResult.jobId, fmt)
+                const url = URL.createObjectURL(blob)
+                const a = document.createElement('a')
+                a.href = url
+                a.download = `print.${fmt === 'sl1' ? 'sl1' : fmt}`
+                a.click()
+                URL.revokeObjectURL(url)
+              } catch (err) { console.error('Export failed:', err) }
+              e.target.value = ''
+            }}
+            className="bg-green-800/50 border border-green-700 rounded px-2 py-0.5 text-[10px] text-green-300"
+          >
+            <option value="">Export...</option>
+            <option value="ctb">.ctb (ChiTuBox)</option>
+            <option value="cbddlp">.cbddlp (Anycubic)</option>
+            <option value="photon">.photon (Anycubic)</option>
+            <option value="sl1">.sl1 (Prusa)</option>
+            <option value="zip">.zip (Generic)</option>
+          </select>
         </div>
       )}
 

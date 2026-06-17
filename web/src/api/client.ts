@@ -317,6 +317,15 @@ export const resinSliceApi = {
         imageFileName: string; contourCount: number; imageSizeBytes: number; isEmpty: boolean
       }[]
     }>(`/resin-slice/${jobId}/layers`).then(r => r.data),
+  /** Export a sliced job to a printer file format */
+  exportJob: (jobId: string, format: string) =>
+    http.get(`/resin-slice/${jobId}/export/${format}`, {
+      responseType: 'blob', timeout: 300000,
+    }).then(r => r.data as Blob),
+  /** Get supported export formats */
+  getFormats: () =>
+    http.get<{ format: string; name: string; extension: string }[]>('/resin-slice/formats')
+      .then(r => r.data),
 }
 
 // ── Branding ──────────────────────────────────────────────────────────────
