@@ -147,6 +147,49 @@ public class ExporterTests
         ms.Length.Should().BeGreaterThan(50);
     }
 
+    [Theory]
+    [InlineData("ctb")]
+    [InlineData("cbddlp")]
+    [InlineData("photon")]
+    [InlineData("pwmx")]
+    [InlineData("pwms")]
+    [InlineData("pwmb")]
+    [InlineData("sl1")]
+    [InlineData("zip")]
+    public void AllFormats_ProduceNonEmptyOutput(string format)
+    {
+        var config = CreateTestConfig(3);
+        var layers = Enumerable.Range(0, 3)
+            .Select(_ => CreateTestLayerPng(config.ResolutionX, config.ResolutionY))
+            .ToList();
+
+        var exporter = SliceExporterFactory.GetExporter(format);
+        exporter.Should().NotBeNull($"factory should return exporter for '{format}'");
+
+        using var ms = new MemoryStream();
+        exporter!.Export(config, layers, ms);
+
+        ms.Length.Should().BeGreaterThan(50, $"'{format}' export should produce non-trivial output");
+        exporter.FileExtension.Should().StartWith(".", $"'{format}' extension should start with dot");
+    }
+
+    [Fact]
+    public void AllFormats_HandleEmptyLayerList()
+    {
+        var config = CreateTestConfig(0);
+        var noLayers = new List<byte[]>();
+
+        foreach (var (format, _, _) in SliceExporterFactory.SupportedFormats)
+        {
+            var exporter = SliceExporterFactory.GetExporter(format);
+            if (exporter == null) continue;
+
+            using var ms = new MemoryStream();
+            // Should not throw
+            exporter.Export(config, noLayers, ms);
+        }
+    }
+
     [Fact]
     public void Factory_ReturnsCorrectExporters()
     {
