@@ -696,6 +696,31 @@ public sealed class SupportV2Controller : ControllerBase
         });
     }
 
+    /// <summary>Check for thin walls below minimum printable thickness.</summary>
+    [HttpPost("thin-wall-check")]
+    [RequestSizeLimit(200_000_000)]
+    public async Task<IActionResult> ThinWallCheck(
+        [FromForm] IFormFile stlFile,
+        [FromForm] float minThicknessMm = 0.5f,
+        CancellationToken ct = default)
+    {
+        if (stlFile is null) return BadRequest("STL required.");
+        byte[] data; using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
+        var mesh = StlMesh.FromFile(data, stlFile.FileName);
+        var bvh = HybridSlicer.Infrastructure.Resin.Spatial.AabbBvh.Build(mesh);
+        var result = HybridSlicer.Infrastructure.Resin.Analysis.ThinWallDetector.Detect(bvh, mesh, minThicknessMm);
+        return Ok(new
+        {
+            thinWallCount = result.ThinWallCount,
+            minWallThicknessMm = result.MinWallThicknessMm,
+            warnings = result.Warnings.Take(20).Select(w => new
+            {
+                x = w.Position.X, y = w.Position.Y, z = w.Position.Z,
+                wallThicknessMm = w.WallThicknessMm,
+            }),
+        });
+    }
+
     /// <summary>Compute per-layer peel force profile.</summary>
     [HttpPost("peel-force")]
     [RequestSizeLimit(200_000_000)]
