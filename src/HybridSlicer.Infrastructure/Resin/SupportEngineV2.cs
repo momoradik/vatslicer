@@ -237,6 +237,11 @@ public static class SupportEngineV2
 
         public int Seed { get; init; } = 42;
 
+        /// <summary>Use the fast support engine (OccupancyBitstack + VerticalFirstRouter).
+        /// When true, uses bitwise column checks instead of BVH beam-cast for the ~85% vertical fast path.
+        /// Old engine is preserved for A/B comparison by fingerprint.</summary>
+        public bool UseFastSupportEngine { get; init; } = false;
+
         /// <summary>Resin category for adhesion calibration (e.g. "Standard", "ABS-Like", "Ceramic").</summary>
         public string? ResinCategory { get; init; }
         /// <summary>Film type for adhesion calibration (e.g. "FEP", "nFEP").</summary>
@@ -713,6 +718,16 @@ public static class SupportEngineV2
         }
         Serilog.Log.Information("V2 Column grid: {Cells} cells for {Tris} triangles", columnMaxZ.Count, mesh.TriangleCount);
 
+        // Task 1: Build OccupancyBitstack for fast column clearance (when UseFastSupportEngine)
+        Spatial.OccupancyBitstack? occupancyBitstack = null;
+        if (config.UseFastSupportEngine)
+        {
+            var bitstackSw = System.Diagnostics.Stopwatch.StartNew();
+            occupancyBitstack = Spatial.OccupancyBitstack.Build(mesh, cellSize: 0.3f, layerHeight: 0.05f);
+            Serilog.Log.Information("V2 OccupancyBitstack: {Ms}ms ({Cx}x{Cy} cells, {Lz} layers)",
+                bitstackSw.ElapsedMilliseconds, occupancyBitstack.CellsX, occupancyBitstack.CellsY, occupancyBitstack.Layers);
+        }
+
         var routes = new List<(string id, PillarRouter.PillarRoute route)>();
         // Build lookup for point weight recommendations
         var pointWeights = pointResult.Points.ToDictionary(p => p.Id, p => p.RecommendedWeight);
@@ -812,23 +827,28 @@ public static class SupportEngineV2
             float startRadius = Math.Max(pinhead.BackRadius, rCfg.PillarRadiusMm);
             var routeStart = pinhead.JunctionPoint;
 
-            // Phase 2 fast path: column occupancy check.
-            // If no model geometry exists below the junction in its XY column,
-            // skip the expensive beam-cast routing and go straight down.
+            // Fast path routing: use OccupancyBitstack (Task 1) or old column grid
             PillarRouter.PillarRoute route;
+            if (config.UseFastSupportEngine && occupancyBitstack != null)
             {
+                route = Routing.VerticalFirstRouter.RouteVerticalFirst(
+                    routeStart, startRadius, occupancyBitstack, bvh, rCfg);
+                if (route.ReachesGround && route.Path.Count >= 2 &&
+                    Math.Abs(route.Path[^1].Position.Z - rCfg.BaseZ) < 1f)
+                    Interlocked.Increment(ref fastPathCount);
+            }
+            else
+            {
+                // Old column occupancy fast path
                 int cx = (int)MathF.Floor(routeStart.X / columnCellSize);
                 int cy = (int)MathF.Floor(routeStart.Y / columnCellSize);
                 float colMaxZ = 0f;
-                // Check the pillar's column plus adjacent cells (for radius coverage)
                 for (int dx2 = -1; dx2 <= 1; dx2++)
                 for (int dy2 = -1; dy2 <= 1; dy2++)
                 {
                     if (columnMaxZ.TryGetValue((cx + dx2, cy + dy2), out var z2) && z2 > colMaxZ)
                         colMaxZ = z2;
                 }
-
-                // If junction starts above all geometry in the column → direct descent
                 if (routeStart.Z > colMaxZ + 1.0f)
                 {
                     route = PillarRouter.FastVerticalRoute(routeStart, startRadius, rCfg);

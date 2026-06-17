@@ -118,4 +118,44 @@ public class FastEngineBaselineTests
             result.ValidSupports.Should().BeGreaterThan(0, $"{name} should produce supports");
         }
     }
+
+    [Fact]
+    public void FastEngine_SINAa_Timing_And_Fingerprint()
+    {
+        var mesh = LoadSINAa();
+        if (mesh == null) { Console.WriteLine("SINAa.stl not found — skipping"); return; }
+
+        var rotations = new[]
+        {
+            ("rot0", 0f, 0f, 0f),
+            ("rotX45", 45f, 0f, 0f),
+            ("rotY90", 0f, 90f, 0f),
+            ("rotX30Z60", 30f, 0f, 60f),
+        };
+
+        var config = new SupportEngineV2.EngineConfig
+        {
+            DensityFactor = 0.5f,
+            EnableInterconnections = true,
+            EnableFillets = true,
+            Seed = 42,
+            UseFastSupportEngine = true,
+        };
+
+        foreach (var (name, rx, ry, rz) in rotations)
+        {
+            var rotated = RotateMesh(mesh, rx, ry, rz);
+            var sw = Stopwatch.StartNew();
+            var result = SupportEngineV2.Generate(rotated, config);
+            sw.Stop();
+
+            var fp = ComputeFingerprint(result);
+
+            Console.WriteLine(
+                $"FAST {name}: {sw.ElapsedMilliseconds}ms, {result.ValidSupports} supports, " +
+                $"{result.Interconnections.Count} braces, {result.SupportMesh.FaceCount} mesh faces, fp={fp}");
+
+            result.ValidSupports.Should().BeGreaterThan(0, $"{name} should produce supports");
+        }
+    }
 }
