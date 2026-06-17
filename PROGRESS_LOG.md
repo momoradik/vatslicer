@@ -1,22 +1,21 @@
-# Progress Log — Overnight Autonomous Build
+# VATSlicer — Overnight Build Session 2
 
-## Session 2: 2026-06-17 — 94 commits, 976 tests
+## 99 commits, 988 tests, Phases 0-6
 
-### 20+ analysis engines, 8 export formats, 9 API endpoints, 15+ frontend features
-Test count 843 → 976 (133 new). All builds green (dotnet+npm), zero failures.
+20+ analysis engines, 8 export formats, 9 API endpoints, 15+ UI features.
+All builds green (dotnet + npm), zero test failures.
 
-### Analysis Suite
-SuctionCupDetector, BedAdhesionEstimator, PeelForceProfiler,
-AdaptiveLiftOptimizer, ExposureCompensator, ModelWeightEstimator,
-PrintTimeBreakdown, IslandPredictor, ThinWallDetector,
-CrossSectionAreaCalculator, ComprehensiveModelAnalyzer,
-PrintabilityScorer, BatchProcessor, SupportRemovalEstimator,
-ResinCompatibilityChecker, SurfaceFinishPredictor,
-BuildPlateUtilization, XYCompensationProcessor,
-FailureRiskAssessor, ModelCollisionChecker,
-ResinTrapVolumeIntegrator, SupportDensityMapper,
-CenterOfGravityCalculator, ShrinkageCompensator,
-ExposureTestPatternGenerator, LayerDiffGenerator,
-PrintHistoryTracker, AdhesionCalibration
-
-### Final: 976 tests, 0 failures, 94 commits
+### Analysis Suite (20+ engines)
+ComprehensiveModelAnalyzer, PrintabilityScorer, FailureRiskAssessor,
+SuctionCupDetector, IslandPredictor, ThinWallDetector,
+BedAdhesionEstimator, PeelForceProfiler, AdaptiveLiftOptimizer,
+ExposureCompensator, TemperatureCompensator, ShrinkageCompensator,
+XYCompensationProcessor, ModelWeightEstimator, PrintTimeBreakdown,
+PrintTimeEstimator, FepLifeEstimator, SurfaceFinishPredictor,
+CrossSectionAreaCalculator, ResinTrapVolumeIntegrator,
+SupportDensityMapper, CenterOfGravityCalculator,
+BuildPlateUtilization, ModelCollisionChecker,
+SupportRemovalEstimator, ResinCompatibilityChecker,
+BatchProcessor, ExposureTestPatternGenerator,
+LayerDiffGenerator, PrintHistoryTracker, AdhesionCalibration,
+BuildPlateNester
