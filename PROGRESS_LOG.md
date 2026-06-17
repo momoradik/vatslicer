@@ -1,24 +1,33 @@
 # VATSlicer — Overnight Build Session 2
 
-## 113 commits, 1051 tests, 30+ analysis engines
+## 123 commits, 1082 tests, 35+ analysis engines
 
 All builds green (dotnet + npm), zero test failures.
-Test count 843 → 1051 (208 new tests added).
+Test count 843 → 1082 (239 new tests).
 
-### Analysis Engine Suite (30+)
+### 35+ Analysis Engines
 ComprehensiveModelAnalyzer, PrintabilityScorer, FailureRiskAssessor,
-PrintReadinessChecker, SuctionCupDetector, IslandPredictor,
-ThinWallDetector, BedAdhesionEstimator, PeelForceProfiler,
-AdaptiveLiftOptimizer, SmartExposureOptimizer, LiftSequenceGenerator,
-ExposureCompensator, TemperatureCompensator, ShrinkageCompensator,
-XYCompensationProcessor, PixelBleedCompensator,
+PrintReadinessChecker, PrintJobReportGenerator, PrintJobSummaryGenerator,
+SuctionCupDetector, IslandPredictor, ThinWallDetector,
+BedAdhesionEstimator, PeelForceProfiler, AdaptiveLiftOptimizer,
+SmartExposureOptimizer, LiftSequenceGenerator, TemperatureCompensator,
+ExposureCompensator, ShrinkageCompensator, DimensionalAccuracyPredictor,
+XYCompensationProcessor, PixelBleedCompensator, UVPowerDensityCalculator,
 ModelWeightEstimator, SupportMaterialEstimator, PrintCostCalculator,
-PrintTimeBreakdown, PrintTimeEstimator, FepLifeEstimator,
-SurfaceFinishPredictor, OverhangAreaCalculator, LayerTransitionAnalyzer,
-CrossSectionAreaCalculator, ResinTrapVolumeIntegrator, ResinUsageForecaster,
-SupportDensityMapper, CenterOfGravityCalculator,
+PrintTimeBreakdown, PrintTimeEstimator, FepLifeEstimator, ResinShelfLifeTracker,
+SurfaceFinishPredictor, OverhangAreaCalculator, OptimalLayerHeightCalculator,
+LayerTransitionAnalyzer, CrossSectionAreaCalculator, ResinTrapVolumeIntegrator,
+ResinUsageForecaster, SupportDensityMapper, CenterOfGravityCalculator,
 BuildPlateUtilization, ModelCollisionChecker, AntiAliasingQualityEstimator,
-SupportRemovalEstimator, ResinCompatibilityChecker,
-BatchProcessor, ExposureTestPatternGenerator,
-LayerDiffGenerator, PrintHistoryTracker, AdhesionCalibration,
-BuildPlateNester
+SupportRemovalEstimator, SupportEfficiencyAnalyzer, ResinCompatibilityChecker,
+PostProcessingAdvisor, BatchProcessor, ExposureTestPatternGenerator,
+LayerDiffGenerator, PrintHistoryTracker, AdhesionCalibration, BuildPlateNester
+
+### 12 API Endpoints
+POST /api/support-v2/full-report, analyze, suction-check, peel-force,
+island-check, thin-wall-check
+GET /api/support-v2/post-process
+POST /api/prep-tools/nest
+GET /api/prep-tools/print-history
+
+### Final: 1082 tests, 0 failures, 123 commits
