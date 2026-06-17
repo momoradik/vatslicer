@@ -288,6 +288,14 @@ export const prepToolsApi = {
       removedForReduction: number; recoaterReinforcements: number; warnings: string[]
       supports: GeneratedSupportData[]
     }>('/prep-tools/optimize-supports', fd, { headers: { 'Content-Type': 'multipart/form-data' } }).then(r => r.data),
+  nest: (parts: { id: string; widthMm: number; depthMm: number }[], plateWidthMm: number, plateDepthMm: number) =>
+    http.post<{
+      placements: { id: string; centerX: number; centerY: number; rotated90: boolean }[]
+      overflow: string[]
+      utilization: number
+    }>('/prep-tools/nest', {
+      parts, plateWidthMm, plateDepthMm, partGapMm: 2, plateMarginMm: 3,
+    }).then(r => r.data),
 }
 
 // ── Resin Slicing ────────────────────────────────────────────────────

@@ -10,7 +10,7 @@ import StlViewer, {
 import PrintProfilePanel from '../components/PrintProfilePanel'
 import MaterialProfilePanel from '../components/MaterialProfilePanel'
 import { SupportOptionsPicker, DEFAULT_SUPPORT_OPTIONS, type SupportOptionsConfig } from '../components/support-picker'
-import { machineProfilesApi, resinPrintProfilesApi, resinSliceApi, meshApi, supportV2Api, type AdvancedSupportData, type CrossBraceData } from '../api/client'
+import { machineProfilesApi, resinPrintProfilesApi, resinSliceApi, meshApi, supportV2Api, prepToolsApi, type AdvancedSupportData, type CrossBraceData } from '../api/client'
 
 // ── Per-object settings override ──────────────────────────────────────────────
 
@@ -1938,6 +1938,29 @@ export default function StlImport() {
               {slicing ? 'Slicing...' : sliceStale && sliceResult ? 'Re-Slice' : 'Slice'}
             </button>
 
+            <button onClick={async () => {
+              if (models.length < 2) return
+              try {
+                const parts = models.map(m => ({
+                  id: m.id,
+                  widthMm: m.size?.x ?? 20,
+                  depthMm: m.size?.y ?? 20,
+                }))
+                const bv = buildVolume
+                const result = await prepToolsApi.nest(parts, bv.width, bv.depth)
+                updateModels(prev => prev.map(m => {
+                  const p = result.placements.find(pl => pl.id === m.id)
+                  if (!p) return m
+                  return { ...m, transform: { ...m.transform, x: p.centerX - bv.width / 2, y: p.centerY - bv.depth / 2 } }
+                }))
+                if (result.overflow.length > 0)
+                  console.warn('[Nest] Overflow:', result.overflow)
+              } catch (err) { console.error('Auto-arrange failed:', err) }
+            }} title="Auto-arrange models on build plate"
+              disabled={models.length < 2}
+              className="text-xs px-2 py-1.5 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-teal-300 hover:border-teal-500/40 transition disabled:opacity-40 disabled:cursor-not-allowed">
+              Arrange
+            </button>
             <button onClick={saveProject} title="Save project (.vatproj)"
               className="text-xs px-2 py-1.5 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-teal-300 hover:border-teal-500/40 transition">
               Save
