@@ -128,7 +128,6 @@ public sealed class PrepToolsController : ControllerBase
             }),
         });
     }
-}
 
     /// <summary>Get print history and resin usage stats.</summary>
     [HttpGet("print-history")]
@@ -149,3 +148,4 @@ public sealed class PrepToolsController : ControllerBase
             }),
         });
     }
+}
