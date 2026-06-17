@@ -510,6 +510,7 @@ export default function StlImport() {
     jobId: string; layerCount: number; bottomLayerCount: number
     layerHeightMm: number; resolutionX: number; resolutionY: number
     totalHeightMm: number; estimatedPrintTimeMin: number; elapsedMs: number
+    resinVolumeMl?: number; resinWeightG?: number; estimatedCostUsd?: number
   } | null>(null)
   const [layerData, setLayerData] = useState<LayerInfo[]>([])
   const [sliceError, setSliceError] = useState<string | null>(null)
@@ -1988,13 +1989,21 @@ export default function StlImport() {
 
       {/* Slice result summary */}
       {sliceResult && !sliceStale && (
-        <div className="bg-green-900/20 border border-green-800/40 rounded-lg px-4 py-2 text-xs text-green-300 flex-shrink-0 flex items-center gap-4">
-          <span className="font-medium">Sliced</span>
+        <div className="bg-green-900/20 border border-green-800/40 rounded-lg px-4 py-2 text-xs text-green-300 flex-shrink-0 flex items-center gap-3 flex-wrap">
+          <span className="font-medium text-green-400">Sliced</span>
           <span>{sliceResult.layerCount} layers</span>
           <span>{sliceResult.totalHeightMm.toFixed(1)} mm</span>
-          <span>{sliceResult.resolutionX}x{sliceResult.resolutionY} px</span>
-          <span>{sliceResult.estimatedPrintTimeMin.toFixed(1)} min est.</span>
-          <span className="text-green-500">{sliceResult.elapsedMs}ms</span>
+          <span>{sliceResult.resolutionX}x{sliceResult.resolutionY}</span>
+          <span className="text-cyan-300">{sliceResult.estimatedPrintTimeMin < 60
+            ? `${sliceResult.estimatedPrintTimeMin.toFixed(0)}min`
+            : `${(sliceResult.estimatedPrintTimeMin / 60).toFixed(1)}h`}</span>
+          {sliceResult.resinVolumeMl != null && sliceResult.resinVolumeMl > 0 && (
+            <span className="text-amber-300">{sliceResult.resinVolumeMl.toFixed(1)}ml</span>
+          )}
+          {sliceResult.estimatedCostUsd != null && sliceResult.estimatedCostUsd > 0 && (
+            <span className="text-yellow-300">${sliceResult.estimatedCostUsd.toFixed(2)}</span>
+          )}
+          <span className="text-green-600 text-[10px]">{sliceResult.elapsedMs}ms</span>
           {/* Export button */}
           <select
             onChange={async (e) => {
