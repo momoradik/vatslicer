@@ -23,10 +23,19 @@ public sealed class MeshValidationController : ControllerBase
 
         try
         {
-            var mesh = StlMesh.FromBinary(data);
+            var mesh = StlMesh.FromFile(data, stlFile.FileName);
             var result = MeshValidator.Validate(mesh);
 
             var size = mesh.Max - mesh.Min;
+
+            // Compute surface area
+            float surfaceArea = 0;
+            for (int t = 0; t < mesh.TriangleCount; t++)
+            {
+                var v0 = mesh.Vertices[t * 3]; var v1 = mesh.Vertices[t * 3 + 1]; var v2 = mesh.Vertices[t * 3 + 2];
+                surfaceArea += System.Numerics.Vector3.Cross(v1 - v0, v2 - v0).Length() * 0.5f;
+            }
+
             return Ok(new
             {
                 result.IsValid,
@@ -39,6 +48,7 @@ public sealed class MeshValidationController : ControllerBase
                 result.BoundsValid,
                 result.VolumeMm3,
                 sizeX = size.X, sizeY = size.Y, sizeZ = size.Z,
+                surfaceAreaMm2 = surfaceArea,
                 result.Warnings,
                 result.Errors,
             });
