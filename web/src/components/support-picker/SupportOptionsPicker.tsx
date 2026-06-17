@@ -38,7 +38,9 @@ export interface SupportOptionsConfig {
   forceDriven: boolean
   // Group 6: Density
   density: 'light' | 'medium' | 'heavy'
-  // Group 7: Advanced Settings (ChiTuBox-style manual sizing)
+  // Group 7: Resin Type (for P_ADH calibration)
+  resinType: 'standard' | 'abs-like' | 'flexible' | 'castable' | 'ceramic' | 'water-washable'
+  // Group 8: Advanced Settings (ChiTuBox-style manual sizing)
   advanced: AdvancedSupportSettings
 }
 
@@ -58,6 +60,7 @@ export const DEFAULT_SUPPORT_OPTIONS: SupportOptionsConfig = {
   drainageAware: false,
   forceDriven: false,
   density: 'medium',
+  resinType: 'standard',
   advanced: DEFAULT_ADVANCED_SETTINGS,
 }
 
@@ -276,7 +279,21 @@ export default function SupportOptionsPicker({ value, onChange }: Props) {
         </div>
       </div>
 
-      {/* Group 7: Advanced Settings */}
+      {/* Group 7: Resin Type */}
+      <div>
+        <GroupLabel>Resin Type</GroupLabel>
+        <select value={value.resinType} onChange={e => set('resinType', e.target.value as any)}
+          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-[10px] text-gray-300">
+          <option value="standard">Standard Resin</option>
+          <option value="abs-like">ABS-Like</option>
+          <option value="flexible">Flexible</option>
+          <option value="castable">Castable / Wax</option>
+          <option value="ceramic">Ceramic-Filled</option>
+          <option value="water-washable">Water-Washable</option>
+        </select>
+      </div>
+
+      {/* Group 8: Advanced Settings */}
       <details className="group">
         <summary className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-400 py-1 select-none">
           Advanced Settings <span className="text-[8px] text-gray-600 normal-case tracking-normal">({value.advanced.sizingMode})</span>

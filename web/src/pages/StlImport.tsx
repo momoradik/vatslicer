@@ -1241,7 +1241,7 @@ export default function StlImport() {
       miniRafts: supportOptions.raftMode === 'mini',
       raftMargin: 1.5,
       raftThickness: 0.3,
-      materialPreset: 'standard' as string,
+      materialPreset: supportOptions.resinType ?? 'standard',
     }
   }, [supportOptions])
 
@@ -2396,7 +2396,7 @@ export default function StlImport() {
                         <label className="flex items-center justify-between text-[10px]">
                           <span className="text-gray-500">Material</span>
                           <select value={autoSupportConfig.materialPreset}
-                            onChange={e => setAutoSupportConfig(p => ({ ...p, materialPreset: e.target.value }))}
+                            onChange={e => setAutoSupportConfig(p => ({ ...p, materialPreset: e.target.value as typeof p.materialPreset }))}
                             className="bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-[10px] text-gray-200">
                             <option value="standard">Standard Resin</option>
                             <option value="tough">Tough Resin</option>
