@@ -453,6 +453,7 @@ export default function StlImport() {
   const [spacing, setSpacing]         = useState(_savedSpacing)
   const [showSettings, setShowSettings] = useState(false)
   const [analyzeMode, setAnalyzeMode] = useState(false)
+  const [wireframeMode, setWireframeMode] = useState(false)
   const [drainHoles, setDrainHoles] = useState<{ x: number; y: number; z: number; reason: string; trapVolumeMm3: number }[]>([])
 
   // ── Keyboard shortcuts (Ctrl+Z undo, Ctrl+S save project) ──
@@ -2092,6 +2093,27 @@ export default function StlImport() {
                 />
                 {/* Viewer toolbar */}
                 <div className="absolute bottom-3 right-3 flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      setWireframeMode(p => !p)
+                      // Toggle wireframe on all meshes
+                      const map = (window as any).__stlViewerMeshMap as Map<string, any> | undefined
+                      if (map) {
+                        for (const [, data] of map) {
+                          if (data?.mesh?.material) {
+                            data.mesh.material.wireframe = !wireframeMode
+                            data.mesh.material.needsUpdate = true
+                          }
+                        }
+                      }
+                    }}
+                    className={`text-xs px-3 py-1.5 rounded-lg transition backdrop-blur-sm border
+                      ${wireframeMode
+                        ? 'bg-violet-500/20 text-violet-300 border-violet-500/40'
+                        : 'bg-gray-800/80 hover:bg-gray-700/90 text-gray-400 hover:text-gray-200 border-gray-700/50'}`}
+                  >
+                    {wireframeMode ? 'Wire' : 'Wire'}
+                  </button>
                   <button
                     onClick={() => setAnalyzeMode(p => !p)}
                     className={`text-xs px-3 py-1.5 rounded-lg transition backdrop-blur-sm border
