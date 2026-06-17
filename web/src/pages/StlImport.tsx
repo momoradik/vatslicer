@@ -2550,6 +2550,20 @@ export default function StlImport() {
                         className="flex-1 text-[9px] py-1.5 rounded bg-red-900/30 text-red-400 hover:bg-red-900/50 transition">
                         Suction
                       </button>
+                      <button onClick={async () => {
+                        if (!selected) return
+                        try {
+                          const resp = await fetch(selected.url)
+                          const blob = await resp.blob()
+                          const fd = new FormData()
+                          fd.append('stlFile', blob, selected.fileName)
+                          const result = await supportV2Api.islandCheck(fd)
+                          console.log(`[Islands] ${result.riskCount} risks (${result.highRiskCount} high), lowest Z=${result.lowestUnsupportedZ.toFixed(1)}mm`)
+                        } catch (err) { console.error('Island check failed:', err) }
+                      }}
+                        className="flex-1 text-[9px] py-1.5 rounded bg-orange-900/30 text-orange-400 hover:bg-orange-900/50 transition">
+                        Islands
+                      </button>
                     </div>
 
                     {/* Drain hole warnings */}

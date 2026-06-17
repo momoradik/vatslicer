@@ -283,6 +283,30 @@ export const supportV2Api = {
     }>('/support-v2/suction-check', fd, {
       headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000,
     }).then(r => r.data),
+  /** Predict island/floating geometry risks */
+  islandCheck: (fd: FormData) =>
+    http.post<{
+      riskCount: number; highRiskCount: number; lowestUnsupportedZ: number
+      risks: { zMm: number; areaMm2: number; risk: string; x: number; y: number; z: number }[]
+    }>('/support-v2/island-check', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000,
+    }).then(r => r.data),
+  /** Check for thin walls */
+  thinWallCheck: (fd: FormData) =>
+    http.post<{
+      thinWallCount: number; minWallThicknessMm: number
+      warnings: { x: number; y: number; z: number; wallThicknessMm: number }[]
+    }>('/support-v2/thin-wall-check', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000,
+    }).then(r => r.data),
+  /** Compute peel force profile */
+  peelForce: (fd: FormData) =>
+    http.post<{
+      maxPeelForceN: number; maxPeelForceZ: number; avgPeelForceN: number
+      highStressLayers: number; totalLayers: number
+    }>('/support-v2/peel-force', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000,
+    }).then(r => r.data),
 }
 
 // ── Prep Tools (drain holes, support optimization) ───────────────────
