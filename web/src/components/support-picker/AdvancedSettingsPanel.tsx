@@ -36,27 +36,32 @@ export interface AdvancedSupportSettings {
   raftThicknessMm: number
 }
 
+// Preset values grounded in ChiTuBox/Lychee/AmeraLabs published defaults:
+// - Tip diameter: Light 0.3mm / Medium 0.4mm / Heavy 0.5mm (ChiTuBox confirmed)
+// - Contact depth: 0.1mm (Lychee visible) to 0.2mm (ChiTuBox default)
+// - Shaft/middle: ~0.8mm; bottom/lower ~1.0-1.2mm
+// - Raft: ~1.0mm thick, ~1.0mm height, footprint ~110%
 const PRESET_VALUES: Record<Exclude<SupportPresetName, 'custom'>, Omit<AdvancedSupportSettings, 'sizingMode' | 'preset'>> = {
   light: {
-    topTouchShape: 'sphere', topContactDepthMm: 0.2, topTipUpperDiaMm: 0.4, topTipLowerDiaMm: 0.3, topTipAngleDeg: 45,
-    topConnectionShape: 'cone', topConnectionLengthMm: 1.0,
+    topTouchShape: 'sphere', topContactDepthMm: 0.1, topTipUpperDiaMm: 0.3, topTipLowerDiaMm: 0.2, topTipAngleDeg: 45,
+    topConnectionShape: 'cone', topConnectionLengthMm: 0.8,
     middlePillarDiaMm: 0.6, middlePillarShape: 'cylinder',
-    bottomBaseDiaMm: 2.0, bottomBaseThicknessMm: 0.8,
-    raftThicknessMm: 0.3,
+    bottomBaseDiaMm: 1.0, bottomBaseThicknessMm: 0.5,
+    raftThicknessMm: 0.8,
   },
   medium: {
-    topTouchShape: 'sphere', topContactDepthMm: 0.3, topTipUpperDiaMm: 0.6, topTipLowerDiaMm: 0.4, topTipAngleDeg: 45,
-    topConnectionShape: 'cone', topConnectionLengthMm: 1.5,
-    middlePillarDiaMm: 1.0, middlePillarShape: 'cylinder',
-    bottomBaseDiaMm: 3.0, bottomBaseThicknessMm: 1.0,
-    raftThicknessMm: 0.5,
+    topTouchShape: 'sphere', topContactDepthMm: 0.15, topTipUpperDiaMm: 0.4, topTipLowerDiaMm: 0.3, topTipAngleDeg: 45,
+    topConnectionShape: 'cone', topConnectionLengthMm: 1.0,
+    middlePillarDiaMm: 0.8, middlePillarShape: 'cylinder',
+    bottomBaseDiaMm: 1.2, bottomBaseThicknessMm: 0.8,
+    raftThicknessMm: 1.0,
   },
   heavy: {
-    topTouchShape: 'sphere', topContactDepthMm: 0.4, topTipUpperDiaMm: 1.0, topTipLowerDiaMm: 0.6, topTipAngleDeg: 45,
-    topConnectionShape: 'cone', topConnectionLengthMm: 2.0,
-    middlePillarDiaMm: 1.6, middlePillarShape: 'cylinder',
-    bottomBaseDiaMm: 4.0, bottomBaseThicknessMm: 1.5,
-    raftThicknessMm: 0.8,
+    topTouchShape: 'sphere', topContactDepthMm: 0.2, topTipUpperDiaMm: 0.5, topTipLowerDiaMm: 0.4, topTipAngleDeg: 45,
+    topConnectionShape: 'cone', topConnectionLengthMm: 1.5,
+    middlePillarDiaMm: 1.0, middlePillarShape: 'cylinder',
+    bottomBaseDiaMm: 1.5, bottomBaseThicknessMm: 1.0,
+    raftThicknessMm: 1.2,
   },
 }
 

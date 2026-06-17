@@ -48,14 +48,17 @@ const DEFAULT_SETTINGS: ObjectSettings = {
 // All values are RADII in mm. Both manual and auto support paths read from here.
 // The backend expects radii for pinRadius, backRadius, pillarRadius, baseRadius.
 
+// Radii in mm. Grounded in ChiTuBox/Lychee defaults:
+// Tip dia: Light 0.3mm / Medium 0.4mm / Heavy 0.5mm → radii 0.15/0.2/0.25
+// Shaft: ~0.8mm dia → 0.4r; Bottom: ~1.0-1.2mm dia → 0.5-0.6r
 const SUPPORT_PRESETS: Record<string, { pin: number; back: number; pillar: number; base: number }> = {
-  'light':          { pin: 0.1,  back: 0.3,  pillar: 0.3,  base: 1.2 },
-  'medium':         { pin: 0.2,  back: 0.5,  pillar: 0.5,  base: 2.0 },
-  'heavy':          { pin: 0.4,  back: 0.75, pillar: 0.75, base: 3.0 },
-  'point-tip':      { pin: 0.08, back: 0.3,  pillar: 0.35, base: 1.0 },
-  'needle-tip':     { pin: 0.05, back: 0.2,  pillar: 0.3,  base: 1.0 },
-  'mushroom-tip':   { pin: 0.3,  back: 0.5,  pillar: 0.5,  base: 2.0 },
-  'cross-tip':      { pin: 0.3,  back: 0.5,  pillar: 0.5,  base: 2.2 },
+  'light':          { pin: 0.15, back: 0.25, pillar: 0.3,  base: 0.5 },
+  'medium':         { pin: 0.2,  back: 0.35, pillar: 0.4,  base: 0.6 },
+  'heavy':          { pin: 0.25, back: 0.4,  pillar: 0.5,  base: 0.75 },
+  'point-tip':      { pin: 0.08, back: 0.2,  pillar: 0.3,  base: 0.5 },
+  'needle-tip':     { pin: 0.05, back: 0.15, pillar: 0.25, base: 0.5 },
+  'mushroom-tip':   { pin: 0.2,  back: 0.35, pillar: 0.4,  base: 0.6 },
+  'cross-tip':      { pin: 0.2,  back: 0.35, pillar: 0.4,  base: 0.65 },
 }
 
 // ── Independent mesh-based ground truth (for reconciliation completeness test) ─

@@ -29,20 +29,21 @@ public static class SupportSizer
     /// <summary>Safety factor applied to all force-based sizing.</summary>
     public const float SF = 2.0f;
 
-    /// <summary>Minimum tip radius (mm). Floor for visibility: 0.25mm = 0.5mm diameter.</summary>
-    public const float R_TIP_MIN = 0.25f;
+    /// <summary>Minimum tip radius (mm). ChiTuBox Light tip dia 0.3mm → radius 0.15mm.</summary>
+    public const float R_TIP_MIN = 0.15f;
 
-    /// <summary>Minimum pillar radius (mm).</summary>
+    /// <summary>Minimum pillar radius (mm). Shaft dia ~0.6mm → radius 0.3mm.</summary>
     public const float R_PILLAR_MIN = 0.3f;
 
-    /// <summary>Base flare multiplier relative to pillar radius.</summary>
-    public const float BASE_FLARE = 2.7f;
+    /// <summary>Base flare multiplier relative to pillar radius. ChiTuBox ~1.5x.</summary>
+    public const float BASE_FLARE = 1.5f;
 
     /// <summary>Contact sphere radius = tip radius * this factor.</summary>
-    public const float CONTACT_SPHERE_SCALE = 1.6f;
+    public const float CONTACT_SPHERE_SCALE = 1.4f;
 
-    /// <summary>Contact penetration depth into the model surface (mm).</summary>
-    public const float CONTACT_DEPTH = 0.3f;
+    /// <summary>Contact penetration depth into the model surface (mm).
+    /// ChiTuBox 0.2mm, Lychee 0.1mm visible / 0.15mm hidden. Default 0.15mm.</summary>
+    public const float CONTACT_DEPTH = 0.15f;
 
     /// <summary>Pillar stiffness coefficient: radius grows by this * height to resist sway.</summary>
     public const float K_STIFF = 0.004f;

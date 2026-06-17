@@ -71,18 +71,22 @@ public static class SupportEngineV2
         public float LayerHeightMm { get; init; } = 3.0f;
         public float OverhangAngleDeg { get; init; } = 45f;
         public float DensityFactor { get; init; } = 0.5f;
-        public float MinSpacingMm { get; init; } = 2.0f;
-        public float MaxSpacingMm { get; init; } = 8.0f;
+        /// <summary>Min support spacing (Touch Tip Distance). AmeraLabs: 1.0mm optimal. Default 1.5.</summary>
+        public float MinSpacingMm { get; init; } = 1.5f;
+        /// <summary>Max support spacing at low density.</summary>
+        public float MaxSpacingMm { get; init; } = 6.0f;
 
-        // Pinhead
+        // Pinhead — ChiTuBox Medium: tip dia 0.4mm → radius 0.2, contact depth 0.15mm
         public float PinRadiusMm { get; init; } = 0.2f;
-        public float BackRadiusMm { get; init; } = 0.5f;
+        public float BackRadiusMm { get; init; } = 0.35f;
         public float HeadWidthMm { get; init; } = 1.0f;
-        public float PenetrationMm { get; init; } = 0.05f;
+        /// <summary>Contact penetration into model surface. ChiTuBox 0.2mm, Lychee 0.1mm. Default 0.1mm.</summary>
+        public float PenetrationMm { get; init; } = 0.1f;
 
-        // Pillar
-        public float PillarRadiusMm { get; init; } = 0.5f;
-        public float BaseRadiusMm { get; init; } = 2.0f;
+        // Pillar — shaft dia ~0.8mm → radius 0.4; bottom dia ~1.2mm → radius 0.6
+        public float PillarRadiusMm { get; init; } = 0.4f;
+        public float BaseRadiusMm { get; init; } = 0.6f;
+        /// <summary>Raft/base height. ChiTuBox ~1.0mm.</summary>
         public float BaseHeightMm { get; init; } = 1.0f;
         /// <summary>
         /// Radius increase per mm of pillar descent. Higher = thicker base.
@@ -137,9 +141,9 @@ public static class SupportEngineV2
         /// <summary>Enable individual mini-raft pads under each support base.</summary>
         public bool EnableMiniRafts { get; init; } = true;
         /// <summary>Extra margin beyond the support base for mini rafts (mm).</summary>
-        public float RaftMarginMm { get; init; } = 1.5f;
-        /// <summary>Thickness of mini-raft pads (mm).</summary>
-        public float RaftThicknessMm { get; init; } = 0.3f;
+        public float RaftMarginMm { get; init; } = 1.0f;
+        /// <summary>Thickness of mini-raft pads (mm). ChiTuBox ~1.0mm.</summary>
+        public float RaftThicknessMm { get; init; } = 1.0f;
 
         // Validation
         public float MinSafetyFactor { get; init; } = 2.0f;
@@ -227,7 +231,8 @@ public static class SupportEngineV2
         /// <summary>Cell opening size — grid cell width or hex side length (mm).</summary>
         public float FullPlateRaftCellSizeMm { get; init; } = 3.0f;
         /// <summary>Raft area ratio (%). Raft footprint = model XY projection scaled by this ratio. 115 = 15% larger than model.</summary>
-        public float RaftAreaRatioPct { get; init; } = 115f;
+        /// <summary>Raft footprint as % of model XY projection. ChiTuBox ~110%.</summary>
+        public float RaftAreaRatioPct { get; init; } = 110f;
         /// <summary>Skate raft slope angle (degrees) for the outer peel edge.</summary>
         public float RaftSlopeDeg { get; init; } = 45f;
         /// <summary>Grid/hex cell opening size (mm).</summary>
