@@ -667,6 +667,53 @@ export default function StlImport() {
     setSelectedId(null); _savedSelectedId = null
   }
 
+  // ── Project save/load ──
+  const saveProject = () => {
+    const project = {
+      version: 1,
+      name: 'VATSlicer Project',
+      createdAt: new Date().toISOString(),
+      models: models.map(m => ({
+        fileName: m.name,
+        positionX: m.transform.x, positionY: m.transform.y, positionZ: m.transform.z,
+        rotationX: m.transform.rotX, rotationY: m.transform.rotY, rotationZ: m.transform.rotZ,
+        scale: m.transform.scaleX,
+        manualSupports: (m.manualSupports?.points ?? []).map((p: any) => ({
+          id: p.id, x: p.x, y: p.y, z: p.z, nx: p.nx, ny: p.ny, nz: p.nz,
+          shaftDiameterMm: p.shaftDiameterMm ?? 1.0, type: p.type ?? 'medium',
+        })),
+      })),
+      printerId: selectedPrinterId,
+      profileId: selectedProfileId,
+      supportOptions: supportOptions,
+    }
+    const json = JSON.stringify(project, null, 2)
+    const blob = new Blob([json], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `project_${Date.now()}.vatproj`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const loadProject = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const proj = JSON.parse(reader.result as string)
+        if (proj.printerId) setSelectedPrinterId(proj.printerId)
+        if (proj.profileId) setSelectedProfileId(proj.profileId)
+        if (proj.supportOptions) setSupportOptions(proj.supportOptions)
+        console.log('[Project] Loaded:', proj.name, proj.models?.length, 'models')
+      } catch (err) { console.error('Failed to load project:', err) }
+    }
+    reader.readAsText(file)
+    e.target.value = '' // allow re-selecting same file
+  }
+
   const undo = () => {
     const entry = _undoStack.pop()
     if (!entry) return
@@ -1872,6 +1919,15 @@ export default function StlImport() {
               {slicing ? 'Slicing...' : sliceStale && sliceResult ? 'Re-Slice' : 'Slice'}
             </button>
 
+            <button onClick={saveProject} title="Save project (.vatproj)"
+              className="text-xs px-2 py-1.5 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-teal-300 hover:border-teal-500/40 transition">
+              Save
+            </button>
+            <label title="Load project (.vatproj)"
+              className="text-xs px-2 py-1.5 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-teal-300 hover:border-teal-500/40 transition cursor-pointer">
+              Load
+              <input type="file" accept=".vatproj,.json" className="hidden" onChange={loadProject} />
+            </label>
             <button onClick={clearAll}
               className="text-xs px-2 py-1 rounded text-red-400/70 hover:text-red-300 hover:bg-red-900/20 transition">
               Clear All
