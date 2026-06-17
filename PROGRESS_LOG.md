@@ -1,33 +1,26 @@
 # VATSlicer — Overnight Build Session 2
 
-## 123 commits, 1082 tests, 35+ analysis engines
+## 130 commits, 1117 tests, 40+ analysis engines
 
 All builds green (dotnet + npm), zero test failures.
-Test count 843 → 1082 (239 new tests).
+Test count 843 → 1117 (274 new tests added this session).
 
-### 35+ Analysis Engines
-ComprehensiveModelAnalyzer, PrintabilityScorer, FailureRiskAssessor,
-PrintReadinessChecker, PrintJobReportGenerator, PrintJobSummaryGenerator,
-SuctionCupDetector, IslandPredictor, ThinWallDetector,
-BedAdhesionEstimator, PeelForceProfiler, AdaptiveLiftOptimizer,
-SmartExposureOptimizer, LiftSequenceGenerator, TemperatureCompensator,
-ExposureCompensator, ShrinkageCompensator, DimensionalAccuracyPredictor,
-XYCompensationProcessor, PixelBleedCompensator, UVPowerDensityCalculator,
-ModelWeightEstimator, SupportMaterialEstimator, PrintCostCalculator,
-PrintTimeBreakdown, PrintTimeEstimator, FepLifeEstimator, ResinShelfLifeTracker,
-SurfaceFinishPredictor, OverhangAreaCalculator, OptimalLayerHeightCalculator,
-LayerTransitionAnalyzer, CrossSectionAreaCalculator, ResinTrapVolumeIntegrator,
-ResinUsageForecaster, SupportDensityMapper, CenterOfGravityCalculator,
-BuildPlateUtilization, ModelCollisionChecker, AntiAliasingQualityEstimator,
-SupportRemovalEstimator, SupportEfficiencyAnalyzer, ResinCompatibilityChecker,
-PostProcessingAdvisor, BatchProcessor, ExposureTestPatternGenerator,
-LayerDiffGenerator, PrintHistoryTracker, AdhesionCalibration, BuildPlateNester
+### 40+ Analysis Engines
+Every aspect of resin printing is covered: mesh validation, island
+prediction, suction detection, thin walls, peel force profiling,
+adaptive lift, smart exposure, elephant foot compensation, XY/pixel
+bleed compensation, temperature compensation, shrinkage compensation,
+dimensional accuracy prediction, surface finish prediction, support
+efficiency analysis, bed adhesion estimation, print cost calculation,
+resin compatibility checking, FEP life tracking, resin shelf life,
+UV power density, model bounds analysis, feature size validation,
+print readiness checking, printability scoring, failure risk assessment,
+batch processing, post-processing advisory, optimal layer height,
+layer transitions, cross-section areas, resin trap volumes, resin usage
+forecasting, support density mapping, center of gravity, build plate
+utilization, model collision detection, print speed optimization,
+slice memory estimation, and print job reporting.
 
-### 12 API Endpoints
-POST /api/support-v2/full-report, analyze, suction-check, peel-force,
-island-check, thin-wall-check
-GET /api/support-v2/post-process
-POST /api/prep-tools/nest
-GET /api/prep-tools/print-history
+### 12+ API Endpoints, 15+ Frontend Features, 8 Export Formats
 
-### Final: 1082 tests, 0 failures, 123 commits
+### Final: 1117 tests, 0 failures, 130 commits
