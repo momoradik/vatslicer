@@ -564,7 +564,8 @@ export default function StlImport() {
   // ── Add file ────────────────────────────────────────────────────────────────
 
   const addFile = useCallback((file: File) => {
-    if (!file.name.toLowerCase().endsWith('.stl')) return
+    const ext = file.name.toLowerCase()
+    if (!ext.endsWith('.stl') && !ext.endsWith('.obj') && !ext.endsWith('.3mf')) return
     const url = URL.createObjectURL(file)
     const id = mkId()
     const entry: ModelState = {
@@ -1980,7 +1981,7 @@ export default function StlImport() {
                                   bg-gray-800/80 hover:bg-gray-700/90 text-gray-400 hover:text-gray-200
                                   transition backdrop-blur-sm border border-gray-700/50">
                   + Add Model
-                  <input type="file" accept=".stl" multiple className="hidden" onChange={handleFileInput} />
+                  <input type="file" accept=".stl,.obj,.3mf" multiple className="hidden" onChange={handleFileInput} />
                 </label>
               </>
             ) : (
@@ -1993,7 +1994,7 @@ export default function StlImport() {
                 <p className="text-xs text-gray-600">Multiple files supported</p>
                 <label className="cursor-pointer text-xs px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 transition text-gray-300">
                   or Browse files
-                  <input type="file" accept=".stl" multiple className="hidden" onChange={handleFileInput} />
+                  <input type="file" accept=".stl,.obj,.3mf" multiple className="hidden" onChange={handleFileInput} />
                 </label>
               </div>
             )}

@@ -131,8 +131,8 @@ public sealed class SupportV2Controller : ControllerBase
         if (Enum.TryParse<LatticeBase.LatticePattern>(baseLatticePattern, true, out var lp))
             lattice = lp;
 
-        // Parse directly from STL to preserve file normals (outward-pointing from CAD)
-        var mesh = StlMesh.FromBinary(data);
+        // Parse model file — auto-detects binary STL, ASCII STL, OBJ, 3MF
+        var mesh = StlMesh.FromFile(data, stlFile.FileName);
         // B2: On large meshes, recompute normals from vertex winding to guard against
         // flipped/zero normals that cause mis-detected overhangs
         if (mesh.TriangleCount > 50_000)
