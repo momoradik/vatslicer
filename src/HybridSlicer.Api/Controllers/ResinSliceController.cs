@@ -70,6 +70,18 @@ public sealed class ResinSliceController : ControllerBase
         var profile = await _profileRepo.GetByIdAsync(ppid, ct);
         if (profile is null) return BadRequest("Print profile not found.");
 
+        // Validate printer parameters
+        if (printer.ResolutionX <= 0 || printer.ResolutionY <= 0)
+            return BadRequest($"Printer resolution must be positive (got {printer.ResolutionX}x{printer.ResolutionY}).");
+        if (printer.BedWidthMm <= 0 || printer.BedDepthMm <= 0)
+            return BadRequest("Printer build plate dimensions must be positive.");
+        if (profile.LayerHeightMm <= 0 || profile.LayerHeightMm > 1.0)
+            return BadRequest($"Layer height must be between 0.001 and 1.0 mm (got {profile.LayerHeightMm}).");
+
+        // Validate scale
+        if (scale <= 0 || scale > 100)
+            return BadRequest($"Scale must be between 0.001 and 100 (got {scale}).");
+
         // Read STL bytes
         byte[] stlData;
         using (var ms = new MemoryStream())
