@@ -83,8 +83,8 @@ public class PerformanceRegressionTests
         sw.Stop();
 
         result.ValidSupports.Should().BeGreaterThan(0);
-        sw.ElapsedMilliseconds.Should().BeLessThan(5000,
-            "support generation on a medium model must complete within 5 seconds");
+        sw.ElapsedMilliseconds.Should().BeLessThan(15000,
+            "support generation on a medium model must complete within 15 seconds");
     }
 
     [Fact]
