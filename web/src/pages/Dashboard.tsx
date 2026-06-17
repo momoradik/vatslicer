@@ -164,18 +164,36 @@ export default function Dashboard() {
         <h2 className="text-2xl font-semibold text-white">Dashboard</h2>
         <Link
           to="/import"
-          className="px-4 py-2 bg-primary/80 hover:bg-primary text-white text-sm rounded-lg transition-colors"
+          className="px-4 py-2 bg-teal-500 hover:bg-teal-400 text-white text-sm font-medium rounded-lg transition-all shadow-sm hover:shadow-md"
         >
           + New Job
         </Link>
       </div>
 
       {isLoading ? (
-        <p className="text-gray-500">Loading jobs…</p>
+        <div className="grid gap-4">
+          {[1, 2, 3].map(i => (
+            <div key={i} className="bg-gray-900 border border-gray-800 rounded-xl p-4 animate-pulse">
+              <div className="flex items-center gap-3">
+                <div className="h-4 w-40 bg-gray-800 rounded" />
+                <div className="ml-auto h-6 w-20 bg-gray-800 rounded-full" />
+              </div>
+              <div className="h-3 w-24 bg-gray-800/50 rounded mt-2" />
+            </div>
+          ))}
+        </div>
       ) : jobs.length === 0 ? (
-        <div className="text-center py-20 text-gray-600">
-          <p className="text-4xl mb-4">📦</p>
-          <p>No jobs yet. Import an STL to get started.</p>
+        <div className="text-center py-24">
+          <svg className="w-16 h-16 mx-auto mb-4 text-gray-700" fill="none" stroke="currentColor" strokeWidth="1" viewBox="0 0 24 24">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+            <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+            <line x1="12" y1="22.08" x2="12" y2="12" />
+          </svg>
+          <p className="text-gray-500 text-sm">No jobs yet</p>
+          <p className="text-gray-600 text-xs mt-1">Import a model to get started</p>
+          <Link to="/import" className="inline-block mt-4 px-4 py-2 bg-teal-500 text-white text-sm rounded-lg hover:bg-teal-400 transition">
+            Import Model
+          </Link>
         </div>
       ) : (
         <div className="grid gap-4">
