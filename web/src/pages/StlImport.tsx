@@ -453,6 +453,7 @@ export default function StlImport() {
   const [spacing, setSpacing]         = useState(_savedSpacing)
   const [showSettings, setShowSettings] = useState(false)
   const [analyzeMode, setAnalyzeMode] = useState(false)
+  const [drainHoles, setDrainHoles] = useState<{ x: number; y: number; z: number; reason: string; trapVolumeMm3: number }[]>([])
 
   // ── Keyboard shortcuts (Ctrl+Z undo, Ctrl+S save project) ──
   useEffect(() => {
@@ -2501,17 +2502,28 @@ export default function StlImport() {
                           const fd = new FormData()
                           fd.append('stlFile', blob, selected.fileName)
                           const result = await supportV2Api.suggestDrainHoles(fd)
-                          if (result.holes.length > 0) {
-                            alert(`Found ${result.holes.length} resin trap(s):\n${result.holes.map(h => `• ${h.reason} (${h.trapVolumeMm3.toFixed(0)}mm³)`).join('\n')}`)
-                          } else {
-                            alert('No resin traps detected — no drain holes needed')
-                          }
+                          setDrainHoles(result.holes.map(h => ({ x: h.x, y: h.y, z: h.z, reason: h.reason, trapVolumeMm3: h.trapVolumeMm3 })))
+                          if (result.holes.length === 0)
+                            console.log('[DrainHoles] No resin traps detected')
                         } catch (err) { console.error('Drain hole analysis failed:', err) }
                       }}
                         className="flex-1 text-[9px] py-1.5 rounded bg-cyan-900/30 text-cyan-400 hover:bg-cyan-900/50 transition">
                         Drain Holes
                       </button>
                     </div>
+
+                    {/* Drain hole warnings */}
+                    {drainHoles.length > 0 && (
+                      <div className="mt-2 bg-amber-900/15 border border-amber-800/30 rounded-lg p-2">
+                        <div className="text-[9px] font-semibold text-amber-400 mb-1">Resin Traps ({drainHoles.length})</div>
+                        {drainHoles.map((h, i) => (
+                          <div key={i} className="text-[8px] text-amber-300/80 flex justify-between">
+                            <span>{h.reason}</span>
+                            <span className="text-amber-400">{h.trapVolumeMm3.toFixed(0)}mm3</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
 
                     {/* Generate button */}
                     <button onClick={generateAutoSupports} disabled={generating}
