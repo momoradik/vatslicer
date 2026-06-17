@@ -674,10 +674,6 @@ public static class SupportEngineV2
         }
 
         // ── Step 4: Route pillars ────────────────────────────────────────
-        // Supports always route to the build plate (Z=0). The raft is separate
-        // geometry that sits on the plate around/under the support bases — it does
-        // not change support routing. This keeps support behavior identical regardless
-        // of raft shape (Mini/Skate/Grid/Hex all produce the same supports).
         float effectiveBaseZ = 0f;
 
         var routingConfig = new PillarRouter.RoutingConfig
@@ -690,6 +686,27 @@ public static class SupportEngineV2
             MaxBridgeLengthMm = config.MaxBridgeLengthMm,
             CollisionRays = config.CollisionRays,
         };
+
+        // Phase 2: Column occupancy accelerator for fast direct-descent check.
+        // For each XY cell, track the max Z of model geometry. If a support starts
+        // above all geometry in its column, it goes straight down without beam-cast.
+        float columnCellSize = 2.0f;
+        var columnMaxZ = new Dictionary<(int cx, int cy), float>();
+        for (int t = 0; t < mesh.TriangleCount; t++)
+        {
+            var v0 = mesh.Vertices[t * 3]; var v1 = mesh.Vertices[t * 3 + 1]; var v2 = mesh.Vertices[t * 3 + 2];
+            float triMaxZ = Math.Max(v0.Z, Math.Max(v1.Z, v2.Z));
+            // Rasterize triangle footprint into cells (use centroid + vertex cells)
+            foreach (var vert in new[] { v0, v1, v2, (v0 + v1 + v2) / 3f })
+            {
+                int cx = (int)MathF.Floor(vert.X / columnCellSize);
+                int cy = (int)MathF.Floor(vert.Y / columnCellSize);
+                var key = (cx, cy);
+                if (!columnMaxZ.TryGetValue(key, out var existing) || triMaxZ > existing)
+                    columnMaxZ[key] = triMaxZ;
+            }
+        }
+        Serilog.Log.Information("V2 Column grid: {Cells} cells for {Tris} triangles", columnMaxZ.Count, mesh.TriangleCount);
 
         var routes = new List<(string id, PillarRouter.PillarRoute route)>();
         // Build lookup for point weight recommendations
@@ -787,8 +804,8 @@ public static class SupportEngineV2
             }
 
             float startRadius = Math.Max(pinhead.BackRadius, rCfg.PillarRadiusMm);
-            // A1: Always route from JunctionPoint (same point used for mesh gen)
             var routeStart = pinhead.JunctionPoint;
+
             var route = PillarRouter.Route(routeStart, startRadius, bvh, rCfg);
 
             if (!route.ReachesGround && manualPointIds.Contains(id))
