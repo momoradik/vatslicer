@@ -128,6 +128,8 @@ public sealed class StlMesh
         string ext = (fileName ?? "").ToLowerInvariant();
         if (ext.EndsWith(".obj"))
             return FromObj(System.Text.Encoding.UTF8.GetString(data));
+        if (ext.EndsWith(".3mf"))
+            return From3mf(data);
 
         // Check if it looks like ASCII STL
         bool looksAscii = false;
@@ -245,6 +247,66 @@ public sealed class StlMesh
                     triNormals.Add(len > 1e-8f ? normal / len : Vector3.UnitZ);
                 }
             }
+        }
+
+        return new StlMesh(triVerts.ToArray(), triNormals.ToArray(), min, max);
+    }
+
+    /// <summary>
+    /// Parse a 3MF file (ZIP containing 3D/3dmodel.model XML).
+    /// </summary>
+    public static StlMesh From3mf(byte[] data)
+    {
+        using var ms = new System.IO.MemoryStream(data);
+        using var archive = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Read);
+
+        // Find the model file (typically 3D/3dmodel.model)
+        var modelEntry = archive.Entries.FirstOrDefault(e =>
+            e.FullName.EndsWith(".model", StringComparison.OrdinalIgnoreCase));
+        if (modelEntry == null)
+            throw new InvalidOperationException("3MF archive does not contain a .model file");
+
+        using var stream = modelEntry.Open();
+        var doc = System.Xml.Linq.XDocument.Load(stream);
+        var ns = doc.Root?.Name.Namespace ?? System.Xml.Linq.XNamespace.None;
+
+        // Parse vertices
+        var verticesList = new List<Vector3>();
+        var meshElement = doc.Descendants(ns + "mesh").FirstOrDefault();
+        if (meshElement == null)
+            throw new InvalidOperationException("3MF model has no mesh element");
+
+        foreach (var vertex in meshElement.Descendants(ns + "vertex"))
+        {
+            float x = float.Parse(vertex.Attribute("x")?.Value ?? "0");
+            float y = float.Parse(vertex.Attribute("y")?.Value ?? "0");
+            float z = float.Parse(vertex.Attribute("z")?.Value ?? "0");
+            verticesList.Add(new Vector3(x, y, z));
+        }
+
+        // Parse triangles
+        var triVerts = new List<Vector3>();
+        var triNormals = new List<Vector3>();
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+
+        foreach (var triangle in meshElement.Descendants(ns + "triangle"))
+        {
+            int v1 = int.Parse(triangle.Attribute("v1")?.Value ?? "0");
+            int v2 = int.Parse(triangle.Attribute("v2")?.Value ?? "0");
+            int v3 = int.Parse(triangle.Attribute("v3")?.Value ?? "0");
+
+            if (v1 >= verticesList.Count || v2 >= verticesList.Count || v3 >= verticesList.Count)
+                continue;
+
+            var a = verticesList[v1]; var b = verticesList[v2]; var c = verticesList[v3];
+            triVerts.Add(a); triVerts.Add(b); triVerts.Add(c);
+            min = Vector3.Min(min, Vector3.Min(a, Vector3.Min(b, c)));
+            max = Vector3.Max(max, Vector3.Max(a, Vector3.Max(b, c)));
+
+            var normal = Vector3.Cross(b - a, c - a);
+            float len = normal.Length();
+            triNormals.Add(len > 1e-8f ? normal / len : Vector3.UnitZ);
         }
 
         return new StlMesh(triVerts.ToArray(), triNormals.ToArray(), min, max);
