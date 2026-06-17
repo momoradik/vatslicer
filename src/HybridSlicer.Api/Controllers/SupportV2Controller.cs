@@ -696,6 +696,30 @@ public sealed class SupportV2Controller : ControllerBase
         });
     }
 
+    /// <summary>Detect suction cup geometry that risks print failure.</summary>
+    [HttpPost("suction-check")]
+    [RequestSizeLimit(200_000_000)]
+    public async Task<IActionResult> SuctionCheck(
+        [FromForm] IFormFile stlFile,
+        CancellationToken ct = default)
+    {
+        if (stlFile is null) return BadRequest("STL required.");
+        byte[] data; using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
+        var mesh = StlMesh.FromFile(data, stlFile.FileName);
+        var warnings = Analysis.SuctionCupDetector.Detect(mesh);
+        return Ok(new
+        {
+            engine = "suction-check",
+            warningCount = warnings.Count,
+            warnings = warnings.Select(w => new
+            {
+                x = w.Position.X, y = w.Position.Y, z = w.Position.Z,
+                depthMm = w.DepthMm, areaRatio = w.AreaRatio,
+                severity = w.Severity, description = w.Description,
+            }),
+        });
+    }
+
     /// <summary>
     /// Export both model and support meshes as a combined ZIP containing two STL files.
     /// Compatible with 3MF-style workflows where model and supports are separate objects.
