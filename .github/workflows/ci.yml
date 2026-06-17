@@ -1,4 +1,4 @@
-name: CI — Build + Test Gate
+name: CI — Build + Test + Perf Gate
 
 on:
   push:
@@ -25,11 +25,14 @@ jobs:
       - name: Restore NuGet packages
         run: dotnet restore HybridSlicer.sln
 
-      - name: Build backend
+      - name: Build backend (Release)
         run: dotnet build HybridSlicer.sln --no-restore --configuration Release
 
-      - name: Run backend tests
+      - name: Run all tests
         run: dotnet test HybridSlicer.sln --no-build --configuration Release --verbosity normal --logger "trx;LogFileName=test-results.trx"
+
+      - name: Run performance benchmarks
+        run: dotnet test tests/HybridSlicer.Infrastructure.Tests --no-build --configuration Release --filter "PerformanceRegression" --verbosity normal --logger "trx;LogFileName=perf-results.trx"
 
       - name: Install frontend dependencies
         working-directory: web
@@ -45,3 +48,10 @@ jobs:
         with:
           name: test-results
           path: '**/TestResults/*.trx'
+
+      - name: Upload perf results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results
+          path: '**/TestResults/perf-results.trx'
