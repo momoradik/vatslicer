@@ -119,6 +119,138 @@ public sealed class StlMesh
     }
 
     /// <summary>
+    /// Auto-detect format and parse: binary STL, ASCII STL, or OBJ.
+    /// </summary>
+    public static StlMesh FromFile(byte[] data, string? fileName = null)
+    {
+        // Check for ASCII STL: starts with "solid " (but binary STL can too if header has "solid")
+        // Heuristic: if first non-whitespace is "solid" AND file doesn't match binary STL size, try ASCII
+        string ext = (fileName ?? "").ToLowerInvariant();
+        if (ext.EndsWith(".obj"))
+            return FromObj(System.Text.Encoding.UTF8.GetString(data));
+
+        // Check if it looks like ASCII STL
+        bool looksAscii = false;
+        if (data.Length > 5)
+        {
+            var header = System.Text.Encoding.ASCII.GetString(data, 0, Math.Min(80, data.Length)).TrimStart();
+            looksAscii = header.StartsWith("solid", StringComparison.OrdinalIgnoreCase);
+            if (looksAscii && data.Length >= 84)
+            {
+                // Double-check: if binary size matches, it's binary (binary STL can start with "solid" in header)
+                var triCount = BitConverter.ToUInt32(data, 80);
+                if (84 + triCount * 50 == (ulong)data.Length)
+                    looksAscii = false;
+            }
+        }
+
+        if (looksAscii || ext.EndsWith(".stla"))
+            return FromAsciiStl(System.Text.Encoding.UTF8.GetString(data));
+
+        return FromBinary(data);
+    }
+
+    /// <summary>
+    /// Parse an ASCII STL string.
+    /// </summary>
+    public static StlMesh FromAsciiStl(string text)
+    {
+        var verts = new List<Vector3>();
+        var normals = new List<Vector3>();
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+        var currentNormal = Vector3.UnitZ;
+        var facetVerts = new List<Vector3>(3);
+
+        foreach (var rawLine in text.Split('\n'))
+        {
+            var line = rawLine.Trim();
+            if (line.StartsWith("facet normal", StringComparison.OrdinalIgnoreCase))
+            {
+                var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 5)
+                    currentNormal = new Vector3(float.Parse(parts[2]), float.Parse(parts[3]), float.Parse(parts[4]));
+                facetVerts.Clear();
+            }
+            else if (line.StartsWith("vertex", StringComparison.OrdinalIgnoreCase))
+            {
+                var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 4)
+                {
+                    var v = new Vector3(float.Parse(parts[1]), float.Parse(parts[2]), float.Parse(parts[3]));
+                    facetVerts.Add(v);
+                    min = Vector3.Min(min, v);
+                    max = Vector3.Max(max, v);
+                }
+            }
+            else if (line.StartsWith("endfacet", StringComparison.OrdinalIgnoreCase))
+            {
+                if (facetVerts.Count == 3)
+                {
+                    verts.AddRange(facetVerts);
+                    normals.Add(currentNormal);
+                }
+                facetVerts.Clear();
+            }
+        }
+
+        return new StlMesh(verts.ToArray(), normals.ToArray(), min, max);
+    }
+
+    /// <summary>
+    /// Parse a Wavefront OBJ string (vertices + faces, no materials).
+    /// </summary>
+    public static StlMesh FromObj(string text)
+    {
+        var objVerts = new List<Vector3>();
+        var triVerts = new List<Vector3>();
+        var triNormals = new List<Vector3>();
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+
+        foreach (var rawLine in text.Split('\n'))
+        {
+            var line = rawLine.Trim();
+            if (line.StartsWith("v ", StringComparison.Ordinal))
+            {
+                var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 4)
+                {
+                    var v = new Vector3(float.Parse(parts[1]), float.Parse(parts[2]), float.Parse(parts[3]));
+                    objVerts.Add(v);
+                    min = Vector3.Min(min, v);
+                    max = Vector3.Max(max, v);
+                }
+            }
+            else if (line.StartsWith("f ", StringComparison.Ordinal))
+            {
+                var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                // Parse face indices (1-based, may include /texcoord/normal)
+                var indices = new List<int>();
+                for (int i = 1; i < parts.Length; i++)
+                {
+                    var idxStr = parts[i].Split('/')[0];
+                    if (int.TryParse(idxStr, out int idx))
+                        indices.Add(idx - 1); // OBJ is 1-based
+                }
+                // Triangulate face (fan from first vertex)
+                for (int i = 1; i < indices.Count - 1; i++)
+                {
+                    var v0 = objVerts[Math.Clamp(indices[0], 0, objVerts.Count - 1)];
+                    var v1 = objVerts[Math.Clamp(indices[i], 0, objVerts.Count - 1)];
+                    var v2 = objVerts[Math.Clamp(indices[i + 1], 0, objVerts.Count - 1)];
+                    triVerts.Add(v0); triVerts.Add(v1); triVerts.Add(v2);
+                    var normal = Vector3.Cross(v1 - v0, v2 - v0);
+                    float len = normal.Length();
+                    triNormals.Add(len > 1e-8f ? normal / len : Vector3.UnitZ);
+                }
+            }
+        }
+
+        return new StlMesh(triVerts.ToArray(), triNormals.ToArray(), min, max);
+    }
+
+    /// <summary>
     /// Recompute face normals from vertex winding order (cross product of edges).
     /// For meshes with unreliable STL normals (flipped/zero), this provides
     /// consistent normals based on the actual geometry. Returns a new mesh.
