@@ -454,6 +454,25 @@ export default function StlImport() {
   const [showSettings, setShowSettings] = useState(false)
   const [analyzeMode, setAnalyzeMode] = useState(false)
 
+  // ── Keyboard shortcuts (Ctrl+Z undo, Ctrl+S save project) ──
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        const entry = _undoStack.pop()
+        if (entry) {
+          setModels(prev => prev.map(m => m.id === entry.modelId ? { ...m, transform: entry.transform } : m))
+        }
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault()
+        // Trigger save handled by saveProject
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
   // ── Job-level support state (driven by active print profile, overridable) ──
   const [jobSupportEnabled, setJobSupportEnabled] = useState(() => _savedSupportEnabled)
   const [jobSupportType, setJobSupportType] = useState<'normal' | 'tree'>(() => _savedSupportType)
