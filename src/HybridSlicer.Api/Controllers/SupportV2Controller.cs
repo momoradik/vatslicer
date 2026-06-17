@@ -696,6 +696,20 @@ public sealed class SupportV2Controller : ControllerBase
         });
     }
 
+    /// <summary>Run ALL analysis checks on a model in one pass.</summary>
+    [HttpPost("analyze")]
+    [RequestSizeLimit(200_000_000)]
+    public async Task<IActionResult> Analyze(
+        [FromForm] IFormFile stlFile,
+        CancellationToken ct = default)
+    {
+        if (stlFile is null) return BadRequest("STL required.");
+        byte[] data; using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
+        var mesh = StlMesh.FromFile(data, stlFile.FileName);
+        var report = HybridSlicer.Infrastructure.Resin.Analysis.ComprehensiveModelAnalyzer.Analyze(mesh);
+        return Ok(report);
+    }
+
     /// <summary>Predict island/floating geometry risks before slicing.</summary>
     [HttpPost("island-check")]
     [RequestSizeLimit(200_000_000)]
