@@ -19,38 +19,49 @@
 - Logging of fast-path vs full-path counts per generation
 
 ### Phase 3: COMPLETE
-- Hollowing: already implemented (HollowedSupport.cs)
-- Mesh auto-repair: already implemented (MeshValidator.cs)
-- Auto-orientation: already implemented (AutoOrientOptimizer.cs, 36 candidate orientations)
-- Suction/drain detection: already implemented (DrainHolePlacer.cs, trapped volume integration)
-- **Build plate nester: NEW** — skyline bottom-left bin packing for multi-part layout
-  - Decreasing-area order, 90-degree rotation, gap/margin config, overflow detection
-  - 6 tests: single/multi placement, no-overlap, overflow, empty, high-count
+- Hollowing: implemented (HollowedSupport.cs, 157 lines)
+- Mesh auto-repair: implemented (MeshValidator.cs, 243 lines)
+- Auto-orientation: implemented (AutoOrientOptimizer.cs, 223 lines, 36 candidates)
+- Suction/drain detection: implemented (DrainHolePlacer.cs, 278 lines)
+- **Build plate nester: NEW** — skyline bottom-left bin packing
+  - 6 tests, API endpoint at POST /api/prep-tools/nest
+
+### Phase 4: PARTIAL
+- **Resin volume/cost estimation**: pixel-counting per layer → volume → cost/weight
+- **Undo/redo hook**: generic useUndoRedo<T> with command pattern, 50-step history
+- **Live slice preview**: already implemented (layer slider + per-layer metadata + image)
+- **Project save/load**: .vatproj data model (from prior session)
+- **Settings page**: app config (API URL, auto-save, export defaults)
+- Remaining: wire undo into workspace, project load/save UI, analyze heatmap overlay
 
 ### UI Polish Pass
-- SVG sidebar icons replacing emoji (Dashboard, Slicer, Printer Setup, Settings)
+- SVG sidebar icons replacing emoji
 - Teal accent color theme with gradient logo mark
-- Smooth fade transitions between pages (150ms opacity crossfade)
-- New Settings page (API URL, auto-save, export defaults, support profile slots)
-- Connection status badge redesign (pill with pulse indicator)
-- Breadcrumb page titles in header
-- Global CSS design system (.btn-primary, .btn-secondary, .card, .card-hover)
+- Smooth fade page transitions
+- Settings page
+- Connection status badge redesign
+- Breadcrumb titles, global CSS design system
 
-### Commit History (this session: 6 commits)
+### Commit History (Session 2: 9 commits)
 ```
+a164ce3 feat: Phase 3 — wire nester API endpoint
+bd1f5d8 feat: Phase 4 — undo/redo hook with command pattern
+782e75d feat: Phase 4 — accurate resin volume, weight, and cost estimation
+2ccca73 docs: update progress log
 6e32f02 feat: Phase 3 — build plate auto-nester (skyline bin packing)
 43cff0e perf: Phase 2 — column occupancy fast-path routing
 4ad05a0 feat: UI polish pass — SVG sidebar icons, page transitions, Settings page
 e7c55a0 feat: Phase 1 — PWMX/PWMS/PWMB exporters for Anycubic Photon Workshop
 064dbde fix: Pairwise bracing respects ReinforcementStartHeightMm guard
-86d5e98 fix: CNC envelope uses [0,Max] not center-is-zero; inner wall CRC uses negative buffer
+86d5e98 fix: CNC envelope [0,Max]; inner wall CRC negative buffer
 ```
 
-### Final State
+### Final State (Session 2)
 - **853 tests pass, 0 failures, 9 skipped**
 - All builds clean (dotnet + npm)
 - Global invariants: zero floaters, preview==print
-- Phases 0-3 complete, Phase 4 partially started from prior session
+- Phases 0-3 fully complete
+- Phase 4 substantially started (volume/cost, undo/redo, slice preview, project model, settings)
 
 ---
 
