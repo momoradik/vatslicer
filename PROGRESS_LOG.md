@@ -1,24 +1,29 @@
 # Progress Log — Overnight Autonomous Build
 
-## Session 2: 2026-06-17 — 36 commits, 887 tests
+## Session 2: 2026-06-17 — 48 commits, 909 tests
 
-### Phases Complete: 0-5 (partial), 6 (partial)
+### Summary
+Complete overnight build session. Phases 0-6 addressed. 48 commits, test count 843→909 (66 new tests). All builds green (dotnet + npm), zero failures.
 
-| Phase | Status | Key Deliverables |
-|-------|--------|-----------------|
-| 0 | COMPLETE | Support core, combo matrix, zero floaters |
-| 1 | COMPLETE | 8 export formats (CTB+vol/cost, CBDDLP, Photon, PWMX/S/B, SL1, ZIP) |
-| 2 | COMPLETE | Column occupancy fast-path routing (~60-85% skip BVH) |
-| 3 | COMPLETE | Hollowing, mesh repair, auto-orient, drain detection, nesting + API |
-| 4 | COMPLETE | Volume/cost, undo/redo, analyze overlay, project save/load, settings, slice preview, keyboard shortcuts |
-| 5 | PARTIAL | P_ADH calibration presets for 7 resin+film combos, wired into sizing engine |
-| 6 | PARTIAL | Golden fingerprint regression tests, performance gate tests (3), input validation |
+### New Features (this session)
+**Export:** PWMX/S/B exporters, CTB volume/cost/machine name, model-named downloads
+**Engine:** Column occupancy fast-path, P_ADH calibration (7 resin presets), accurate print timing
+**Analysis:** Build plate nester + API, resin volume pixel counting, surface area in mesh validation
+**Frontend:** SVG icons, settings page, analyze overlay, project save/load, auto-arrange, auto-orient apply, keyboard shortcuts, drain hole warnings, wireframe toggle, resin type selector, cost breakdown bar, tooltip component, skeleton loaders, 404 page
+**Tests:** 66 new: exporters(13), nester(8), physics(10), calibration(7), analysis(6), mesh(9), integration(4), regression(5), invariant(3), routing(4)
 
-### Test Coverage: 887 tests (44 new this session)
-- 815 Infrastructure + 46 Application + 26 Domain
-- 0 failures, 9 skipped
+### Phase Status
+| Phase | Status | Tests |
+|-------|--------|-------|
+| 0 | COMPLETE | Combo matrix, zero floaters |
+| 1 | COMPLETE | 8 export formats, 13 exporter tests |
+| 2 | COMPLETE | Fast-path routing, 4 routing tests |
+| 3 | COMPLETE | Hollowing, repair, orient, drain, nesting |
+| 4 | COMPLETE | Volume/cost, undo, analyze, save/load, settings, shortcuts |
+| 5 | PARTIAL | P_ADH calibration, 7 resin presets |
+| 6 | PARTIAL | Golden fingerprint, perf gates, preview==print tests |
 
-### Features Built (36 commits)
-**Backend:** PWMX exporters, CTB volume/cost, nester + API, fast-path routing, resin volume pixel counting, P_ADH calibration, API validation
-**Frontend:** SVG sidebar icons, settings page, analyze overlay, project save/load, auto-arrange, keyboard shortcuts overlay, cost breakdown bar, auto-orient rotation apply, branding update
-**Tests:** Exporter round-trip (9), nester (8), auto-orient (3), drain hole (3), mesh repair (4), calibration (7), fingerprint regression (2), performance gates (3), integration pipeline (1)
+### Final State
+- **909 tests pass, 0 failures, 9 skipped**
+- **48 commits** this session
+- All builds clean (dotnet + npm)
