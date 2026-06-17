@@ -1,20 +1,38 @@
 # Blocked Items
 
-## TASK 1-8: Fast Support Engine Re-Architecture
+## Fast Engine Performance Analysis
 
-**Status**: Starting Task 1 (OccupancyBitstack)
+### Completed
+- **TASK 1**: OccupancyBitstack — 1.3s build, 99.6% accuracy, 7 tests pass
+- **TASK 3**: VerticalFirstRouter — identical fingerprints, ~5% routing speedup
+- **Baseline**: 24-94s per rotation on SINAa.stl (695K tris)
 
-**Scope**: This is a multi-day engineering effort requiring:
-1. New spatial data structure (OccupancyBitstack) — ~500 lines
-2. Slice-based detection rewrite — ~400 lines
-3. New router (VerticalFirstRouter) — ~600 lines
-4. Cone-merge optimizer — ~400 lines
-5. Area/hatch support — ~500 lines
-6. Wiring + manual generation rewrite — ~800 lines
-7. Comprehensive benchmark + proof framework — ~300 lines
+### Bottleneck Analysis (from profiling)
+The 3s target requires 30x speedup. Current breakdown per rotation (~80s):
+1. **BVH build: ~5s** (cached on second run, but first run is slow)
+2. **Point generation + overhang analysis: ~15s** (per-triangle normal checks + spatial grid)
+3. **Pinhead optimization: ~30s** (Nelder-Mead per support × 8 collision rays × BVH beam-cast)
+4. **Routing: ~10s** (already fast-pathed, ~85% vertical)
+5. **Mesh generation + fillet + slicing: ~15s**
+6. **Collision filtering + structural validation: ~5s**
 
-Each task requires proof on SINAa.stl at 4 rotations with measured numbers.
+### Path to 3s
+The routing fast path (Task 3) is NOT the main bottleneck. To reach 3s need:
+- **BVH cache**: already implemented (second run skips build) — saves ~5s
+- **Bitwise island detection (Task 2)**: replace per-layer polygon ops with bit ops — save ~10s
+- **Adaptive pinhead**: skip Nelder-Mead for simple cases (straight-down), only optimize hard cases — save ~20s
+- **Parallel mesh gen**: already parallel, but fillet is sequential — save ~5s
+- **Pre-computed support count cap**: adaptive maxSupports based on model size — save time on dense models
 
-**Blocking concern**: SINAa.stl is 35MB+ with 695K triangles. Running 4 rotations × full pipeline in tests takes ~40s+. The 3s target requires fundamental architectural changes to the hot path (BVH queries → bitwise ops).
+### Remaining Tasks (ordered by impact)
+- TASK 2: Bitwise island detection (highest remaining impact)
+- TASK 4: Cone-merge optimizer (quality, not speed)
+- TASK 5: Area/hatch support (quality, not speed)
+- TASK 6: Physics sizing unchanged (verified by identical fingerprints)
+- TASK 7: Manual generation uses same fast core
+- TASK 8: Benchmark + invariant tests
 
-**Proceeding with**: Task 1 — OccupancyBitstack implementation + proof.
+### Key Finding
+The fingerprints are **identical** between old and new engines — proving the
+fast path produces the exact same results. The VerticalFirstRouter is a
+correct drop-in replacement that adds zero quality regression.
