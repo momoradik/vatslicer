@@ -2017,7 +2017,8 @@ export default function StlImport() {
                 const url = URL.createObjectURL(blob)
                 const a = document.createElement('a')
                 a.href = url
-                a.download = `print.${fmt === 'sl1' ? 'sl1' : fmt}`
+                const baseName = models[0]?.fileName?.replace(/\.[^.]+$/, '') ?? 'print'
+                a.download = `${baseName}.${fmt}`
                 a.click()
                 URL.revokeObjectURL(url)
               } catch (err) { console.error('Export failed:', err) }
