@@ -706,7 +706,7 @@ public sealed class SupportV2Controller : ControllerBase
         if (stlFile is null) return BadRequest("STL required.");
         byte[] data; using (var ms = new MemoryStream()) { await stlFile.CopyToAsync(ms, ct); data = ms.ToArray(); }
         var mesh = StlMesh.FromFile(data, stlFile.FileName);
-        var warnings = Analysis.SuctionCupDetector.Detect(mesh);
+        var warnings = HybridSlicer.Infrastructure.Resin.Analysis.SuctionCupDetector.Detect(mesh);
         return Ok(new
         {
             engine = "suction-check",
