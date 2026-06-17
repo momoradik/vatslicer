@@ -1,6 +1,7 @@
 using HybridSlicer.Application.Interfaces.Repositories;
 using HybridSlicer.Infrastructure.Persistence.Repositories;
 using HybridSlicer.Infrastructure.Resin;
+using HybridSlicer.Infrastructure.Resin.Exporters;
 using Microsoft.AspNetCore.Mvc;
 
 namespace HybridSlicer.Api.Controllers;
@@ -276,5 +277,101 @@ public sealed class ResinSliceController : ControllerBase
 
         var layer = layersElem[layerIndex];
         return Content(layer.GetRawText(), "application/json");
+    }
+
+    /// <summary>
+    /// Export a sliced job to a printer-specific file format.
+    /// Supported formats: ctb, cbddlp, photon, sl1, zip
+    /// </summary>
+    [HttpGet("{jobId}/export/{format}")]
+    public async Task<IActionResult> Export(string jobId, string format, CancellationToken ct)
+    {
+        var exporter = SliceExporterFactory.GetExporter(format);
+        if (exporter == null)
+            return BadRequest($"Unsupported format: {format}. Supported: {string.Join(", ", SliceExporterFactory.SupportedFormats.Select(f => f.format))}");
+
+        var jobDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Fabrium", "slice-jobs", jobId);
+
+        if (!Directory.Exists(jobDir))
+            return NotFound($"Job {jobId} not found.");
+
+        // Read slice metadata
+        var metaFile = Path.Combine(jobDir, "slice_data.json");
+        if (!System.IO.File.Exists(metaFile))
+            return NotFound("Slice data not found. Run slice first.");
+
+        var metaJson = await System.IO.File.ReadAllTextAsync(metaFile, ct);
+        using var doc = System.Text.Json.JsonDocument.Parse(metaJson);
+        var root = doc.RootElement;
+
+        // Build export config from metadata
+        int resX = root.TryGetProperty("resolutionX", out var rx) ? rx.GetInt32() : 1920;
+        int resY = root.TryGetProperty("resolutionY", out var ry) ? ry.GetInt32() : 1080;
+        float layerH = root.TryGetProperty("layerHeightMm", out var lh) ? lh.GetSingle() : 0.05f;
+        float exposure = root.TryGetProperty("normalExposureMs", out var ne) ? ne.GetSingle() / 1000f : 2.0f;
+        float bottomExposure = root.TryGetProperty("bottomExposureMs", out var be) ? be.GetSingle() / 1000f : 30f;
+        int bottomLayers = root.TryGetProperty("bottomLayerCount", out var bl) ? bl.GetInt32() : 4;
+        float liftDist = root.TryGetProperty("liftDistanceMm", out var ld) ? ld.GetSingle() : 5f;
+        float liftSpeed = root.TryGetProperty("liftSpeedMmPerMin", out var ls) ? ls.GetSingle() : 120f;
+
+        var config = new SliceExportConfig
+        {
+            ResolutionX = resX,
+            ResolutionY = resY,
+            BedWidthMm = root.TryGetProperty("bedWidthMm", out var bw) ? bw.GetSingle() : 192f,
+            BedDepthMm = root.TryGetProperty("bedDepthMm", out var bd) ? bd.GetSingle() : 120f,
+            BedHeightMm = 250f,
+            MachineName = root.TryGetProperty("machineName", out var mn) ? mn.GetString() ?? "VATSlicer" : "VATSlicer",
+            LayerHeightMm = layerH,
+            BottomLayerCount = bottomLayers,
+            ExposureTimeS = exposure,
+            BottomExposureTimeS = bottomExposure,
+            LiftDistanceMm = liftDist,
+            LiftSpeedMmPerMin = liftSpeed,
+            RetractSpeedMmPerMin = liftSpeed * 2,
+            LightOffDelayS = 1.0f,
+            BottomLiftDistanceMm = liftDist * 1.5f,
+            BottomLiftSpeedMmPerMin = liftSpeed * 0.5f,
+            TotalLayers = 0, // set below
+        };
+
+        // Collect layer PNG files
+        var layerFiles = Directory.GetFiles(jobDir, "layer_*.png")
+            .OrderBy(f => f)
+            .ToList();
+
+        if (layerFiles.Count == 0)
+            return NotFound("No layer images found.");
+
+        config = config with { TotalLayers = layerFiles.Count };
+
+        var layerImages = new List<byte[]>(layerFiles.Count);
+        foreach (var lf in layerFiles)
+        {
+            ct.ThrowIfCancellationRequested();
+            layerImages.Add(await System.IO.File.ReadAllBytesAsync(lf, ct));
+        }
+
+        // Export
+        var ms = new MemoryStream();
+        exporter.Export(config, layerImages, ms);
+        ms.Position = 0;
+
+        var fileName = $"{Path.GetFileNameWithoutExtension(jobId)}{exporter.FileExtension}";
+        return File(ms, "application/octet-stream", fileName);
+    }
+
+    /// <summary>
+    /// List supported export formats.
+    /// </summary>
+    [HttpGet("formats")]
+    public IActionResult GetFormats()
+    {
+        return Ok(SliceExporterFactory.SupportedFormats.Select(f => new
+        {
+            f.format, f.name, f.extension,
+        }));
     }
 }
