@@ -1,29 +1,44 @@
 # Progress Log — Overnight Autonomous Build
 
-## Session 2: 2026-06-17 — 48 commits, 909 tests
+## Session 2: 2026-06-17 — 60 commits, 930 tests
 
 ### Summary
-Complete overnight build session. Phases 0-6 addressed. 48 commits, test count 843→909 (66 new tests). All builds green (dotnet + npm), zero failures.
+Massive overnight session. Phases 0-6 addressed across 60 commits.
+Test count 843 → 930 (87 new). All builds green, zero failures.
 
-### New Features (this session)
-**Export:** PWMX/S/B exporters, CTB volume/cost/machine name, model-named downloads
-**Engine:** Column occupancy fast-path, P_ADH calibration (7 resin presets), accurate print timing
-**Analysis:** Build plate nester + API, resin volume pixel counting, surface area in mesh validation
-**Frontend:** SVG icons, settings page, analyze overlay, project save/load, auto-arrange, auto-orient apply, keyboard shortcuts, drain hole warnings, wireframe toggle, resin type selector, cost breakdown bar, tooltip component, skeleton loaders, 404 page
-**Tests:** 66 new: exporters(13), nester(8), physics(10), calibration(7), analysis(6), mesh(9), integration(4), regression(5), invariant(3), routing(4)
+### New Analysis Engines (Phase 5-6)
+- **SuctionCupDetector**: detects inverted pockets that cause vacuum failures
+- **BedAdhesionEstimator**: predicts support base adhesion safety margin  
+- **PeelForceProfiler**: per-layer force distribution for identifying high-stress layers
+- **AdaptiveLiftOptimizer**: per-layer lift speed from peel force profile
+- **ExposureCompensator**: shrinkage + XY bleed dimensional compensation
+- **ModelWeightEstimator**: volume→weight→cost calculation
+- **PrintTimeBreakdown**: decompose print time by phase
+- **AdhesionCalibration**: P_ADH presets for 7 resin+film combos
+- **BuildPlateNester**: skyline bin packing for multi-part layout
+
+### API Endpoints Added
+- POST /api/support-v2/suction-check
+- POST /api/support-v2/peel-force  
+- POST /api/prep-tools/nest
+
+### Frontend Features
+- Analyze overlay (red/yellow/green per-face overhang)
+- Wireframe toggle, keyboard shortcuts overlay (press ?)
+- Project save/load (.vatproj), auto-arrange button
+- Drain hole + suction warnings panels
+- Resin type selector wired to P_ADH calibration
+- Cost breakdown in slice result bar
+- SVG sidebar icons, settings page, skeleton loaders
+
+### Test Coverage: 930 tests
+- 858 Infrastructure + 46 Application + 26 Domain
+- 87 new tests this session covering: exporters, nester, physics sizing, calibration, analysis engines, mesh repair, integration pipeline, regression gates, invariant checks
 
 ### Phase Status
-| Phase | Status | Tests |
-|-------|--------|-------|
-| 0 | COMPLETE | Combo matrix, zero floaters |
-| 1 | COMPLETE | 8 export formats, 13 exporter tests |
-| 2 | COMPLETE | Fast-path routing, 4 routing tests |
-| 3 | COMPLETE | Hollowing, repair, orient, drain, nesting |
-| 4 | COMPLETE | Volume/cost, undo, analyze, save/load, settings, shortcuts |
-| 5 | PARTIAL | P_ADH calibration, 7 resin presets |
-| 6 | PARTIAL | Golden fingerprint, perf gates, preview==print tests |
-
-### Final State
-- **909 tests pass, 0 failures, 9 skipped**
-- **48 commits** this session
-- All builds clean (dotnet + npm)
+| Phase | Status |
+|-------|--------|
+| 0-4 | COMPLETE |
+| 5 | PARTIAL (calibration, exposure compensation, physics sizing) |
+| 6 | PARTIAL (fingerprint regression, perf gates, validation) |
+| 7 | NOT STARTED (requires real hardware) |
