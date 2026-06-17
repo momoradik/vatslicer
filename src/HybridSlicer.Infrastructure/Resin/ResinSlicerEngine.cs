@@ -181,6 +181,8 @@ public sealed class ResinSlicerEngine
         // Slice each layer — reuse render context for performance
         int emptyLayers = 0;
         int totalIslands = 0;
+        double totalVolumeMm3 = 0;
+        float pixelAreaMm2 = (buildW / resX) * (buildD / resY); // area of one pixel in mm2
         var layerRecords = new List<LayerRecord>(layerCount);
         List<List<System.Numerics.Vector2>> prevPolygons = new();
         using var ctx = new LayerRasterizer.RenderContext(resX, resY, buildW, buildD, aa, mirrorX, mirrorY);
@@ -244,6 +246,19 @@ public sealed class ResinSlicerEngine
                 png = EncodePngFromCtx(ctx);
             }
 
+            // Volume: count non-black pixels in rendered surface → cross-section area
+            {
+                var pixmap = ctx.Surface.PeekPixels();
+                if (pixmap != null)
+                {
+                    int whitePixels = 0;
+                    var span = pixmap.GetPixelSpan<byte>();
+                    for (int px = 0; px < span.Length; px++)
+                        if (span[px] > 0) whitePixels++;
+                    totalVolumeMm3 += whitePixels * pixelAreaMm2 * layerHeight;
+                }
+            }
+
             // Island detection
             int layerIslands = IslandDetector.DetectIslands(polygons, prevPolygons);
             totalIslands += layerIslands;
@@ -289,6 +304,11 @@ public sealed class ResinSlicerEngine
         double bottomLayerTime = bottomExposure / 1000.0 + liftTimePerLayer + printer.LightOffDelayMs / 1000.0;
         double totalTimeSec = bottomLayerCount * bottomLayerTime + (layerCount - bottomLayerCount) * normalLayerTime;
 
+        // Volume-based estimates
+        double resinVolumeMl = totalVolumeMm3 / 1000.0;
+        double resinCostUsd = resinVolumeMl * 0.05; // ~$0.05/ml typical resin
+        double resinWeightG = totalVolumeMm3 * 1.1e-3; // ~1.1 g/cm3 resin density
+
         var meta = new
         {
             layerCount, bottomLayerCount, layerHeightMm = layerHeight,
@@ -300,6 +320,9 @@ public sealed class ResinSlicerEngine
             mirrorX, mirrorY,
             totalHeightMm = totalHeight,
             estimatedPrintTimeMin = totalTimeSec / 60.0,
+            resinVolumeMl = Math.Round(resinVolumeMl, 2),
+            resinWeightG = Math.Round(resinWeightG, 1),
+            estimatedCostUsd = Math.Round(resinCostUsd, 2),
             printerName = printer.Name,
             profileName = profile.Name,
             slicedAt = DateTime.UtcNow,
