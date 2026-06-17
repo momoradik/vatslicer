@@ -298,10 +298,22 @@ public sealed class ResinSlicerEngine
                     i + 1, layerCount, polygons.Count, png.Length);
         }
 
-        // Estimate print time (rough)
-        double liftTimePerLayer = (liftDist * 2) / (liftSpeed / 60.0); // up + down
-        double normalLayerTime = normalExposure / 1000.0 + liftTimePerLayer + printer.LightOffDelayMs / 1000.0;
-        double bottomLayerTime = bottomExposure / 1000.0 + liftTimePerLayer + printer.LightOffDelayMs / 1000.0;
+        // Estimate print time (accurate)
+        // Per layer: exposure + lift (up) + rest + retract (down) + rest + light-off delay
+        double retractSpeed = printer.RetractSpeedMmPerMin > 0 ? printer.RetractSpeedMmPerMin : liftSpeed;
+        double restAfterLift = printer.RestTimeAfterLiftMs / 1000.0;
+        double restAfterRetract = printer.RestTimeAfterRetractMs / 1000.0;
+
+        double normalLiftTime = (liftDist / (liftSpeed / 60.0)) + (liftDist / (retractSpeed / 60.0));
+        double normalLayerTime = normalExposure / 1000.0 + normalLiftTime
+            + restAfterLift + restAfterRetract + printer.LightOffDelayMs / 1000.0;
+
+        double bottomLiftDist = printer.BottomLiftDistanceMm > 0 ? printer.BottomLiftDistanceMm : liftDist;
+        double bottomLiftSpeed = printer.BottomLiftSpeedMmPerMin > 0 ? printer.BottomLiftSpeedMmPerMin : liftSpeed;
+        double bottomLiftTime = (bottomLiftDist / (bottomLiftSpeed / 60.0)) + (bottomLiftDist / (retractSpeed / 60.0));
+        double bottomLayerTime = bottomExposure / 1000.0 + bottomLiftTime
+            + restAfterLift + restAfterRetract + printer.LightOffDelayMs / 1000.0;
+
         double totalTimeSec = bottomLayerCount * bottomLayerTime + (layerCount - bottomLayerCount) * normalLayerTime;
 
         // Volume-based estimates
