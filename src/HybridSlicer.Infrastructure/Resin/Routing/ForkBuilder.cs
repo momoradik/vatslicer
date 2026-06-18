@@ -21,6 +21,8 @@ public static class ForkBuilder
         public float ForkClusterRadiusMm { get; init; } = 4f;
         public int MaxTipsPerFork { get; init; } = 4;
         public float CriticalAngleDeg { get; init; } = 45f;
+        /// <summary>Max fraction of total tips that can be forked (0-1). Rest stay as singles.</summary>
+        public float MaxForkedFraction { get; init; } = 0.4f;
     }
 
     public sealed class ForkResult
@@ -71,6 +73,8 @@ public static class ForkBuilder
 
         var used = new bool[n];
         int clusterId = 0;
+        int totalForkedTips = 0;
+        int maxForkedTips = (int)(validIndices.Count * config.MaxForkedFraction);
 
         // Sort by Z descending so we seed from the highest tips (best fork candidates)
         var sortedValid = validIndices.OrderByDescending(i => contactPoints[i].Z).ToList();
@@ -78,6 +82,7 @@ public static class ForkBuilder
         foreach (int seed in sortedValid)
         {
             if (used[seed]) continue;
+            if (totalForkedTips >= maxForkedTips) break; // cap reached
 
             // Region-grow: start with seed, add nearest unused neighbor within radius
             var cluster = new List<int> { seed };
@@ -192,6 +197,7 @@ public static class ForkBuilder
                 assignment[idx] = clusterId;
                 used[idx] = true;
             }
+            totalForkedTips += cluster.Count;
             forkNodes[clusterId] = forkNode;
             clusterMembers[clusterId] = cluster;
             if (clusterMaxAngle > maxAngle)
