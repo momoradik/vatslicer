@@ -38,8 +38,9 @@ public static class SupportSizer
     /// <summary>Base flare multiplier relative to pillar radius.</summary>
     public const float BASE_FLARE = 2.7f;
 
-    /// <summary>Contact sphere radius = tip radius * this factor.</summary>
-    public const float CONTACT_SPHERE_SCALE = 1.2f;
+    /// <summary>Fixed contact sphere radius (mm). Consistent across all supports,
+    /// like ChiTuBox's "Contact Diameter" setting. 0.25mm = 0.5mm diameter bead.</summary>
+    public const float CONTACT_SPHERE_RADIUS = 0.25f;
 
     /// <summary>Contact penetration depth into the model surface (mm).</summary>
     public const float CONTACT_DEPTH = 0.1f;
@@ -132,7 +133,7 @@ public static class SupportSizer
         // ── 2. TIP: must not tear off in tension ─────────────────────
         float rTip = MathF.Sqrt((F * SF) / (MathF.PI * sigmaBond));
         rTip = MathF.Max(rTip, R_TIP_MIN);
-        float rContactSphere = rTip * CONTACT_SPHERE_SCALE;
+        float rContactSphere = CONTACT_SPHERE_RADIUS;
 
         // ── 3. PILLAR: tensile floor + height stiffness ──────────────
         float rPillarLoad = MathF.Sqrt((F * SF) / (MathF.PI * sigmaResin));
