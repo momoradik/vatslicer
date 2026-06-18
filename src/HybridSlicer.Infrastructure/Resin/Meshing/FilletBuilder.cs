@@ -16,6 +16,9 @@ public static class FilletBuilder
     /// <summary>Minimum angle change (degrees) to trigger filleting.</summary>
     private const float MIN_ANGLE_DEG = 8f;
 
+    /// <summary>Kappa factor for cubic Bezier circular-arc approximation.</summary>
+    private const float KAPPA = 0.5523f; // 4*(sqrt(2)-1)/3
+
     /// <summary>
     /// Process a route's waypoint list and insert arc-subdivided fillets at corners.
     /// Returns a new waypoint list with smooth transitions.
@@ -74,23 +77,37 @@ public static class FilletBuilder
 
             // Fillet reach: fraction of the shorter adjacent segment
             float reach = filletFraction * Math.Min(distIn, distOut);
-            reach = Math.Min(reach, 5f);
+            reach = Math.Min(reach, 8f);
             reach = Math.Max(reach, 0.2f);
+
+            // Angle-adaptive subdivisions: sharper corners get more segments
+            int adaptiveSubs = subdivisions;
+            if (angleDeg > 60f) adaptiveSubs = (int)(subdivisions * 2f);
+            else if (angleDeg > 30f) adaptiveSubs = (int)(subdivisions * 1.5f);
 
             // Points where the arc starts and ends
             var arcStart = curr.Position - dirIn * reach;
             var arcEnd = curr.Position + dirOut * reach;
 
-            // Generate arc waypoints via quadratic Bezier curve
-            for (int s = 0; s <= subdivisions; s++)
+            // Cubic Bezier control points — tangent handles maintain G1 continuity
+            // with smoother curvature distribution than quadratic
+            float handleLen = reach * KAPPA;
+            var p1 = arcStart + dirIn * handleLen;
+            var p2 = arcEnd - dirOut * handleLen;
+
+            // Generate arc waypoints via cubic Bezier curve
+            for (int s = 0; s <= adaptiveSubs; s++)
             {
-                float t = (float)s / subdivisions;
+                float t = (float)s / adaptiveSubs;
                 // Hermite smoothstep for natural distribution
                 float ts = t * t * (3f - 2f * t);
 
-                // Quadratic Bezier: P = (1-t)²·start + 2(1-t)t·corner + t²·end
+                // Cubic Bezier: P = (1-t)³·P0 + 3(1-t)²t·P1 + 3(1-t)t²·P2 + t³·P3
                 float u = 1f - ts;
-                var pos = u * u * arcStart + 2f * u * ts * curr.Position + ts * ts * arcEnd;
+                var pos = u * u * u * arcStart
+                        + 3f * u * u * ts * p1
+                        + 3f * u * ts * ts * p2
+                        + ts * ts * ts * arcEnd;
 
                 // Smooth radius blend
                 float radius = Lerp(prev.Radius, next.Radius, ts) * 0.3f + curr.Radius * 0.7f;
@@ -128,7 +145,7 @@ public static class FilletBuilder
     /// </summary>
     public static List<PillarRouter.Waypoint> GenerateTipCove(
         Vector3 contactPoint, Vector3 routeStart, float tipRadius, float pillarRadius,
-        int subdivisions = 3, float coveHeight = 0.4f)
+        int subdivisions = 4, float coveHeight = 0.7f)
     {
         float totalDist = Vector3.Distance(contactPoint, routeStart);
         if (totalDist < 0.3f || subdivisions < 1)
@@ -137,7 +154,7 @@ public static class FilletBuilder
         var dir = (routeStart - contactPoint) / totalDist;
         if (float.IsNaN(dir.X)) return new List<PillarRouter.Waypoint>();
 
-        float coveLen = Math.Min(coveHeight, totalDist * 0.3f);
+        float coveLen = Math.Min(coveHeight, totalDist * 0.4f);
 
         var result = new List<PillarRouter.Waypoint>();
 
@@ -147,8 +164,8 @@ public static class FilletBuilder
             float tInCove = t * coveLen / totalDist;
             var pos = contactPoint + dir * (totalDist * tInCove);
 
-            // Cove profile: smooth flare from tipRadius outward then back
-            float flare = MathF.Sin(t * MathF.PI) * tipRadius * 0.6f;
+            // Reinforced cove profile: wider shoulder flare for stronger connection
+            float flare = MathF.Sin(t * MathF.PI) * tipRadius * 0.85f;
             float radius = tipRadius + flare * (1f - t) + (pillarRadius - tipRadius) * t;
 
             if (float.IsNaN(pos.X)) continue;

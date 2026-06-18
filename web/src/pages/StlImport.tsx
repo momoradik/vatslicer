@@ -848,6 +848,21 @@ export default function StlImport() {
         const ld = await resinSliceApi.getLayerData(result.jobId)
         setLayerData(ld.layers)
       } catch { setLayerData([]) }
+
+      // Auto-export in printer's chosen format
+      const fmt = activePrinter?.exportFormat
+      if (fmt && result.jobId) {
+        try {
+          const blob = await resinSliceApi.exportJob(result.jobId, fmt)
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          const baseName = models[0]?.fileName?.replace(/\.[^.]+$/, '') ?? 'print'
+          a.download = `${baseName}.${fmt}`
+          a.click()
+          URL.revokeObjectURL(url)
+        } catch (err) { console.error('Auto-export failed:', err) }
+      }
     } catch (err: any) {
       const msg = err?.response?.data?.error || err?.response?.data || err?.message || 'Slicing failed'
       setSliceError(typeof msg === 'string' ? msg : JSON.stringify(msg))

@@ -115,7 +115,7 @@ public static class SupportEngineV2
         /// <summary>Enable smooth fillet blends at support joints (angle changes, fork/tree junctions, tip contact).</summary>
         public bool EnableFillets { get; init; } = true;
         /// <summary>Number of arc subdivisions per fillet corner (more = smoother).</summary>
-        public int FilletSubdivisions { get; init; } = 4;
+        public int FilletSubdivisions { get; init; } = 6;
 
         // Hollow supports
         /// <summary>Enable hollow shell geometry for tall pillars.</summary>
@@ -189,7 +189,10 @@ public static class SupportEngineV2
         /// <summary>Max XY distance between tips to consider forking (mm). 0 = use spacing-relative.</summary>
         public float ForkClusterRadiusMm { get; init; } = 0f;
         /// <summary>Fork cluster radius as a multiple of median tip spacing. Used when ForkClusterRadiusMm=0.</summary>
-        public float ForkClusterRadiusMultiplier { get; init; } = 1.3f;
+        public float ForkClusterRadiusMultiplier { get; init; } = 1.8f;
+        /// <summary>Max strut angle from vertical for fork struts (degrees). More permissive than
+        /// overhang angle because struts are short, supported compression members.</summary>
+        public float ForkStrutAngleDeg { get; init; } = 60f;
 
         // Line contact (dense tips along overhang edges)
         /// <summary>Enable line contact for downward overhang edges. Default OFF.</summary>
@@ -671,7 +674,7 @@ public static class SupportEngineV2
             {
                 ForkClusterRadiusMm = effectiveForkRadius,
                 MaxTipsPerFork = config.MaxTipsPerFork,
-                CriticalAngleDeg = config.OverhangAngleDeg,
+                CriticalAngleDeg = config.ForkStrutAngleDeg,
             });
             Serilog.Log.Information("V2 Step 3b Forks: {Ms}ms ({Forks} forks, {MaxAngle:F1}° max strut angle, {Rejected} collision rejections, radius={Radius:F1}mm)",
                 stepSw.ElapsedMilliseconds, forkResult.ForkNodes.Count, forkResult.MaxStrutAngleDeg, forkResult.CollisionRejections, effectiveForkRadius);

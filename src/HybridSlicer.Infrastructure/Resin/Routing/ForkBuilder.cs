@@ -142,7 +142,7 @@ public static class ForkBuilder
             }
 
             float forkZ = minJunctionZ - Math.Max(requiredDrop, 0.5f);
-            if (forkZ < 1.0f) continue;
+            if (forkZ < 0.3f) continue;
 
             var forkNode = new Vector3(cx, cy, forkZ);
 

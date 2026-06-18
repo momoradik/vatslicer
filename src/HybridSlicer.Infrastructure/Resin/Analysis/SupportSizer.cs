@@ -39,10 +39,10 @@ public static class SupportSizer
     public const float BASE_FLARE = 2.7f;
 
     /// <summary>Contact sphere radius = tip radius * this factor.</summary>
-    public const float CONTACT_SPHERE_SCALE = 1.6f;
+    public const float CONTACT_SPHERE_SCALE = 1.2f;
 
     /// <summary>Contact penetration depth into the model surface (mm).</summary>
-    public const float CONTACT_DEPTH = 0.3f;
+    public const float CONTACT_DEPTH = 0.1f;
 
     /// <summary>Pillar stiffness coefficient: radius grows by this * height to resist sway.</summary>
     public const float K_STIFF = 0.004f;
