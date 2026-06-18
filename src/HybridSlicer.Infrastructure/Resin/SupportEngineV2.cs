@@ -737,11 +737,10 @@ public static class SupportEngineV2
                 var trunkRoute = PillarRouter.Route(forkNode, trunkRadius, bvh, routingConfig);
                 forkTrunkRoutes[cid] = trunkRoute;
 
-                // First tip gets full route (junction → fork → trunk); others get just the strut.
-                // This prevents the trunk being rendered N times with N different fillet patterns.
-                for (int mi = 0; mi < members.Count; mi++)
+                // ALL tips get the full path (strut → fork → trunk) so fillets work at
+                // the strut→trunk angle change. Trunk mesh dedup happens at rendering time.
+                foreach (int idx in members)
                 {
-                    int idx = members[mi];
                     var (tipId, tipPinhead) = pinheads[idx];
                     forkedPinheadIds.Add(tipId);
 
@@ -749,22 +748,15 @@ public static class SupportEngineV2
                     var routeStart = tipPinhead.JunctionPoint;
                     path.Add(new PillarRouter.Waypoint { Position = routeStart, Radius = tipPinhead.BackRadius, Type = "junction" });
                     path.Add(new PillarRouter.Waypoint { Position = forkNode, Radius = trunkRadius, Type = "bridge" });
-
-                    if (mi == 0)
-                    {
-                        // First tip: include the full trunk
-                        path.AddRange(trunkRoute.Path);
-                    }
-                    // Other tips: strut only (junction → fork node), no trunk duplication
+                    path.AddRange(trunkRoute.Path);
 
                     routes.Add((tipId, new PillarRouter.PillarRoute
                     {
                         Path = path,
-                        ReachesGround = mi == 0 && trunkRoute.ReachesGround,
-                        // Strut-only routes anchor at the fork node (structurally connected via shared trunk)
-                        AnchorPoint = mi == 0 ? trunkRoute.AnchorPoint : forkNode,
+                        ReachesGround = trunkRoute.ReachesGround,
+                        AnchorPoint = trunkRoute.AnchorPoint,
                         AnchorNormal = trunkRoute.AnchorNormal,
-                        TotalLength = Vector3.Distance(routeStart, forkNode) + (mi == 0 ? trunkRoute.TotalLength : 0),
+                        TotalLength = Vector3.Distance(routeStart, forkNode) + trunkRoute.TotalLength,
                     }));
                 }
             }
@@ -1646,6 +1638,18 @@ public static class SupportEngineV2
             }
         }
 
+        // Build fork cluster lookup for trunk dedup: only render trunk once per cluster
+        var forkClusterOfId = new Dictionary<string, int>();
+        var trunkRenderedForCluster = new HashSet<int>();
+        if (forkResult != null)
+        {
+            for (int pi = 0; pi < pinheads.Count; pi++)
+            {
+                if (forkResult.ClusterAssignment[pi] >= 0)
+                    forkClusterOfId[pinheads[pi].id] = forkResult.ClusterAssignment[pi];
+            }
+        }
+
         // Generate route frustum geometry for FINAL valid routes only
         foreach (var (id, route) in validRoutes)
         {
@@ -1665,8 +1669,28 @@ public static class SupportEngineV2
 
             float totalPillarHeight = meshPath[0].Position.Z - meshPath[^1].Position.Z;
 
+            // Fork trunk dedup: if this route belongs to a fork cluster, find the
+            // index of the fork node ("bridge" waypoint) and skip trunk segments
+            // for all but the first tip that renders this cluster's trunk.
+            bool skipTrunk = false;
+            int forkBridgeIdx = -1;
+            if (forkClusterOfId.TryGetValue(id, out int myCluster))
+            {
+                // Find the bridge waypoint (fork node) in the mesh path
+                for (int fi = 0; fi < meshPath.Count; fi++)
+                {
+                    if (meshPath[fi].Type == "bridge") { forkBridgeIdx = fi; break; }
+                }
+                if (!trunkRenderedForCluster.Add(myCluster))
+                    skipTrunk = true; // another tip already rendered this trunk
+            }
+
             for (int i = 0; i < meshPath.Count - 1; i++)
             {
+                // Skip trunk segments (after fork node) if another tip already rendered them
+                if (skipTrunk && forkBridgeIdx >= 0 && i >= forkBridgeIdx)
+                    continue;
+
                 var wp1 = meshPath[i];
                 var wp2 = meshPath[i + 1];
                 float segHeight = Vector3.Distance(wp1.Position, wp2.Position);
