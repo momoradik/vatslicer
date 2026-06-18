@@ -1496,15 +1496,39 @@ public static class SupportEngineV2
         }
 
         // A1: Filter braces — keep only those where BOTH endpoints are in the final valid set
+        // AND not between supports that share a fork trunk (already connected)
         if (interconnections.Count > 0)
         {
+            // Build fork cluster lookup: validRoutes index → cluster ID (-1 if not forked)
+            var forkClusterByRouteIdx = new int[validRoutes.Count];
+            Array.Fill(forkClusterByRouteIdx, -1);
+            if (forkResult != null)
+            {
+                for (int ri = 0; ri < validRoutes.Count; ri++)
+                {
+                    var rid = validRoutes[ri].id;
+                    // Find this ID in the pinheads list to get its fork assignment
+                    for (int pi = 0; pi < pinheads.Count; pi++)
+                    {
+                        if (pinheads[pi].id == rid && forkResult.ClusterAssignment[pi] >= 0)
+                        {
+                            forkClusterByRouteIdx[ri] = forkResult.ClusterAssignment[pi];
+                            break;
+                        }
+                    }
+                }
+            }
+
             int bracesBefore = interconnections.Count;
             interconnections = interconnections.Where(c =>
                 c.PillarA >= 0 && c.PillarA < validRoutes.Count &&
-                c.PillarB >= 0 && c.PillarB < validRoutes.Count)
+                c.PillarB >= 0 && c.PillarB < validRoutes.Count &&
+                // Skip braces between supports in the same fork cluster
+                !(forkClusterByRouteIdx[c.PillarA] >= 0 &&
+                  forkClusterByRouteIdx[c.PillarA] == forkClusterByRouteIdx[c.PillarB]))
                 .ToList();
             if (interconnections.Count < bracesBefore)
-                Serilog.Log.Warning("Filtered {Dropped} orphan braces (out-of-range indices)", bracesBefore - interconnections.Count);
+                Serilog.Log.Information("Filtered {Dropped} braces (orphan or same-fork cluster)", bracesBefore - interconnections.Count);
         }
         Serilog.Log.Information("V2 Step 7c Interconnect: {Ms}ms ({Count} connections)", stepSw.ElapsedMilliseconds, interconnections.Count);
         stepSw.Restart();
