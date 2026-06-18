@@ -189,7 +189,7 @@ public static class SupportEngineV2
         /// <summary>Max XY distance between tips to consider forking (mm). 0 = use spacing-relative.</summary>
         public float ForkClusterRadiusMm { get; init; } = 0f;
         /// <summary>Fork cluster radius as a multiple of median tip spacing. Used when ForkClusterRadiusMm=0.</summary>
-        public float ForkClusterRadiusMultiplier { get; init; } = 1.8f;
+        public float ForkClusterRadiusMultiplier { get; init; } = 1.5f;
         /// <summary>Max strut angle from vertical for fork struts (degrees). More permissive than
         /// overhang angle because struts are short, supported compression members.</summary>
         public float ForkStrutAngleDeg { get; init; } = 60f;
@@ -732,33 +732,38 @@ public static class SupportEngineV2
                 float sumR2 = 0;
                 foreach (int idx in members)
                     sumR2 += pinheads[idx].pinhead.BackRadius * pinheads[idx].pinhead.BackRadius;
-                float trunkRadius = MathF.Max(MathF.Sqrt(sumR2), config.PillarRadiusMm * 2f); // at least 2× normal pillar
+                float trunkRadius = MathF.Max(MathF.Sqrt(sumR2), config.PillarRadiusMm * 1.3f); // at least 1.3× normal pillar
 
                 var trunkRoute = PillarRouter.Route(forkNode, trunkRadius, bvh, routingConfig);
                 forkTrunkRoutes[cid] = trunkRoute;
 
-                // For each tip in the fork, build route: junction → strut → fork node → trunk
-                foreach (int idx in members)
+                // First tip gets full route (junction → fork → trunk); others get just the strut.
+                // This prevents the trunk being rendered N times with N different fillet patterns.
+                for (int mi = 0; mi < members.Count; mi++)
                 {
+                    int idx = members[mi];
                     var (tipId, tipPinhead) = pinheads[idx];
                     forkedPinheadIds.Add(tipId);
 
                     var path = new List<PillarRouter.Waypoint>();
-                    // Junction at the tip
                     var routeStart = tipPinhead.JunctionPoint;
                     path.Add(new PillarRouter.Waypoint { Position = routeStart, Radius = tipPinhead.BackRadius, Type = "junction" });
-                    // Strut from junction to fork node
                     path.Add(new PillarRouter.Waypoint { Position = forkNode, Radius = trunkRadius, Type = "bridge" });
-                    // Append trunk
-                    path.AddRange(trunkRoute.Path);
+
+                    if (mi == 0)
+                    {
+                        // First tip: include the full trunk
+                        path.AddRange(trunkRoute.Path);
+                    }
+                    // Other tips: strut only (junction → fork node), no trunk duplication
 
                     routes.Add((tipId, new PillarRouter.PillarRoute
                     {
                         Path = path,
-                        ReachesGround = trunkRoute.ReachesGround,
+                        ReachesGround = mi == 0 && trunkRoute.ReachesGround,
                         AnchorPoint = trunkRoute.AnchorPoint,
                         AnchorNormal = trunkRoute.AnchorNormal,
-                        TotalLength = Vector3.Distance(routeStart, forkNode) + trunkRoute.TotalLength,
+                        TotalLength = Vector3.Distance(routeStart, forkNode) + (mi == 0 ? trunkRoute.TotalLength : 0),
                     }));
                 }
             }

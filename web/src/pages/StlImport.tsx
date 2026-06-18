@@ -465,6 +465,7 @@ export default function StlImport() {
   const [spacing, setSpacing]         = useState(_savedSpacing)
   const [showSettings, setShowSettings] = useState(false)
   const [analyzeMode, setAnalyzeMode] = useState(false)
+  const [clipZ, setClipZ] = useState<number | null>(null)
   const [wireframeMode, setWireframeMode] = useState(false)
   const [drainHoles, setDrainHoles] = useState<{ x: number; y: number; z: number; reason: string; trapVolumeMm3: number }[]>([])
 
@@ -2149,7 +2150,7 @@ export default function StlImport() {
             onDrop={handleDrop}
           >
             {models.length > 0 ? (
-              <>
+              <div className="flex w-full h-full">
                 <StlViewer
                   ref={viewerRef}
                   models={models}
@@ -2190,6 +2191,7 @@ export default function StlImport() {
                   raftData={selectedPrep.raft}
                   skirtData={selectedPrep.skirt}
                   analyzeMode={analyzeMode}
+                  clipZ={clipZ}
                 />
                 {/* Viewer toolbar */}
                 <div className="absolute bottom-3 right-3 flex items-center gap-2">
@@ -2230,7 +2232,35 @@ export default function StlImport() {
                     <input type="file" accept=".stl,.obj,.3mf" multiple className="hidden" onChange={handleFileInput} />
                   </label>
                 </div>
-              </>
+                {/* Z-section slider */}
+                <div className="flex flex-col items-center justify-between py-2 px-1 select-none"
+                  style={{ width: 28 }}>
+                  <span className="text-[8px] text-gray-500 rotate-180" style={{ writingMode: 'vertical-rl' }}>
+                    {clipZ != null ? `${clipZ.toFixed(1)}mm` : 'Section'}
+                  </span>
+                  <input type="range"
+                    min={0}
+                    max={(() => {
+                      const maxH = models.reduce((mx, m) => Math.max(mx, (m.size?.z ?? 0) * (m.transform?.scaleX ?? 1)), 0)
+                      return Math.max(maxH, buildVolume.height)
+                    })()}
+                    step={0.1}
+                    value={clipZ ?? (() => {
+                      const maxH = models.reduce((mx, m) => Math.max(mx, (m.size?.z ?? 0) * (m.transform?.scaleX ?? 1)), 0)
+                      return Math.max(maxH, buildVolume.height)
+                    })()}
+                    onChange={e => {
+                      const v = parseFloat(e.target.value)
+                      const maxH = models.reduce((mx, m) => Math.max(mx, (m.size?.z ?? 0) * (m.transform?.scaleX ?? 1)), 0)
+                      const top = Math.max(maxH, buildVolume.height)
+                      setClipZ(v >= top - 0.05 ? null : v)
+                    }}
+                    className="h-full accent-teal-500"
+                    style={{ writingMode: 'vertical-lr', direction: 'rtl', width: 16 }}
+                  />
+                  <span className="text-[8px] text-gray-500">0</span>
+                </div>
+              </div>
             ) : (
               <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-500 gap-3 select-none">
                 <svg className="w-14 h-14 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">

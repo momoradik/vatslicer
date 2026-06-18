@@ -117,6 +117,8 @@ interface Props {
   analyzeMode?: boolean
   /** Overhang angle threshold in degrees (default 45) */
   analyzeAngleDeg?: number
+  /** Z-section clipping plane height (mm in print space). null = no clipping. */
+  clipZ?: number | null
 }
 
 // ── Coordinate-space helpers ──────────────────────────────────────────────────
@@ -222,6 +224,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     skirtData,
     analyzeMode,
     analyzeAngleDeg = 45,
+    clipZ,
   },
   ref,
 ) {
@@ -233,6 +236,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
   const animIdRef  = useRef(0)
 
   const buildBoxRef = useRef<THREE.LineSegments | null>(null)
+  const clipPlaneRef = useRef<THREE.Plane>(new THREE.Plane(new THREE.Vector3(0, -1, 0), 0))
   const bedMeshRef  = useRef<THREE.Mesh | null>(null)
   const boxHelperRef = useRef<{ helper: THREE.Box3Helper; box: THREE.Box3 } | null>(null)
 
@@ -539,6 +543,7 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
     renderer.setSize(mount.clientWidth, mount.clientHeight)
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)) // cap at 2× to prevent 4K overdraw
     renderer.shadowMap.enabled = false // shadows re-render the scene — disable for performance
+    renderer.localClippingEnabled = true
     mount.appendChild(renderer.domElement)
     renderer.domElement.dataset.supportEditMode = supportEditMode ?? 'none'
     rendererRef.current = renderer
@@ -1675,6 +1680,32 @@ const StlViewer = forwardRef<StlViewerHandle, Props>(function StlViewer(
       'cell' // paint modes
     return () => { el.style.cursor = '' }
   }, [supportEditMode, sceneReady])
+
+  // ── Z-section clipping plane ──────────────────────────────────────────────
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+
+    const plane = clipPlaneRef.current
+    const active = clipZ != null && clipZ < Infinity
+
+    if (active) {
+      // Three.js Y-up: print Z → three Y. Plane normal (0,-1,0) clips above Y=clipZ
+      plane.set(new THREE.Vector3(0, -1, 0), clipZ!)
+    }
+
+    scene.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) {
+        const mat = (obj as THREE.Mesh).material
+        const mats = Array.isArray(mat) ? mat : [mat]
+        for (const m of mats) {
+          if (m && 'clippingPlanes' in m) {
+            ;(m as THREE.Material).clippingPlanes = active ? [plane] : []
+          }
+        }
+      }
+    })
+  }, [clipZ])
 
   return <div ref={mountRef} className={`w-full h-full ${className}`} />
 })
