@@ -761,7 +761,8 @@ public static class SupportEngineV2
                     {
                         Path = path,
                         ReachesGround = mi == 0 && trunkRoute.ReachesGround,
-                        AnchorPoint = trunkRoute.AnchorPoint,
+                        // Strut-only routes anchor at the fork node (structurally connected via shared trunk)
+                        AnchorPoint = mi == 0 ? trunkRoute.AnchorPoint : forkNode,
                         AnchorNormal = trunkRoute.AnchorNormal,
                         TotalLength = Vector3.Distance(routeStart, forkNode) + (mi == 0 ? trunkRoute.TotalLength : 0),
                     }));
