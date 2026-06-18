@@ -93,8 +93,8 @@ public static class SupportEngineV2
 
         // Interconnections
         public bool EnableInterconnections { get; init; } = true;
-        public float InterconnectDistMm { get; init; } = 10f;
-        public float InterconnectIntervalMm { get; init; } = 10f;
+        public float InterconnectDistMm { get; init; } = 50f;
+        public float InterconnectIntervalMm { get; init; } = 5f;
         public float StrutRadiusMm { get; init; } = 0.3f;
         /// <summary>Reinforcement mode: None, Pairwise (default), Triangular, Global.</summary>
         public ReinforcementMode ReinforcementMode { get; init; } = ReinforcementMode.Pairwise;

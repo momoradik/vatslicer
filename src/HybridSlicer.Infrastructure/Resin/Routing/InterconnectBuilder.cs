@@ -108,7 +108,7 @@ public static class InterconnectBuilder
         pairs.Sort((a, b) => a.dist.CompareTo(b.dist));
 
         // Total brace cap: prevent explosion on dense support arrays
-        int maxTotalBraces = Math.Min(n * 2, 200);
+        int maxTotalBraces = Math.Max(n * 3, 50);
 
         // Build connections: nearest pairs first
         foreach (var (a, b, dist) in pairs)
